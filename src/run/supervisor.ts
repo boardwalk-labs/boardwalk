@@ -48,7 +48,13 @@ import {
   type IpcErrorShape,
   type RunEventBody,
 } from "./ipc.js";
-import { prepareRunDir, type RunDirs } from "./run_dir.js";
+import {
+  hydrateWorkspace,
+  persistRoot,
+  persistWorkspace,
+  prepareRunDir,
+  type RunDirs,
+} from "./run_dir.js";
 
 export interface SupervisorOptions {
   store: Store;
@@ -252,11 +258,22 @@ export class RunSupervisor {
     this.setStatus(run.id, entry, "pending");
 
     let firstStartedAt = run.startedAt;
+    // Hydrate persistent dirs only into a NEVER-started workspace: a crash-restart (and an
+    // engine-restart resume) must keep the workspace as the crashed pass left it.
+    let hydrated = run.startedAt !== null;
     for (;;) {
       if (entry.cancelRequested) {
         return this.finishRun(run.id, entry, "cancelled", {});
       }
       const dirs = prepareRunDir(this.dataDir, run.id, workflow.program);
+      if (!hydrated) {
+        hydrated = true;
+        hydrateWorkspace(
+          persistRoot(this.dataDir, workflow.id),
+          manifest.workspace?.persist,
+          dirs.workspaceDir,
+        );
+      }
       const startedAt = firstStartedAt ?? this.clock.now();
       this.store.updateRunStatus(run.id, "running", { startedAt });
       this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "running" });
@@ -275,6 +292,13 @@ export class RunSupervisor {
           // A completion racing a cancel request coerces to cancelled — `cancelling` must
           // never land on `completed` (the output event above is still preserved).
           if (entry.cancelRequested) return this.finishRun(run.id, entry, "cancelled", {});
+          // Persist-back happens at SUCCESSFUL run end only (failed/cancelled runs must not
+          // overwrite the durable state with a half-finished workspace).
+          persistWorkspace(
+            persistRoot(this.dataDir, workflow.id),
+            manifest.workspace?.persist,
+            dirs.workspaceDir,
+          );
           return this.finishRun(run.id, entry, "completed", {
             output: result.outputDeclared ? result.output : null,
           });

@@ -120,7 +120,7 @@ function rejectUnimplementedCapabilities(opts: AgentOptions | undefined): void {
 /**
  * Schema mode: parse the model's final text as JSON; a non-JSON answer fails the run (the
  * documented contract). Code fences are stripped first — models add them despite instructions.
- * v0 parity note: like Boardwalk Cloud today, the schema drives the PROMPT and the JSON parse;
+ * v0 parity note: like the Boardwalk platform today, the schema drives the PROMPT and the JSON parse;
  * structural validation against the schema itself is a later, cross-engine decision.
  */
 function parseSchemaOutput(text: string): unknown {

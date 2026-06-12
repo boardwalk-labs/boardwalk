@@ -12,7 +12,15 @@
 // makes that specifier resolve — and Node's default symlink realpathing collapses it onto the
 // engine's own copy, giving one shared instance with no bundler in the engine at all.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { z } from "zod";
@@ -54,6 +62,64 @@ export function prepareRunDir(dataDir: string, runId: string, program: string): 
 /** Remove a run directory (terminal-run cleanup; never called on active runs). */
 export function removeRunDir(dataDir: string, runId: string): void {
   rmSync(join(dataDir, "runs", runId), { recursive: true, force: true });
+}
+
+// ----------------------------------------------------------------------------
+// Workspace persistence (manifest workspace.persist — SPEC §2.3)
+//
+// The durable store is a per-WORKFLOW directory tree under <dataDir>/persist/<workflowId>:
+// hydrated into the run's workspace at FIRST start (a crash-restart keeps the workspace as
+// the crashed pass left it — re-hydrating would erase exactly the mid-run writes the
+// restarted pass uses to recover), and written back wholesale at SUCCESSFUL run end only.
+// Concurrent runs sharing a persistent dir are last-writer-wins by contract; persist path
+// segments are already schema-validated by the SDK (no `..`/`.`/empty — one validator).
+// ----------------------------------------------------------------------------
+
+export type PersistSelection = boolean | readonly string[] | undefined;
+
+/** The workflow's durable persistence root. */
+export function persistRoot(dataDir: string, workflowId: string): string {
+  return join(dataDir, "persist", workflowId);
+}
+
+/** Copy persisted state into a fresh run workspace (first attempt only — see above). */
+export function hydrateWorkspace(
+  root: string,
+  persist: PersistSelection,
+  workspaceDir: string,
+): void {
+  if (persist === undefined || persist === false) return;
+  if (persist === true) {
+    if (existsSync(root)) cpSync(root, workspaceDir, { recursive: true });
+    return;
+  }
+  for (const dir of persist) {
+    const source = join(root, dir);
+    if (existsSync(source)) cpSync(source, join(workspaceDir, dir), { recursive: true });
+  }
+}
+
+/** Replace the durable store with the run's final state (successful runs only). */
+export function persistWorkspace(
+  root: string,
+  persist: PersistSelection,
+  workspaceDir: string,
+): void {
+  if (persist === undefined || persist === false) return;
+  if (persist === true) {
+    rmSync(root, { recursive: true, force: true });
+    cpSync(workspaceDir, root, { recursive: true });
+    return;
+  }
+  for (const dir of persist) {
+    const source = join(workspaceDir, dir);
+    const target = join(root, dir);
+    rmSync(target, { recursive: true, force: true });
+    if (existsSync(source)) {
+      mkdirSync(dirname(target), { recursive: true });
+      cpSync(source, target, { recursive: true });
+    }
+  }
 }
 
 let cachedSdkDir: string | null = null;

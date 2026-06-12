@@ -88,8 +88,8 @@ export function resolveModel(args: ResolveArgs): ResolvedModel {
       "MODEL_UNRESOLVED",
       "agent() was called without a model and this engine has no default model configured.",
       'Pass { model: "<provider>/<model-id>" } (e.g. "anthropic/claude-sonnet-4-5"), or set ' +
-        "inference.default_model in the engine config. Automatic model routing is a Boardwalk " +
-        "Cloud capability.",
+        "inference.default_model in the engine config. Automatic model routing is a hosted-" +
+        "Boardwalk capability.",
     );
   }
 
@@ -118,7 +118,7 @@ export function resolveModel(args: ResolveArgs): ResolvedModel {
   if (provider === "boardwalk") {
     throw new EngineError(
       "UNSUPPORTED",
-      'The "boardwalk" provider is Boardwalk Cloud managed inference — this engine calls ' +
+      'The "boardwalk" provider is the Boardwalk platform managed inference — this engine calls ' +
         "providers directly with your own keys.",
       'Use a direct provider ("anthropic/…", "openai/…") or configure one in inference.providers.',
     );

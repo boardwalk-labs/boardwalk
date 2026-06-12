@@ -391,6 +391,100 @@ describe("RunSupervisor", () => {
     expect(row.status).toBe("completed");
     expect(row.output).toBe("secret-value-42");
   }, 20_000);
+
+  describe("workspace.persist", () => {
+    // Reads state/value.txt if present, writes input.write to it, outputs what it read.
+    const COUNTER_PROGRAM = `
+      import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+      import { input, output } from "@boardwalk/workflow";
+      const previous = existsSync("state/value.txt") ? readFileSync("state/value.txt", "utf8") : null;
+      mkdirSync("state", { recursive: true });
+      writeFileSync("state/value.txt", input.write);
+      output({ read: previous });
+    `;
+
+    it("declared dirs round-trip across runs (hydrate at start, persist at success)", async () => {
+      const f = fixture();
+      f.deploy("stateful", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
+
+      const first = await f.supervisor.supervise(f.startRun("stateful", { write: "alpha" }));
+      expect(first.status).toBe("completed");
+      expect(first.output).toEqual({ read: null });
+
+      const second = await f.supervisor.supervise(f.startRun("stateful", { write: "beta" }));
+      expect(second.output).toEqual({ read: "alpha" });
+
+      const third = await f.supervisor.supervise(f.startRun("stateful", { write: "gamma" }));
+      expect(third.output).toEqual({ read: "beta" });
+    }, 30_000);
+
+    it("a FAILED run does not overwrite the durable state", async () => {
+      const f = fixture();
+      f.deploy("stateful", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
+      await f.supervisor.supervise(f.startRun("stateful", { write: "keep-me" }));
+
+      // Redeploy the SAME workflow (same durable root) with a program that writes then dies.
+      f.deploy(
+        "stateful",
+        `import { mkdirSync, writeFileSync } from "node:fs";
+         mkdirSync("state", { recursive: true });
+         writeFileSync("state/value.txt", "half-finished");
+         throw new Error("dies after writing");`,
+        { workspace: { persist: ["state"] } },
+      );
+      const failed = await f.supervisor.supervise(f.startRun("stateful", {}));
+      expect(failed.status).toBe("failed");
+
+      // Restore the reader program; it must still see the value from the SUCCESSFUL run.
+      f.deploy("stateful", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
+      const after = await f.supervisor.supervise(f.startRun("stateful", { write: "next" }));
+      expect(after.output).toEqual({ read: "keep-me" });
+    }, 30_000);
+
+    it("persist: true round-trips the whole workspace", async () => {
+      const f = fixture();
+      f.deploy(
+        "whole-workspace",
+        `import { existsSync, readFileSync, writeFileSync } from "node:fs";
+         import { output } from "@boardwalk/workflow";
+         const seen = existsSync("anywhere.txt") ? readFileSync("anywhere.txt", "utf8") : null;
+         writeFileSync("anywhere.txt", "wrote-once");
+         output({ seen });`,
+        { workspace: { persist: true } },
+      );
+      const first = await f.supervisor.supervise(f.startRun("whole-workspace"));
+      expect(first.output).toEqual({ seen: null });
+      const second = await f.supervisor.supervise(f.startRun("whole-workspace"));
+      expect(second.output).toEqual({ seen: "wrote-once" });
+    }, 30_000);
+
+    it("a crash-restart keeps the crashed pass's workspace (no re-hydration)", async () => {
+      const f = fixture();
+      // Seed the durable store with value "A" via a successful run.
+      f.deploy("resumer", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
+      await f.supervisor.supervise(f.startRun("resumer", { write: "A" }));
+
+      // Crash AFTER overwriting the persisted file. The restarted pass must see "B" (the
+      // crashed pass's write) — re-hydration would reset it to "A".
+      f.deploy(
+        "resumer",
+        `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+         import { output } from "@boardwalk/workflow";
+         if (!existsSync("crashed-once")) {
+           mkdirSync("state", { recursive: true });
+           writeFileSync("state/value.txt", "B");
+           writeFileSync("crashed-once", "1");
+           process.exit(5);
+         }
+         output({ resumedWith: readFileSync("state/value.txt", "utf8") });`,
+        { workspace: { persist: ["state"] } },
+      );
+      const row = await f.supervisor.supervise(f.startRun("resumer", {}));
+      expect(row.status).toBe("completed");
+      expect(row.restarts).toBe(1);
+      expect(row.output).toEqual({ resumedWith: "B" });
+    }, 30_000);
+  });
 });
 
 async function waitFor(cond: () => boolean, timeoutMs = 10_000): Promise<void> {
