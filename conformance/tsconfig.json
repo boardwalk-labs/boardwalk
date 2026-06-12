@@ -1,0 +1,10 @@
+{
+  // Type-checking for the conformance suite (the repo's main tsconfig is rooted at src/ for
+  // the package build; this one exists so editors and `tsc -p conformance` cover these files).
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true
+  },
+  "include": ["."]
+}

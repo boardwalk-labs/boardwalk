@@ -1,0 +1,285 @@
+// The conformance harness — THE ENGINE-SPECIFIC HALF OF THE SUITE.
+//
+// The conformance suite (SPEC §3, MASTER_SPEC §5.2) is the arbiter of the parity promise: the
+// *.conformance.test.ts files assert observable run behavior through the engine's PUBLIC
+// surface only (deploy, start, wait, cancel, events, store reads). Everything that knows HOW
+// to stand an engine up lives here: a different engine implementation swaps this factory (and
+// points the inference table at its own endpoint plumbing) and the cases run unchanged — that
+// is the parity point.
+//
+// What this file provides:
+//   - createEngine / makeDataDir: an Engine over a throwaway data dir, with cleanup tracking
+//     (disposeEngines is each file's afterEach). Engines can share a data dir to model an
+//     engine-process restart.
+//   - startFakeProvider: a recording, scriptable OpenAI-compatible provider, so agent() cases
+//     control every model response and can assert exactly what reached the model.
+//   - manualClock: a frozen, advanceable clock for scheduler cases (cron catch-up) — the
+//     suite drives engine.tick() instead of waiting wall-clock hours.
+//   - small read helpers over the persisted event stream (kinds, statuses, cursors).
+
+import http from "node:http";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { expect } from "vitest";
+import { Engine } from "../src/index.js";
+import type { EngineOptions, EventRow, InferenceConfig, RunStatus } from "../src/index.js";
+
+// The engine type doesn't export its Clock interface; derive it from the public options so
+// the harness never reaches into engine internals.
+export type EngineClock = NonNullable<EngineOptions["clock"]>;
+
+// dist/ is built once by vitest.global_setup.ts — the engine spawns the compiled child entry.
+const repoRoot = resolve(fileURLToPath(import.meta.url), "../..");
+const childEntryPath = join(repoRoot, "dist", "run", "child.js");
+
+// ----------------------------------------------------------------------------
+// Engine factory + cleanup tracking
+// ----------------------------------------------------------------------------
+
+const cleanups: (() => void)[] = [];
+
+/** Tear down everything a test created, newest first (engines close before dirs vanish). */
+export function disposeEngines(): void {
+  for (const fn of cleanups.splice(0).reverse()) fn();
+}
+
+/** A data dir a test owns explicitly — for cases that reopen a SECOND engine over the same state. */
+export function makeDataDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), "bw-conformance-"));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+
+export interface EngineHandle {
+  engine: Engine;
+  dataDir: string;
+}
+
+export interface CreateEngineOpts {
+  /** Reuse existing engine state (engine-restart cases). Default: a fresh throwaway dir. */
+  dataDir?: string;
+  /** The engine's secret/env source (what secrets.get resolves against). */
+  env?: Record<string, string>;
+  /** Default model + provider table — point `local` at a fake provider for agent() cases. */
+  inference?: InferenceConfig;
+  clock?: EngineClock;
+  /** Captures engine diagnostics (e.g. cron catch-up notices). */
+  log?: (line: string) => void;
+  maxRestarts?: number;
+}
+
+/**
+ * Stand up an Engine the way an embedding consumer would — only public options. The short
+ * cancel grace keeps cancellation cases fast without changing their observable shape.
+ */
+export function createEngine(opts: CreateEngineOpts = {}): EngineHandle {
+  const ownsDir = opts.dataDir === undefined;
+  const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "bw-conformance-"));
+  const engine = new Engine({
+    dataDir,
+    env: opts.env ?? {},
+    envLabel: ".env (conformance harness)",
+    childEntryPath,
+    cancelGraceMs: 250,
+    ...(opts.inference !== undefined ? { inference: opts.inference } : {}),
+    ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
+    ...(opts.log !== undefined ? { log: opts.log } : {}),
+    ...(opts.maxRestarts !== undefined ? { maxRestarts: opts.maxRestarts } : {}),
+  });
+  cleanups.push(() => {
+    engine.close();
+    if (ownsDir) rmSync(dataDir, { recursive: true, force: true });
+  });
+  return { engine, dataDir };
+}
+
+// ----------------------------------------------------------------------------
+// The fake OpenAI-compatible inference provider
+// ----------------------------------------------------------------------------
+
+export interface FakeProvider {
+  port: number;
+  /** Every request body received, in order — the redaction canary asserts over these. */
+  requests: string[];
+  /** Script the steady-state reply: text + token usage. */
+  respondWith: (text: string, usage: { in: number; out: number }) => void;
+  /** Queue full response bodies served (in order) BEFORE the steady-state reply. */
+  queueResponses: (...bodies: object[]) => void;
+  close: () => Promise<void>;
+}
+
+/**
+ * A minimal OpenAI-compatible endpoint the suite fully controls. Recording requests is what
+ * makes the secret-redaction canary and the "context reached the model" assertions possible
+ * without any real provider.
+ */
+export function startFakeProvider(): Promise<FakeProvider> {
+  const requests: string[] = [];
+  const queue: object[] = [];
+  let reply = { text: "fake-reply", usage: { in: 1, out: 1 } };
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+    req.on("end", () => {
+      requests.push(body);
+      res.setHeader("content-type", "application/json");
+      const queued = queue.shift();
+      res.end(
+        JSON.stringify(
+          queued ?? {
+            choices: [{ finish_reason: "stop", message: { content: reply.text } }],
+            usage: { prompt_tokens: reply.usage.in, completion_tokens: reply.usage.out },
+          },
+        ),
+      );
+    });
+  });
+  return new Promise((resolvePort) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      resolvePort({
+        port,
+        requests,
+        respondWith: (text, usage) => {
+          reply = { text, usage };
+        },
+        queueResponses: (...bodies) => {
+          queue.push(...bodies);
+        },
+        close: () => new Promise((r) => server.close(() => r())),
+      });
+    });
+  });
+}
+
+/** Engine inference config routing the `local/...` model refs at the fake provider. */
+export function localInference(provider: FakeProvider): InferenceConfig {
+  return {
+    default_model: "local/default-test-model",
+    providers: { local: { base_url: `http://127.0.0.1:${String(provider.port)}/v1` } },
+  };
+}
+
+/** An OpenAI-shaped tool-call response body for {@link FakeProvider.queueResponses}. */
+export function toolCallResponse(
+  calls: readonly { id: string; name: string; argsJson: string }[],
+  usage: { in: number; out: number } = { in: 1, out: 1 },
+): object {
+  return {
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: {
+          content: null,
+          tool_calls: calls.map((c) => ({
+            id: c.id,
+            function: { name: c.name, arguments: c.argsJson },
+          })),
+        },
+      },
+    ],
+    usage: { prompt_tokens: usage.in, completion_tokens: usage.out },
+  };
+}
+
+// ----------------------------------------------------------------------------
+// Manual clock (scheduler cases)
+// ----------------------------------------------------------------------------
+
+export interface ManualClock {
+  clock: EngineClock;
+  /** Jump now() forward — the suite never waits wall-clock time for a cron boundary. */
+  advance(ms: number): void;
+}
+
+/**
+ * A frozen, advanceable now() over real timers. Scheduler decisions (cron due-ness, catch-up)
+ * read now(); sleep() backs only incidental waits (cancel grace, loop cadence) where real,
+ * short wall time is fine — the suite drives scheduling via engine.tick(), never the loop.
+ */
+export function manualClock(startMs: number): ManualClock {
+  let now = startMs;
+  const clock: EngineClock = {
+    now: (): number => now,
+    sleep(ms: number, signal?: AbortSignal): Promise<void> {
+      return new Promise((resolveSleep, rejectSleep) => {
+        if (signal?.aborted === true) {
+          rejectSleep(new Error("aborted"));
+          return;
+        }
+        const timer = setTimeout(() => {
+          signal?.removeEventListener("abort", onAbort);
+          resolveSleep();
+        }, ms);
+        const onAbort = (): void => {
+          clearTimeout(timer);
+          rejectSleep(new Error("aborted"));
+        };
+        signal?.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+  };
+  return {
+    clock,
+    advance(ms: number): void {
+      now += ms;
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------
+// Polling + event-stream read helpers
+// ----------------------------------------------------------------------------
+
+export function pause(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/** Poll until `cond` holds — the public way to observe intermediate run states. */
+export async function waitFor(
+  cond: () => boolean,
+  what: string,
+  timeoutMs = 15_000,
+): Promise<void> {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error(`timed out waiting for ${what}`);
+    await pause(25);
+  }
+}
+
+/** Poll engine.store until the run reaches `status`. */
+export async function waitForStatus(
+  engine: Engine,
+  runId: string,
+  status: RunStatus,
+  timeoutMs = 15_000,
+): Promise<void> {
+  await waitFor(
+    () => engine.store.getRun(runId)?.status === status,
+    `run ${runId} to reach "${status}" (currently "${engine.store.getRun(runId)?.status ?? "?"}")`,
+    timeoutMs,
+  );
+}
+
+/** The persisted event kinds of a run, in cursor order. */
+export function kindsOf(engine: Engine, runId: string): string[] {
+  return engine.store.listEvents(runId).map((row) => row.event.kind);
+}
+
+/** The run's lifecycle transitions as the event stream tells them. */
+export function statusesOf(engine: Engine, runId: string): RunStatus[] {
+  return engine.store
+    .listEvents(runId)
+    .flatMap((row) => (row.event.kind === "run_status" ? [row.event.status] : []));
+}
+
+/** Assert the wire-format cursor contract: strictly increasing, no duplicates. */
+export function expectMonotonicCursors(rows: readonly EventRow[]): void {
+  const cursors = rows.map((row) => row.cursor);
+  expect([...cursors].sort((a, b) => a - b)).toEqual(cursors);
+  expect(new Set(cursors).size).toBe(cursors.length);
+}
