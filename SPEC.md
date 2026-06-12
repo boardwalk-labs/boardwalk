@@ -55,7 +55,8 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 
 ### 2.4 Server surface
 
-- **Webhook trigger endpoint** (`POST /hooks/<workflow>/<trigger-id>`) with `token` or `signature` (HMAC) auth per the manifest.
+- **Webhook trigger endpoint** (`POST /hooks/<workflow>/<trigger-id>`) with `token` or `signature` (HMAC) auth per the manifest. `<trigger-id>` is the trigger's zero-based index in `meta.triggers`.
+- **Webhook auth scheme (v0 — this engine's answer to MASTER_SPEC §10's open question):** credentials live in _server_ environment variables named after the workflow (`<NAME>` = workflow name upper-cased, `-` → `_`). `auth: "token"` compares `Authorization: Bearer <token>` (constant-time) against `BOARDWALK_WEBHOOK_TOKEN__<NAME>`; `auth: "signature"` verifies `X-Boardwalk-Signature: sha256=<hex>` as HMAC-SHA256 over the raw request body keyed by `BOARDWALK_WEBHOOK_SECRET__<NAME>`. An unset variable fails closed (503, hint names the exact variable); a bad credential is 401.
 - **Local run log UI + SSE tail** (resume by cursor) and a minimal JSON API (list workflows/runs, trigger manual run, cancel). The SSE endpoint implements **channel subscriptions** (SDK kind→channel mapping, filtered server-side): `?channels=phase,output` for a quiet tail, `?verbose=true` for everything; default `lifecycle + phase + output`. Bound to localhost by default; binding wider is an explicit flag with a warning (no auth story in v1 beyond webhook auth).
 - Config file (`boardwalk.toml` or env): data dir, default model, provider table, bind address.
 

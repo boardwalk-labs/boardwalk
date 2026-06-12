@@ -16,3 +16,4 @@ export type {
 } from "./store/store.js";
 export { EngineError, type EngineErrorCode } from "./errors.js";
 export { isTerminal } from "./run/supervisor.js";
+export { createEngineServer } from "./server/server.js";
