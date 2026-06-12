@@ -1,0 +1,55 @@
+# Publish to npm with provenance on a version tag (v0.1.0 -> @boardwalk-labs/engine@0.1.0).
+# Auth: npm Trusted Publishing via GitHub OIDC (no stored token). Configure the trusted publisher
+# for @boardwalk-labs/engine on npmjs.com: org boardwalk-labs, repo boardwalk-labs/boardwalk,
+# workflow .github/workflows/release.yml.
+#
+# Like the CLI, the engine consumes @boardwalk-labs/workflow; the link: override must be removed
+# (cut over to the npm SDK) before a release. The guard step enforces it.
+#
+# The Docker image (ghcr.io/boardwalk-labs/boardwalk) is Phase 2: once a Dockerfile exists, add a
+# publish-docker job here mirroring runner-images/release.yml (docker/build-push-action +
+# provenance + GITHUB_TOKEN login to ghcr).
+
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish-npm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # npm --provenance (Trusted Publishing)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+      - name: "No link: overrides in a release"
+        run: |
+          if node -p "JSON.stringify(require('./package.json').pnpm?.overrides ?? {})" | grep -q "link:"; then
+            echo "package.json still has a link: override; remove it and lock against the registry first" >&2
+            exit 1
+          fi
+      - run: pnpm install --frozen-lockfile
+      - name: Tag must match package.json version
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME != package.json $PKG_VERSION" >&2
+            exit 1
+          fi
+      - run: pnpm format:check
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+      # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
+      - run: npm install -g npm@latest
+      - run: npm publish --provenance --access public
