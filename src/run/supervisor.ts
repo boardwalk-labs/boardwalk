@@ -30,6 +30,8 @@ import {
 // Why from the store: the SDK defines RunStatus but doesn't re-export it from its root yet;
 // the store derives the identical union from RunEvent and re-exports it.
 import type { RunStatus } from "../store/store.js";
+import { usageUsdMicros } from "../agent/rates.js";
+import { resolveModel, type InferenceConfig } from "../agent/resolve.js";
 import { systemClock, type Clock } from "../clock.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
@@ -39,6 +41,7 @@ import {
   callWorkflowArgsSchema,
   childToParentSchema,
   getSecretArgsSchema,
+  resolveModelArgsSchema,
   writeArtifactArgsSchema,
   type HostMethod,
   type InitMessage,
@@ -62,6 +65,8 @@ export interface SupervisorOptions {
   maxRestarts?: number;
   /** Cooperative-cancellation window before SIGKILL. Default 10s. */
   cancelGraceMs?: number;
+  /** Default model + provider table for agent() leaves. Default: built-ins only, no default model. */
+  inference?: InferenceConfig;
 }
 
 type SpawnResult =
@@ -75,7 +80,8 @@ interface ActiveRun {
   promise: Promise<RunRow>;
   child: ChildProcess | null;
   cancelRequested: boolean;
-  budgetExceeded: boolean;
+  /** Set when a budget kill is in flight — names which budget, for the failure message. */
+  budgetReason: string | null;
   envelope: { turn: number; seq: number };
 }
 
@@ -95,6 +101,7 @@ export class RunSupervisor {
   private readonly clock: Clock;
   private readonly maxRestarts: number;
   private readonly cancelGraceMs: number;
+  private readonly inference: InferenceConfig;
   private readonly active = new Map<string, ActiveRun>();
   private readonly listeners = new Set<(row: EventRow) => void>();
 
@@ -107,6 +114,7 @@ export class RunSupervisor {
     this.clock = opts.clock ?? systemClock;
     this.maxRestarts = opts.maxRestarts ?? 2;
     this.cancelGraceMs = opts.cancelGraceMs ?? 10_000;
+    this.inference = opts.inference ?? {};
   }
 
   /** Subscribe to every stamped run event (the local feed for SSE/log UIs). */
@@ -144,7 +152,7 @@ export class RunSupervisor {
       promise: Promise.resolve(run), // replaced below
       child: null,
       cancelRequested: false,
-      budgetExceeded: false,
+      budgetReason: null,
       envelope: this.resumeEnvelope(runId),
     };
     entry.promise = this.execute(run, entry)
@@ -279,7 +287,9 @@ export class RunSupervisor {
           return this.finishRun(run.id, entry, "failed", {
             error: {
               code: "BUDGET_EXCEEDED",
-              message: `Run exceeded budget.max_duration_seconds (${String(maxSeconds)}s) and was terminated.`,
+              message:
+                entry.budgetReason ??
+                `Run exceeded budget.max_duration_seconds (${String(maxSeconds)}s) and was terminated.`,
             },
           });
         case "crashed": {
@@ -318,6 +328,7 @@ export class RunSupervisor {
       };
 
       if (deadline !== null && deadline - this.clock.now() <= 0) {
+        entry.budgetReason ??= durationBudgetMessage(workflow.manifest);
         settle({ kind: "budget" });
         return;
       }
@@ -338,7 +349,7 @@ export class RunSupervisor {
 
       if (deadline !== null) {
         budgetTimer = setTimeout(() => {
-          entry.budgetExceeded = true;
+          entry.budgetReason ??= durationBudgetMessage(workflow.manifest);
           // Budget breach terminates immediately — enforced, not advisory (CODE_QUALITY §4.3).
           child.kill("SIGKILL");
         }, deadline - this.clock.now());
@@ -391,7 +402,16 @@ export class RunSupervisor {
               });
             break;
           case "emit":
-            this.emitBody(run.id, entry, msg.body);
+            this.emitBody(run.id, entry, msg.body, msg.turnId);
+            break;
+          case "turn_started":
+            // A new agent turn: bump the cursor stride block, then emit its opening frame.
+            entry.envelope.turn += 1;
+            entry.envelope.seq = 0;
+            this.emitBody(run.id, entry, { kind: "turn_started" }, msg.turnId);
+            break;
+          case "report_usage":
+            this.recordUsage(run.id, entry, workflow, msg.modelRef, msg.usage);
             break;
           case "done":
             settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
@@ -405,7 +425,7 @@ export class RunSupervisor {
       child.on("error", () => settle({ kind: "crashed" }));
       child.on("exit", () => {
         entry.child = null;
-        if (entry.budgetExceeded) settle({ kind: "budget" });
+        if (entry.budgetReason !== null) settle({ kind: "budget" });
         else if (entry.cancelRequested) settle({ kind: "cancelled" });
         else settle({ kind: "crashed" });
       });
@@ -427,6 +447,37 @@ export class RunSupervisor {
   // Host calls (the engine side of the SDK bridge)
   // --------------------------------------------------------------------------
 
+  /**
+   * Accumulate a leaf's usage into the run row and enforce token/USD budgets — the supervisor
+   * is the single budget authority, so a multi-leaf run can't out-run its caps by parallelism.
+   */
+  private recordUsage(
+    runId: string,
+    entry: ActiveRun,
+    workflow: WorkflowRow,
+    modelRef: string,
+    usage: { inputTokens?: number | undefined; outputTokens?: number | undefined },
+  ): void {
+    this.store.addRunUsage(runId, {
+      tokensIn: usage.inputTokens ?? 0,
+      tokensOut: usage.outputTokens ?? 0,
+      usdMicros: usageUsdMicros(modelRef, usage),
+    });
+    const budget = workflow.manifest.budget;
+    if (budget === undefined) return;
+    const totals = this.store.getRunUsage(runId);
+    let reason: string | null = null;
+    if (budget.max_tokens !== undefined && totals.tokensIn + totals.tokensOut > budget.max_tokens) {
+      reason = `Run exceeded budget.max_tokens (${String(budget.max_tokens)}) and was terminated.`;
+    } else if (budget.max_usd !== undefined && totals.usdMicros > budget.max_usd * 1_000_000) {
+      reason = `Run exceeded budget.max_usd ($${String(budget.max_usd)}, approximate rates) and was terminated.`;
+    }
+    if (reason !== null && entry.budgetReason === null) {
+      entry.budgetReason = reason;
+      entry.child?.kill("SIGKILL");
+    }
+  }
+
   private async handleHostCall(
     run: RunRow,
     workflow: WorkflowRow,
@@ -437,6 +488,15 @@ export class RunSupervisor {
     switch (method) {
       case "get_secret":
         return this.resolveSecret(workflow.manifest, getSecretArgsSchema.parse(args).name);
+      case "resolve_model": {
+        const a = resolveModelArgsSchema.parse(args);
+        return resolveModel({
+          model: a.model,
+          provider: a.provider,
+          config: this.inference,
+          getEnv: (name) => this.env.get(name) ?? process.env[name],
+        });
+      }
       case "call_workflow": {
         const a = callWorkflowArgsSchema.parse(args);
         const child = this.startChildRun(run.id, a.slug, a.input, a.idempotencyKey);
@@ -583,9 +643,10 @@ export class RunSupervisor {
     runId: string,
     entry: ActiveRun,
     body: RunEventBody | ({ kind: string } & Record<string, unknown>),
+    turnId?: string,
   ): void {
     try {
-      this.stampAndStore(runId, entry.envelope, body);
+      this.stampAndStore(runId, entry.envelope, body, turnId);
     } catch {
       // A malformed body from the child is a protocol bug, not a reason to kill the run.
       // runEventSchema.parse inside stampAndStore is what threw.
@@ -596,19 +657,21 @@ export class RunSupervisor {
   /**
    * The single envelope-stamping path: allocate cursor, validate, persist, fan out. The body
    * is typed loosely because child-emitted bodies are untrusted — runEventSchema.parse below
-   * is the validation, not the type.
+   * is the validation, not the type. Run-level frames carry the run id as turnId; agent-leaf
+   * frames carry their turn's id.
    */
   private stampAndStore(
     runId: string,
     envelope: { turn: number; seq: number },
     body: RunEventBody | ({ kind: string } & Record<string, unknown>),
+    turnId?: string,
   ): void {
     envelope.seq += 1;
     const cursor = makeCursor(envelope.turn, envelope.seq);
     const event: RunEvent = runEventSchema.parse({
       ...body,
       runId,
-      turnId: runId,
+      turnId: turnId ?? runId,
       seq: envelope.seq,
       t: this.clock.now(),
     });
@@ -630,4 +693,9 @@ export class RunSupervisor {
     if (run === null) throw new EngineError("INTERNAL", `Run ${runId} vanished from the store.`);
     return run;
   }
+}
+
+function durationBudgetMessage(manifest: WorkflowManifest): string {
+  const seconds = manifest.budget?.max_duration_seconds;
+  return `Run exceeded budget.max_duration_seconds (${String(seconds)}s) and was terminated.`;
 }

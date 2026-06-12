@@ -82,8 +82,15 @@ export const HOST_METHODS = [
   "call_workflow",
   "run_workflow",
   "write_artifact",
+  "resolve_model",
 ] as const;
 export type HostMethod = (typeof HOST_METHODS)[number];
+
+const tokenUsageShape = z.strictObject({
+  inputTokens: z.number().int().nonnegative().optional(),
+  outputTokens: z.number().int().nonnegative().optional(),
+  totalTokens: z.number().int().nonnegative().optional(),
+});
 
 export const childToParentSchema = z.union([
   z.object({
@@ -95,8 +102,21 @@ export const childToParentSchema = z.union([
   z.object({
     type: z.literal("emit"),
     // Stamped + fully validated against runEventSchema by the supervisor; here we only
-    // require an event-body shape with a kind.
+    // require an event-body shape with a kind. `turnId` scopes agent-leaf frames to their
+    // turn; absent means a run-level frame (turnId = runId).
     body: z.looseObject({ kind: z.string().min(1) }),
+    turnId: z.string().min(1).optional(),
+  }),
+  z.object({
+    // Opens a new turn block: the supervisor bumps its cursor stride and emits turn_started.
+    type: z.literal("turn_started"),
+    turnId: z.string().min(1),
+  }),
+  z.object({
+    // Leaf usage report — the supervisor's budget authority consumes this (tokens + max_usd).
+    type: z.literal("report_usage"),
+    modelRef: z.string().min(1),
+    usage: tokenUsageShape,
   }),
   z.object({
     type: z.literal("done"),
@@ -123,4 +143,17 @@ export const writeArtifactArgsSchema = z.strictObject({
   /** Body crosses IPC as base64 — Uint8Array does not survive JSON serialization. */
   bodyBase64: z.string(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+});
+export const resolveModelArgsSchema = z.strictObject({
+  model: z.string().min(1).optional(),
+  provider: z.string().min(1).optional(),
+});
+/** The supervisor's resolve_model response, re-validated child-side before use. */
+export const resolvedModelSchema = z.strictObject({
+  ref: z.string().min(1),
+  provider: z.string().min(1),
+  modelId: z.string().min(1),
+  protocol: z.enum(["anthropic", "openai"]),
+  baseUrl: z.string().min(1),
+  apiKey: z.string().nullable(),
 });

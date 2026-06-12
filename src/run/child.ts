@@ -74,8 +74,14 @@ async function runProgram(
             send({ type: "host_call", callId, method, args });
           });
         },
-        emit(body: RunEventBody) {
-          send({ type: "emit", body });
+        emit(body: RunEventBody, turnId?: string) {
+          send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
+        },
+        startTurn(turnId: string) {
+          send({ type: "turn_started", turnId });
+        },
+        reportUsage(modelRef, usage) {
+          send({ type: "report_usage", modelRef, usage });
         },
       }),
     );

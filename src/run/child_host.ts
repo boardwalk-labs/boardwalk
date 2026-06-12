@@ -8,17 +8,28 @@
 // clearly until then.
 
 import { z } from "zod";
-import type { PhaseOptions, SleepArg } from "@boardwalk/workflow";
+import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk/workflow";
 import type { WorkflowHost } from "@boardwalk/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk/workflow";
+import { runAgentLeaf } from "../agent/leaf.js";
+import { Redactor } from "../agent/redact.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
-import type { IpcErrorShape, HostMethod, RunEventBody } from "./ipc.js";
+import {
+  resolvedModelSchema,
+  type IpcErrorShape,
+  type HostMethod,
+  type RunEventBody,
+} from "./ipc.js";
 
 export interface ChildHostIo {
   /** Broker a host call to the supervisor; resolves with its result. */
   request(method: HostMethod, args: Record<string, unknown>): Promise<unknown>;
-  /** Emit a run-event body (the supervisor stamps the envelope). */
-  emit(body: RunEventBody): void;
+  /** Emit a run-event body (the supervisor stamps the envelope). turnId scopes leaf frames. */
+  emit(body: RunEventBody, turnId?: string): void;
+  /** Tell the supervisor to open a new turn block (it emits turn_started). */
+  startTurn(turnId: string): void;
+  /** Report leaf usage to the supervisor — the budget authority. */
+  reportUsage(modelRef: string, usage: TokenUsage): void;
 }
 
 /** Rebuild a typed EngineError from its IPC shape so program-visible errors keep code + hint. */
@@ -29,6 +40,9 @@ export function errorFromIpc(shape: IpcErrorShape): Error {
 
 export function createChildHost(io: ChildHostIo): WorkflowHost {
   let phaseCount = 0;
+  // One redactor for the whole run process: every secret value revealed to the program (and
+  // every provider key) is scrubbed from everything model-bound, across all agent() calls.
+  const redactor = new Redactor();
 
   return {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
@@ -36,12 +50,20 @@ export function createChildHost(io: ChildHostIo): WorkflowHost {
       io.emit({ kind: "phase", name, id: opts?.id ?? `phase-${String(phaseCount)}` });
     },
 
-    agent(): Promise<unknown> {
-      throw new EngineError(
-        "UNSUPPORTED",
-        "agent() is not implemented in this engine build yet.",
-        "The inference milestone is next on the engine roadmap; everything else in the run contract works today.",
-      );
+    async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
+      return await runAgentLeaf(prompt, opts, {
+        resolve: async (model, provider) =>
+          resolvedModelSchema.parse(
+            await io.request("resolve_model", {
+              ...(model !== undefined ? { model } : {}),
+              ...(provider !== undefined ? { provider } : {}),
+            }),
+          ),
+        startTurn: (turnId) => io.startTurn(turnId),
+        emit: (turnId, body) => io.emit(body, turnId),
+        reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
+        redactor,
+      });
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
@@ -71,7 +93,9 @@ export function createChildHost(io: ChildHostIo): WorkflowHost {
     },
 
     async getSecret(name: string): Promise<string> {
-      return secretValueSchema.parse(await io.request("get_secret", { name }));
+      const value = secretValueSchema.parse(await io.request("get_secret", { name }));
+      redactor.add(name, value);
+      return value;
     },
 
     async writeArtifact(

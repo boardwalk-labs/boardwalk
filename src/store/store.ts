@@ -12,7 +12,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { z } from "zod";
 import { runEventSchema, workflowManifestSchema } from "@boardwalk/workflow";
-import type { JsonValue, RunEvent, WorkflowManifest } from "@boardwalk/workflow";
+import type { JsonValue, RunEvent, RunStatus, WorkflowManifest } from "@boardwalk/workflow";
 import { EngineError } from "../errors.js";
 import { ulid } from "../ids.js";
 import { migrate } from "./migrations.js";
@@ -21,12 +21,8 @@ import { migrate } from "./migrations.js";
 // Public row shapes
 // ============================================================================
 
-/**
- * Why defined here: the SDK declares this union on the `run_status` event but does not
- * re-export it from its package root. Deriving it from {@link RunEvent} keeps the `runs.status`
- * column typed identically to the wire format with no second hand-written list to drift.
- */
-export type RunStatus = Extract<RunEvent, { kind: "run_status" }>["status"];
+// Re-exported for engine modules that already type against the store's surface.
+export type { RunStatus };
 
 /** A deployed workflow: validated manifest + bundled program source + per-deploy config. */
 export interface WorkflowRow {
