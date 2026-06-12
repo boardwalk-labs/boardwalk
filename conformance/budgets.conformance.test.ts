@@ -28,7 +28,7 @@ describe("conformance: budgets terminate the run", () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
-        import { sleep } from "@boardwalk/workflow";
+        import { sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "overruns",
           triggers: [{ kind: "manual" }],
@@ -51,7 +51,7 @@ describe("conformance: budgets terminate the run", () => {
     provider.respondWith("expensive", { in: 10_000_000, out: 0 });
     engine.deployWorkflow({
       program: `
-        import { agent, sleep } from "@boardwalk/workflow";
+        import { agent, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "overspender",
           triggers: [{ kind: "manual" }],
@@ -73,7 +73,7 @@ describe("conformance: budgets terminate the run", () => {
     provider.respondWith("chatty", { in: 600, out: 600 });
     engine.deployWorkflow({
       program: `
-        import { agent, sleep } from "@boardwalk/workflow";
+        import { agent, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "token-hog",
           triggers: [{ kind: "manual" }],

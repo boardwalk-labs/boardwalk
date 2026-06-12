@@ -15,7 +15,7 @@ describe("conformance: concurrency", () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
-        import { output, sleep } from "@boardwalk/workflow";
+        import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "one-by-one",
           triggers: [{ kind: "manual" }],
@@ -55,7 +55,7 @@ describe("conformance: concurrency", () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
-        import { output, sleep } from "@boardwalk/workflow";
+        import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = { name: "parallel-ok", triggers: [{ kind: "manual" }] };
         await sleep(800);
         output("done");

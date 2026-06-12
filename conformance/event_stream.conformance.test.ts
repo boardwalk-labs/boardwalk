@@ -7,7 +7,7 @@
 // the log channel, and agent frames carry their own turnId distinct from the run's.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { CHANNELS, channelOf, matchesChannels, type Channel } from "@boardwalk/workflow";
+import { CHANNELS, channelOf, matchesChannels, type Channel } from "@boardwalk-labs/workflow";
 import type { Engine, EventRow } from "../src/index.js";
 import {
   createEngine,
@@ -55,7 +55,7 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
   provider.respondWith("final answer", { in: 2, out: 2 });
   engine.deployWorkflow({
     program: `
-      import { Phase, agent, output } from "@boardwalk/workflow";
+      import { Phase, agent, output } from "@boardwalk-labs/workflow";
       export const meta = { name: "rich", triggers: [{ kind: "manual" }] };
       Phase("gather");
       console.log("stdout line");

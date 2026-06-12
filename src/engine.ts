@@ -10,8 +10,8 @@
 import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { JsonValue, WorkflowManifest } from "@boardwalk/workflow";
-import { extractManifest } from "@boardwalk/workflow/extract";
+import type { JsonValue, WorkflowManifest } from "@boardwalk-labs/workflow";
+import { extractManifest } from "@boardwalk-labs/workflow/extract";
 import type { InferenceConfig } from "./agent/resolve.js";
 import type { Clock } from "./clock.js";
 import { EngineError } from "./errors.js";
@@ -60,7 +60,7 @@ export interface AuthorizeMcpServerOptions {
 }
 
 export interface DeployArgs {
-  /** The bundled workflow program (ESM, `@boardwalk/workflow` external, pure-literal meta). */
+  /** The bundled workflow program (ESM, `@boardwalk-labs/workflow` external, pure-literal meta). */
   program: string;
   /** Engine-side deploy config (e.g. catch_up). Replaced wholesale on redeploy. */
   config?: Record<string, JsonValue>;

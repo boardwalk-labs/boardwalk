@@ -7,9 +7,9 @@
 // MCP connections must execute where the program lives (the trusted layer).
 
 import { z } from "zod";
-import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk/workflow";
-import type { WorkflowHost } from "@boardwalk/workflow/runtime";
-import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk/workflow";
+import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk-labs/workflow";
+import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
+import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
 import { runAgentLeaf } from "../agent/leaf.js";
 import { Redactor } from "../agent/redact.js";
 import type { ToolSetContext } from "../agent/tools.js";

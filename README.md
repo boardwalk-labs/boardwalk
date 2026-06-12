@@ -4,7 +4,7 @@ The open-source single-node engine for Boardwalk workflows: cron scheduling, dur
 semantics, SQLite run history, and a local run log — on hardware you own, with no account.
 
 > **Status: pre-release.** This repo is being built in the open ahead of its first published
-> release. The contracts it implements are stable (see [`@boardwalk/workflow`](https://www.npmjs.com/package/@boardwalk/workflow));
+> release. The contracts it implements are stable (see [`@boardwalk-labs/workflow`](https://www.npmjs.com/package/@boardwalk-labs/workflow));
 > the engine itself is under active construction. See [`SPEC.md`](./SPEC.md) for the
 > architecture and the definition of done.
 
@@ -12,9 +12,9 @@ semantics, SQLite run history, and a local run log — on hardware you own, with
 
 A workflow is a plain TypeScript program. This engine runs it:
 
-- **Server mode** — `docker run boardwalk/boardwalk`: a long-lived process that schedules cron
+- **Server mode** — `docker run ghcr.io/boardwalk-labs/boardwalk`: a long-lived process that schedules cron
   workflows, accepts webhooks, keeps run history in SQLite, and serves a local run log.
-- **Embedded mode** — `@boardwalk/engine` as a library: one run, in-process supervision; this is
+- **Embedded mode** — `@boardwalk-labs/engine` as a library: one run, in-process supervision; this is
   what `boardwalk dev` uses.
 
 Same engine, same semantics as the Boardwalk platform: one run = one process, `sleep` holds the
@@ -26,7 +26,7 @@ The conformance suite in this repo is the arbiter of that parity promise.
 Run the server with Docker — run history and state live in the mounted data dir:
 
 ```sh
-docker run -v ./data:/data -p 8080:8080 boardwalk/boardwalk
+docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 ```
 
 Then open `http://localhost:8080` for the run log, or hit the JSON API
@@ -54,7 +54,7 @@ Provider API keys come from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KE
 The same engine as a library — this is what `boardwalk dev` does:
 
 ```ts
-import { Engine } from "@boardwalk/engine";
+import { Engine } from "@boardwalk-labs/engine";
 
 const engine = new Engine({ dataDir: "./boardwalk-data" });
 const run = await engine.runOnce({ program: bundledProgramSource });

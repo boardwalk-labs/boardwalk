@@ -1,6 +1,6 @@
 # SPEC — `boardwalk` (the flagship engine)
 
-> The open-source single-node runtime: scheduler, run engine, SQLite state, local run log. Published as `@boardwalk/engine` (npm) and `boardwalk/boardwalk` (Docker). Apache-2.0. Public in **Phase 2** — this repo never opens as an empty shell.
+> The open-source single-node runtime: scheduler, run engine, SQLite state, local run log. Published as `@boardwalk-labs/engine` (npm) and `ghcr.io/boardwalk-labs/boardwalk` (Docker). Apache-2.0. Public in **Phase 2** — this repo never opens as an empty shell.
 >
 > Governing context: root [`MASTER_SPEC.md`](../MASTER_SPEC.md) §2.4 (run semantics), §3–5 (engines, permitted divergence, parity). The conformance suite lives here and is the arbiter of the parity promise.
 
@@ -9,7 +9,7 @@
 The engine that makes "open source" true: everything needed to schedule and run workflows on hardware the user owns, with no Boardwalk account. Two consumers, one implementation:
 
 - **Server mode** (`boardwalk-server` binary / Docker): long-lived process — cron scheduling, webhook endpoint, SQLite run history, local run log UI.
-- **Embedded mode** (consumed by `@boardwalk/cli` for `dev`): one run, in-process supervision, exit on terminal status. Same engine, no daemon.
+- **Embedded mode** (consumed by `@boardwalk-labs/cli` for `dev`): one run, in-process supervision, exit on terminal status. Same engine, no daemon.
 
 ## 2. Architecture
 
@@ -32,7 +32,7 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 
 - Statuses exactly as MASTER_SPEC §2.4: `queued → pending → running → completed | failed | cancelled` (+ transitional `cancelling`).
 - **One run = one spawned Node process** with an isolated working directory; the parent supervises. Liveness is the child's `exit` event (same machine — no heartbeat protocol needed; a hung program is caught by the duration budget); an engine-orphaned child exits on IPC disconnect and the boot sweep owns its restart.
-- **The program arrives pre-bundled** (one ESM file, `@boardwalk/workflow` left external — the CLI bundles at deploy). The run dir carries a `node_modules/@boardwalk/workflow` symlink to the engine's own SDK install, so the program and the engine's child entry load ONE module instance (the SDK host seam is a module-level singleton) with no bundler in the engine.
+- **The program arrives pre-bundled** (one ESM file, `@boardwalk-labs/workflow` left external — the CLI bundles at deploy). The run dir carries a `node_modules/@boardwalk-labs/workflow` symlink to the engine's own SDK install, so the program and the engine's child entry load ONE module instance (the SDK host seam is a module-level singleton) with no bundler in the engine.
 - **Envelope authority is the supervisor's:** the child sends event _bodies_; the parent is the single place envelopes are stamped and cursors allocated, resuming past `maxCursor` across crash-restarts.
 - **Hold-and-pay:** `sleep`/child-waits hold the child process. No checkpointing.
 - **Restart-on-crash:** supervisor detects child death → run restarts from the top (bounded restarts, then `failed`). `workflows.call` children re-attach via idempotency key on the restarted pass.
@@ -76,8 +76,8 @@ Tables: `workflows` (manifest + program ref + config), `runs` (status, timestamp
 
 ## 5. Distribution
 
-- `@boardwalk/engine` (the library: embedded mode + host implementation) and a thin `boardwalk-server` bin.
-- Docker image `boardwalk/boardwalk`: server mode, volume-mounted data dir, sensible defaults. `docker run -v ./data:/data -p 8080:8080 boardwalk/boardwalk` is the README quickstart.
+- `@boardwalk-labs/engine` (the library: embedded mode + host implementation) and a thin `boardwalk-server` bin.
+- Docker image `ghcr.io/boardwalk-labs/boardwalk`: server mode, volume-mounted data dir, sensible defaults. `docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk` is the README quickstart.
 - Node 24 LTS floor.
 
 ## 6. Testing
@@ -91,5 +91,5 @@ The Phase 2 gates (MASTER_SPEC §9), restated as this repo's checklist:
 1. Docker quickstart on a clean host: cron workflow scheduled, fired, visible in run history + local log UI — no account.
 2. Survives: engine kill mid-run, child kill mid-run, multi-minute sleep, `workflows.call` chain — all per conformance.
 3. Full conformance suite green in CI; every `boardwalk-examples` template passes under this engine.
-4. `@boardwalk/cli dev` runs on the published `@boardwalk/engine`.
+4. `@boardwalk-labs/cli dev` runs on the published `@boardwalk-labs/engine`.
 5. Publication checklist (MASTER_SPEC §8) passes.

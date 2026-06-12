@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk/workflow";
+import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk-labs/workflow";
 import type { Clock } from "../clock.js";
 import { Store } from "../store/store.js";
 import { Scheduler } from "./scheduler.js";

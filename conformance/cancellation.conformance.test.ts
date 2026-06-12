@@ -15,7 +15,7 @@ describe("conformance: cancellation", () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
-        import { sleep } from "@boardwalk/workflow";
+        import { sleep } from "@boardwalk-labs/workflow";
         export const meta = { name: "long-sleeper", triggers: [{ kind: "manual" }] };
         await sleep(60_000);
       `,
@@ -45,7 +45,7 @@ describe("conformance: cancellation", () => {
     // the slot — the only way to cancel a genuinely undispatched run.
     engine.deployWorkflow({
       program: `
-        import { output, sleep } from "@boardwalk/workflow";
+        import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "serial-sleeper",
           triggers: [{ kind: "manual" }],

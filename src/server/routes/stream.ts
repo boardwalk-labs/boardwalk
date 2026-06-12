@@ -4,7 +4,7 @@
 // cursors are run-global and independent of channel filtering, which keeps filtered resumes
 // gap-free.
 
-import { matchesChannels } from "@boardwalk/workflow";
+import { matchesChannels } from "@boardwalk-labs/workflow";
 import type { IncomingMessage } from "node:http";
 import type { EventRow } from "../../store/store.js";
 import { HttpError, parseChannelSelection, parseNonNegativeInt } from "../http.js";

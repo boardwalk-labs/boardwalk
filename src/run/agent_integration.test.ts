@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk/workflow";
+import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk-labs/workflow";
 import { Store } from "../store/store.js";
 import { RunSupervisor } from "./supervisor.js";
 
@@ -149,7 +149,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("the agent answer", { in: 120, out: 30 });
     const runId = await f.run(
       "with-agent",
-      `import { agent, output } from "@boardwalk/workflow";
+      `import { agent, output } from "@boardwalk-labs/workflow";
                 output(await agent("summarize this", { model: "test-model" }));`,
     );
 
@@ -179,7 +179,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("default-model-reply", { in: 1, out: 1 });
     const runId = await f.run(
       "agent-default-model",
-      `import { agent, output } from "@boardwalk/workflow";
+      `import { agent, output } from "@boardwalk-labs/workflow";
        output(await agent("hi"));`,
     );
     expect(f.store.getRun(runId)?.status).toBe("completed");
@@ -192,7 +192,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("ok", { in: 1, out: 1 });
     const runId = await f.run(
       "leaky",
-      `import { agent, output, secrets } from "@boardwalk/workflow";
+      `import { agent, output, secrets } from "@boardwalk-labs/workflow";
                 const token = await secrets.get("API_TOKEN");
          output(await agent("please use token " + token + " to fetch the data"));`,
       { secrets: [{ name: "API_TOKEN" }] },
@@ -213,7 +213,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("expensive", { in: 10_000_000, out: 0 });
     const runId = await f.run(
       "overspender",
-      `import { agent, sleep } from "@boardwalk/workflow";
+      `import { agent, sleep } from "@boardwalk-labs/workflow";
                 await agent("burn tokens", { model: "test-model" });
          await sleep(30_000); // the budget kill lands here, not at process exit`,
       { budget: { max_usd: 0.01 } },
@@ -230,7 +230,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("chatty", { in: 600, out: 600 });
     const runId = await f.run(
       "token-hog",
-      `import { agent, sleep } from "@boardwalk/workflow";
+      `import { agent, sleep } from "@boardwalk-labs/workflow";
                 await agent("talk a lot", { model: "test-model" });
          await sleep(30_000);`,
       { budget: { max_tokens: 1000 } },
@@ -246,7 +246,7 @@ describe("agent() through the full run path", () => {
     const f = fixture();
     const runId = await f.run(
       "wants-mcp",
-      `import { agent } from "@boardwalk/workflow";
+      `import { agent } from "@boardwalk-labs/workflow";
        await agent("search", {
          model: "test-model",
          mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
@@ -262,7 +262,7 @@ describe("agent() through the full run path", () => {
     const f = fixture();
     const runId = await f.run(
       "bad-mcp-ref",
-      `import { agent } from "@boardwalk/workflow";
+      `import { agent } from "@boardwalk-labs/workflow";
        await agent("search", {
          model: "test-model",
          mcp: [{ name: "gh", transport: "carrier-pigeon", coop: "roof" }],
@@ -291,7 +291,7 @@ describe("agent() through the full run path", () => {
     provider.respondWith("the looked-up answer is 42", { in: 6, out: 4 });
     const runId = await f.run(
       "tool-user",
-      `import { agent, output } from "@boardwalk/workflow";
+      `import { agent, output } from "@boardwalk-labs/workflow";
        const table = { answer: "42" };
        output(
          await agent("look up the answer", {
@@ -320,7 +320,7 @@ describe("agent() through the full run path", () => {
 
   it("memory auto-persists across runs with NO declaration anywhere", async () => {
     const f = fixture();
-    const program = `import { agent, output } from "@boardwalk/workflow";
+    const program = `import { agent, output } from "@boardwalk-labs/workflow";
        output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));`;
 
     // Run 1: the model writes a memory file through the scoped tool.

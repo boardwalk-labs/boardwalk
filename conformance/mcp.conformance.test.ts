@@ -45,7 +45,7 @@ async function mcpWithTool(
 function deployMcpUser(engine: ReturnType<typeof createEngine>["engine"], url: string): void {
   engine.deployWorkflow({
     program: `
-      import { agent, output, secrets } from "@boardwalk/workflow";
+      import { agent, output, secrets } from "@boardwalk-labs/workflow";
       export const meta = {
         name: "mcp-user",
         triggers: [{ kind: "manual" }],

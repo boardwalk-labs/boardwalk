@@ -10,7 +10,7 @@
 // across crash-restarts without the child knowing about them.
 
 import { z } from "zod";
-import type { RunEvent, WorkflowManifest, JsonValue } from "@boardwalk/workflow";
+import type { RunEvent, WorkflowManifest, JsonValue } from "@boardwalk-labs/workflow";
 
 /** A run event minus its envelope — what the child emits, before the supervisor stamps it. */
 export type RunEventBody = RunEvent extends infer E
@@ -33,7 +33,7 @@ export type IpcErrorShape = z.infer<typeof errorShapeSchema>;
 export interface InitMessage {
   type: "init";
   runId: string;
-  /** Absolute path to the bundled program (ESM, `@boardwalk/workflow` external). */
+  /** Absolute path to the bundled program (ESM, `@boardwalk-labs/workflow` external). */
   programPath: string;
   /** The run's isolated working directory (the child chdirs here before importing the program). */
   workspaceDir: string;

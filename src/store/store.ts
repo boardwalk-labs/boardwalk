@@ -11,8 +11,8 @@
 import { DatabaseSync } from "node:sqlite";
 import type { SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { z } from "zod";
-import { runEventSchema, workflowManifestSchema } from "@boardwalk/workflow";
-import type { JsonValue, RunEvent, RunStatus, WorkflowManifest } from "@boardwalk/workflow";
+import { runEventSchema, workflowManifestSchema } from "@boardwalk-labs/workflow";
+import type { JsonValue, RunEvent, RunStatus, WorkflowManifest } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 import { ulid } from "../ids.js";
 import { migrate } from "./migrations.js";

@@ -7,7 +7,7 @@
 // here, so this module is fully typed — no unknown, no casts.
 
 import { createHash } from "node:crypto";
-import type { JsonValue } from "@boardwalk/workflow";
+import type { JsonValue } from "@boardwalk-labs/workflow";
 
 /** Serialize like JSON.stringify but with object keys sorted recursively — equal values ⇒ equal strings. */
 export function canonicalJson(value: JsonValue): string {

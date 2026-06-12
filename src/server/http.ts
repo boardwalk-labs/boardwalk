@@ -6,8 +6,8 @@
 
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { z } from "zod";
-import { CHANNELS, DEFAULT_CHANNELS } from "@boardwalk/workflow";
-import type { Channel, JsonValue } from "@boardwalk/workflow";
+import { CHANNELS, DEFAULT_CHANNELS } from "@boardwalk-labs/workflow";
+import type { Channel, JsonValue } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 
 /** Bodies above this reject with 413 — nothing on this surface needs more than 1 MiB. */

@@ -9,8 +9,8 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { runEventSchema } from "@boardwalk/workflow";
-import type { RunEvent } from "@boardwalk/workflow";
+import { runEventSchema } from "@boardwalk-labs/workflow";
+import type { RunEvent } from "@boardwalk-labs/workflow";
 import { Engine } from "../engine.js";
 import { createEngineServer, isLoopbackHost } from "./server.js";
 
@@ -23,7 +23,7 @@ const childEntryPath = join(repoRoot, "dist", "run", "child.js");
 // ----------------------------------------------------------------------------
 
 const ECHO_PROGRAM = `
-import { input, output } from "@boardwalk/workflow";
+import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
   name: "echo",
   description: "echoes its input",
@@ -34,7 +34,7 @@ output({ echoed: input ?? null });
 `;
 
 const SLOW_PROGRAM = `
-import { output, sleep, Phase } from "@boardwalk/workflow";
+import { output, sleep, Phase } from "@boardwalk-labs/workflow";
 export const meta = { name: "slow", triggers: [{ kind: "manual" }] };
 Phase("working");
 await sleep(400);
@@ -42,14 +42,14 @@ output("slow-done");
 `;
 
 const NAP_PROGRAM = `
-import { output, sleep } from "@boardwalk/workflow";
+import { output, sleep } from "@boardwalk-labs/workflow";
 export const meta = { name: "nap", triggers: [{ kind: "manual" }] };
 await sleep(5000);
 output("never-finished");
 `;
 
 const TOKEN_HOOK_PROGRAM = `
-import { input, output } from "@boardwalk/workflow";
+import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
   name: "token-hook",
   triggers: [{ kind: "webhook", auth: "token" }, { kind: "manual" }],
@@ -58,7 +58,7 @@ output(input ?? null);
 `;
 
 const SIGNED_HOOK_PROGRAM = `
-import { input, output } from "@boardwalk/workflow";
+import { input, output } from "@boardwalk-labs/workflow";
 export const meta = { name: "signed-hook", triggers: [{ kind: "webhook", auth: "signature" }] };
 output(input ?? null);
 `;

@@ -14,7 +14,7 @@
 //   - Concurrency modes gate DISPATCH, not queueing: `serial` / `serial_by_key` hold queued
 //     runs until the group's active run reaches a terminal status.
 
-import type { WorkflowManifest } from "@boardwalk/workflow";
+import type { WorkflowManifest } from "@boardwalk-labs/workflow";
 import { systemClock, type Clock } from "../clock.js";
 import { nextFire, parseCron, type CronSchedule } from "../cron/cron.js";
 import type { RunRow, Store, WorkflowRow } from "../store/store.js";

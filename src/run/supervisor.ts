@@ -26,7 +26,7 @@ import {
   TURN_CURSOR_STRIDE,
   type RunEvent,
   type WorkflowManifest,
-} from "@boardwalk/workflow";
+} from "@boardwalk-labs/workflow";
 // Why from the store: the SDK defines RunStatus but doesn't re-export it from its root yet;
 // the store derives the identical union from RunEvent and re-exports it.
 import type { RunStatus } from "../store/store.js";

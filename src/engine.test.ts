@@ -35,7 +35,7 @@ function makeEngine(env: Record<string, string> = {}): Engine {
 }
 
 const ECHO_PROGRAM = `
-import { input, output } from "@boardwalk/workflow";
+import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
   name: "echo",
   description: "echoes its input",
@@ -114,7 +114,7 @@ describe("Engine facade", () => {
     const engine = makeEngine();
     engine.deployWorkflow({
       program: `
-        import { output, sleep } from "@boardwalk/workflow";
+        import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
           name: "one-by-one",
           triggers: [{ kind: "manual" }],

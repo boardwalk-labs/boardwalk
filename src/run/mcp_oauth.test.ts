@@ -107,7 +107,7 @@ async function completeAuthorization(url: string): Promise<void> {
 function deployProgram(engine: Engine): void {
   engine.deployWorkflow({
     program: `
-      import { agent, output } from "@boardwalk/workflow";
+      import { agent, output } from "@boardwalk-labs/workflow";
       export const meta = { name: "mcp-user", triggers: [{ kind: "manual" }] };
       output(await agent("greet the world", {
         model: "test-model",

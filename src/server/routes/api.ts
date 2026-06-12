@@ -3,7 +3,7 @@
 // lives in the store, all run semantics in the engine.
 
 import { z } from "zod";
-import { matchesChannels } from "@boardwalk/workflow";
+import { matchesChannels } from "@boardwalk-labs/workflow";
 import type { RunStatus } from "../../store/store.js";
 import {
   HttpError,

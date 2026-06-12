@@ -11,8 +11,8 @@ import {
   installHost,
   installInput,
   takeDeclaredOutput,
-} from "@boardwalk/workflow/runtime";
-import type { JsonValue } from "@boardwalk/workflow";
+} from "@boardwalk-labs/workflow/runtime";
+import type { JsonValue } from "@boardwalk-labs/workflow";
 import type { Redactor } from "../agent/redact.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";

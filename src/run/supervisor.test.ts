@@ -9,7 +9,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
-import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk/workflow";
+import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk-labs/workflow";
 import { Store, type EventRow } from "../store/store.js";
 import { RunSupervisor } from "./supervisor.js";
 
@@ -81,7 +81,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "echo",
-      `import { input, output } from "@boardwalk/workflow";
+      `import { input, output } from "@boardwalk-labs/workflow";
        output({ got: input });`,
     );
     const runId = f.startRun("echo", { n: 42 });
@@ -130,7 +130,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "legacy-wrapper",
-      `import { output } from "@boardwalk/workflow";
+      `import { output } from "@boardwalk-labs/workflow";
        output("from the module body");
        export default async function run() { output("from the wrapper"); }`,
     );
@@ -173,7 +173,7 @@ describe("RunSupervisor", () => {
     f.deploy(
       "flaky",
       `import { existsSync, writeFileSync } from "node:fs";
-       import { output } from "@boardwalk/workflow";
+       import { output } from "@boardwalk-labs/workflow";
                 if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
          output("recovered");`,
     );
@@ -207,7 +207,7 @@ describe("RunSupervisor", () => {
     const f = fixture({ env: { GH_TOKEN: "tok-123" } });
     f.deploy(
       "uses-secret",
-      `import { secrets, output } from "@boardwalk/workflow";
+      `import { secrets, output } from "@boardwalk-labs/workflow";
        output((await secrets.get("GH_TOKEN")).length);`,
       { secrets: [{ name: "GH_TOKEN" }] },
     );
@@ -217,7 +217,7 @@ describe("RunSupervisor", () => {
 
     f.deploy(
       "undeclared-secret",
-      `import { secrets } from "@boardwalk/workflow";
+      `import { secrets } from "@boardwalk-labs/workflow";
        await secrets.get("GH_TOKEN");`,
     );
     const undeclared = await f.supervisor.supervise(f.startRun("undeclared-secret"));
@@ -226,7 +226,7 @@ describe("RunSupervisor", () => {
 
     f.deploy(
       "missing-secret",
-      `import { secrets } from "@boardwalk/workflow";
+      `import { secrets } from "@boardwalk-labs/workflow";
        await secrets.get("ABSENT");`,
       { secrets: [{ name: "ABSENT" }] },
     );
@@ -239,7 +239,7 @@ describe("RunSupervisor", () => {
     const f = fixture({ env: { API_TOKEN: "canary-secret-abc123" } });
     f.deploy(
       "leaky-error",
-      `import { secrets } from "@boardwalk/workflow";
+      `import { secrets } from "@boardwalk-labs/workflow";
        const token = await secrets.get("API_TOKEN");
        throw new Error("request to upstream failed with token=" + token);`,
       { secrets: [{ name: "API_TOKEN" }] },
@@ -256,7 +256,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "child-counter",
-      `import { input, output } from "@boardwalk/workflow";
+      `import { input, output } from "@boardwalk-labs/workflow";
        import { appendFileSync } from "node:fs";
                 appendFileSync(input.countFile, "x");
          output("child-result");`,
@@ -265,7 +265,7 @@ describe("RunSupervisor", () => {
     // must re-attach (created=false) instead of executing the child a second time.
     f.deploy(
       "parent",
-      `import { input, output, workflows } from "@boardwalk/workflow";
+      `import { input, output, workflows } from "@boardwalk-labs/workflow";
        import { existsSync, writeFileSync } from "node:fs";
                 const result = await workflows.call("child-counter", { countFile: input.countFile });
          if (!existsSync("crashed-once")) { writeFileSync("crashed-once", "1"); process.exit(9); }
@@ -287,7 +287,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "sleeper",
-      `import { output, sleep } from "@boardwalk/workflow";
+      `import { output, sleep } from "@boardwalk-labs/workflow";
                 const local = "kept-" + Math.floor(1000 * Math.random());
          const before = Date.now();
          await sleep(400);
@@ -305,7 +305,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "long-sleeper",
-      `import { sleep } from "@boardwalk/workflow";
+      `import { sleep } from "@boardwalk-labs/workflow";
        await sleep(60_000);`,
     );
     const runId = f.startRun("long-sleeper");
@@ -329,7 +329,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "overruns",
-      `import { sleep } from "@boardwalk/workflow";
+      `import { sleep } from "@boardwalk-labs/workflow";
        await sleep(30_000);`,
       { budget: { max_duration_seconds: 1 } },
     );
@@ -343,7 +343,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "artifacty",
-      `import { Phase, artifacts, output } from "@boardwalk/workflow";
+      `import { Phase, artifacts, output } from "@boardwalk-labs/workflow";
                 Phase("collect");
          const ref = await artifacts.write("report.txt", "text/plain", "line one");
          Phase("publish", { id: "publish-phase" });
@@ -374,7 +374,7 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "echo",
-      `import { output } from "@boardwalk/workflow";
+      `import { output } from "@boardwalk-labs/workflow";
        output("ran");`,
     );
     // Simulate a dead engine: rows left behind in non-terminal states, no processes anywhere.
@@ -397,7 +397,7 @@ describe("RunSupervisor", () => {
     const f = fixture({ env: { API_KEY: "secret-value-42" } });
     f.deploy(
       "env-user",
-      `import { output } from "@boardwalk/workflow";
+      `import { output } from "@boardwalk-labs/workflow";
        output(process.env.MY_KEY ?? "unset");`,
       {
         secrets: [{ name: "API_KEY" }],
@@ -413,7 +413,7 @@ describe("RunSupervisor", () => {
     // Reads state/value.txt if present, writes input.write to it, outputs what it read.
     const COUNTER_PROGRAM = `
       import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-      import { input, output } from "@boardwalk/workflow";
+      import { input, output } from "@boardwalk-labs/workflow";
       const previous = existsSync("state/value.txt") ? readFileSync("state/value.txt", "utf8") : null;
       mkdirSync("state", { recursive: true });
       writeFileSync("state/value.txt", input.write);
@@ -463,7 +463,7 @@ describe("RunSupervisor", () => {
       f.deploy(
         "whole-workspace",
         `import { existsSync, readFileSync, writeFileSync } from "node:fs";
-         import { output } from "@boardwalk/workflow";
+         import { output } from "@boardwalk-labs/workflow";
          const seen = existsSync("anywhere.txt") ? readFileSync("anywhere.txt", "utf8") : null;
          writeFileSync("anywhere.txt", "wrote-once");
          output({ seen });`,
@@ -486,7 +486,7 @@ describe("RunSupervisor", () => {
       f.deploy(
         "resumer",
         `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-         import { output } from "@boardwalk/workflow";
+         import { output } from "@boardwalk-labs/workflow";
          if (!existsSync("crashed-once")) {
            mkdirSync("state", { recursive: true });
            writeFileSync("state/value.txt", "B");

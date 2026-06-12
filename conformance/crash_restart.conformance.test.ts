@@ -17,7 +17,7 @@ describe("conformance: crash-restart", () => {
     engine.deployWorkflow({
       program: `
         import { existsSync, writeFileSync } from "node:fs";
-        import { output } from "@boardwalk/workflow";
+        import { output } from "@boardwalk-labs/workflow";
         export const meta = { name: "flaky", triggers: [{ kind: "manual" }] };
         if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
         output("recovered");

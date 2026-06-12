@@ -2,13 +2,13 @@
 //
 //   <dataDir>/runs/<runId>/
 //     program/index.mjs                          — the deployed bundle (SDK left external)
-//     program/node_modules/@boardwalk/workflow   — symlink to the ENGINE's installed SDK
+//     program/node_modules/@boardwalk-labs/workflow   — symlink to the ENGINE's installed SDK
 //     workspace/                                 — the run's cwd (isolated per run)
 //     artifacts/                                 — artifacts.write targets
 //
 // Why the symlink: the SDK's host state is a module-level singleton, so the program and the
 // child entry (engine code) must load the SAME module instance for installHost() to be visible
-// to the program's hooks. The program bundle imports `@boardwalk/workflow` bare; this symlink
+// to the program's hooks. The program bundle imports `@boardwalk-labs/workflow` bare; this symlink
 // makes that specifier resolve — and Node's default symlink realpathing collapses it onto the
 // engine's own copy, giving one shared instance with no bundler in the engine at all.
 
@@ -49,7 +49,7 @@ export function prepareRunDir(dataDir: string, runId: string, program: string): 
   const programPath = join(programDir, "index.mjs");
   writeFileSync(programPath, program, "utf8");
 
-  const linkParent = join(programDir, "node_modules", "@boardwalk");
+  const linkParent = join(programDir, "node_modules", "@boardwalk-labs");
   const linkPath = join(linkParent, "workflow");
   if (!existsSync(linkPath)) {
     mkdirSync(linkParent, { recursive: true });
@@ -124,19 +124,19 @@ export function persistWorkspace(
 let cachedSdkDir: string | null = null;
 
 /**
- * The engine's installed `@boardwalk/workflow` package root. Resolved from the package's main
+ * The engine's installed `@boardwalk-labs/workflow` package root. Resolved from the package's main
  * entry and walked up to its package.json — the exports map doesn't expose "./package.json",
- * so `require.resolve("@boardwalk/workflow/package.json")` would throw.
+ * so `require.resolve("@boardwalk-labs/workflow/package.json")` would throw.
  */
 export function sdkPackageDir(): string {
   if (cachedSdkDir !== null) return cachedSdkDir;
   const require = createRequire(import.meta.url);
-  let dir = dirname(require.resolve("@boardwalk/workflow"));
+  let dir = dirname(require.resolve("@boardwalk-labs/workflow"));
   for (let depth = 0; depth < 10; depth++) {
     const pkgPath = join(dir, "package.json");
     if (existsSync(pkgPath)) {
       const pkg = packageNameSchema.safeParse(JSON.parse(readFileSync(pkgPath, "utf8")));
-      if (pkg.success && pkg.data.name === "@boardwalk/workflow") {
+      if (pkg.success && pkg.data.name === "@boardwalk-labs/workflow") {
         cachedSdkDir = dir;
         return dir;
       }
@@ -147,6 +147,6 @@ export function sdkPackageDir(): string {
   }
   throw new EngineError(
     "INTERNAL",
-    "Could not locate the installed @boardwalk/workflow package root.",
+    "Could not locate the installed @boardwalk-labs/workflow package root.",
   );
 }

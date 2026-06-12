@@ -37,7 +37,7 @@ describe("conformance: agent() capabilities", () => {
     provider.respondWith("the looked-up answer", { in: 6, out: 4 });
     engine.deployWorkflow({
       program: `
-        import { agent, output } from "@boardwalk/workflow";
+        import { agent, output } from "@boardwalk-labs/workflow";
         export const meta = { name: "tool-user", triggers: [{ kind: "manual" }] };
         const table = { answer: "tool-answer-9b1c" };
         output(await agent("look it up", {
@@ -70,7 +70,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent, output } from "@boardwalk/workflow";
+        import { agent, output } from "@boardwalk-labs/workflow";
         export const meta = { name: "memory-keeper", triggers: [{ kind: "manual" }] };
         output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));
       `,
@@ -102,7 +102,7 @@ describe("conformance: agent() capabilities", () => {
     provider.respondWith("checked", { in: 1, out: 1 });
     engine.deployWorkflow({
       program: `
-        import { agent, output } from "@boardwalk/workflow";
+        import { agent, output } from "@boardwalk-labs/workflow";
         export const meta = { name: "skilled", triggers: [{ kind: "manual" }] };
         output(await agent("inspect the boat", {
           model: "test-model",
@@ -121,7 +121,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent } from "@boardwalk/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         export const meta = { name: "memory-escape", triggers: [{ kind: "manual" }] };
         await agent("hi", { model: "test-model", memory: "../outside" });
       `,
@@ -136,7 +136,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent } from "@boardwalk/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         export const meta = { name: "wants-builtin", triggers: [{ kind: "manual" }] };
         await agent("search", { model: "test-model", tools: ["definitely_not_a_tool"] });
       `,
@@ -151,7 +151,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent } from "@boardwalk/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         export const meta = { name: "wants-skill", triggers: [{ kind: "manual" }] };
         await agent("go", { model: "test-model", skills: ["nonexistent"] });
       `,
@@ -166,7 +166,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent } from "@boardwalk/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         export const meta = { name: "wants-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
           model: "test-model",
@@ -184,7 +184,7 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
-        import { agent } from "@boardwalk/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         export const meta = { name: "bad-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
           model: "test-model",

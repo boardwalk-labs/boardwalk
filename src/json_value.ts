@@ -2,7 +2,7 @@
 // channel are JSON by construction, but "by construction" is exactly what trust boundaries
 // don't get to assume (CODE_QUALITY §2.1) — so narrow structurally instead of casting.
 
-import type { JsonValue } from "@boardwalk/workflow";
+import type { JsonValue } from "@boardwalk-labs/workflow";
 import { EngineError } from "./errors.js";
 
 /** True when `value` is a plain JSON tree (no functions, symbols, bigints, class instances). */

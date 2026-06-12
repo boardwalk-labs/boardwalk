@@ -10,7 +10,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { AgentOptions, McpServerRef, ToolDef } from "@boardwalk/workflow";
+import type { AgentOptions, McpServerRef, ToolDef } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 import { McpConnection } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";

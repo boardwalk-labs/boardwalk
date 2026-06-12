@@ -15,7 +15,7 @@ const T0 = Date.UTC(2026, 0, 6, 12, 0, 0, 0);
 const HOURS = 3_600_000;
 
 const CRON_PROGRAM = `
-import { output } from "@boardwalk/workflow";
+import { output } from "@boardwalk-labs/workflow";
 export const meta = { name: "tick-tock", triggers: [{ kind: "cron", expr: "* * * * *" }] };
 output("fired");
 `;

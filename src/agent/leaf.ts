@@ -6,7 +6,7 @@
 // arrive through `io.resolve` / `io.mcpToken`.
 
 import { randomUUID } from "node:crypto";
-import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk/workflow";
+import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 import type { ChatMessage, ChatTurn, ToolCallRequest } from "./conversation.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";

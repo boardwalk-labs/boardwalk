@@ -17,7 +17,7 @@ import {
 afterEach(disposeEngines);
 
 const ECHO_PROGRAM = `
-import { input, output } from "@boardwalk/workflow";
+import { input, output } from "@boardwalk-labs/workflow";
 export const meta = { name: "echo", triggers: [{ kind: "manual" }] };
 output({ echoed: input });
 `;
