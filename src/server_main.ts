@@ -129,12 +129,16 @@ export function loadServerConfig(env: Record<string, string | undefined>): Serve
   const dataDir = get("BOARDWALK_DATA_DIR") ?? (inDocker ? "/data" : "./boardwalk-data");
   const defaultModel = get("BOARDWALK_DEFAULT_MODEL");
   const providers = parseProviders(get("BOARDWALK_PROVIDERS"));
+  // BOARDWALK_INFERENCE_URL overrides the managed-inference gateway; BOARDWALK_API_KEY (the
+  // managed credential) is read directly from the environment at resolve time, not here.
+  const boardwalkBaseUrl = get("BOARDWALK_INFERENCE_URL");
   const inference: InferenceConfig | undefined =
-    defaultModel === undefined && providers === undefined
+    defaultModel === undefined && providers === undefined && boardwalkBaseUrl === undefined
       ? undefined
       : {
           ...(defaultModel !== undefined ? { default_model: defaultModel } : {}),
           ...(providers !== undefined ? { providers } : {}),
+          ...(boardwalkBaseUrl !== undefined ? { boardwalk_base_url: boardwalkBaseUrl } : {}),
         };
 
   return {

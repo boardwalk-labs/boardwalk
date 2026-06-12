@@ -58,7 +58,7 @@ describe("resolveModel", () => {
     expect(r.ref).toBe("anthropic/claude-haiku-4-5");
   });
 
-  it("fails MODEL_UNRESOLVED with a config pointer when no model anywhere", () => {
+  it("no model + no provider + no managed key → MODEL_UNRESOLVED naming the escape hatches", () => {
     expect(() => resolveModel({ config: none, getEnv: env({}) })).toThrowError(EngineError);
     try {
       resolveModel({ config: none, getEnv: env({}) });
@@ -66,8 +66,59 @@ describe("resolveModel", () => {
       expect(err).toBeInstanceOf(EngineError);
       if (err instanceof EngineError) {
         expect(err.code).toBe("MODEL_UNRESOLVED");
-        expect(err.hint).toContain("inference.default_model");
+        // Names all three ways to set inference up: managed key, explicit provider, local server.
+        expect(err.message).toContain("BOARDWALK_API_KEY");
+        expect(err.hint).toContain("anthropic/claude-sonnet-4-5");
+        expect(err.hint).toContain("Ollama");
       }
+    }
+  });
+
+  it("default managed lane: no model/provider, BOARDWALK_API_KEY set → boardwalk/auto", () => {
+    const r = resolveModel({ config: none, getEnv: env({ BOARDWALK_API_KEY: "bw-key" }) });
+    expect(r).toEqual({
+      ref: "boardwalk/auto",
+      provider: "boardwalk",
+      modelId: "auto",
+      protocol: "openai",
+      baseUrl: "https://api.boardwalk.sh/v1",
+      apiKey: "bw-key",
+    });
+  });
+
+  it("managed lane with an explicit model forwards that model to the gateway", () => {
+    const r = resolveModel({
+      model: "boardwalk/claude-sonnet-4-5",
+      config: none,
+      getEnv: env({ BOARDWALK_API_KEY: "bw-key" }),
+    });
+    expect(r.provider).toBe("boardwalk");
+    expect(r.modelId).toBe("claude-sonnet-4-5");
+    expect(r.apiKey).toBe("bw-key");
+  });
+
+  it("the managed gateway URL is overridable via config and env", () => {
+    const viaConfig = resolveModel({
+      config: { boardwalk_base_url: "https://gw.example/v1" },
+      getEnv: env({ BOARDWALK_API_KEY: "k" }),
+    });
+    expect(viaConfig.baseUrl).toBe("https://gw.example/v1");
+    const viaEnv = resolveModel({
+      config: none,
+      getEnv: env({ BOARDWALK_API_KEY: "k", BOARDWALK_INFERENCE_URL: "http://localhost:9000/v1" }),
+    });
+    expect(viaEnv.baseUrl).toBe("http://localhost:9000/v1");
+  });
+
+  it("NEVER auto-selects a user's own provider key — anthropic must be named", () => {
+    // A user with ANTHROPIC_API_KEY set but no model named gets the managed-lane error, not a
+    // silent anthropic call: inference is explicit.
+    try {
+      resolveModel({ config: none, getEnv: env({ ANTHROPIC_API_KEY: "sk-ant-x" }) });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError);
+      if (err instanceof EngineError) expect(err.code).toBe("MODEL_UNRESOLVED");
     }
   });
 
@@ -140,13 +191,16 @@ describe("resolveModel", () => {
     }
   });
 
-  it('rejects the "boardwalk" managed lane with an UNSUPPORTED pointer', () => {
+  it("explicit boardwalk provider without a managed key → MODEL_UNRESOLVED (not set up)", () => {
     try {
-      resolveModel({ model: "x", provider: "boardwalk", config: none, getEnv: env({}) });
+      resolveModel({ provider: "boardwalk", config: none, getEnv: env({}) });
       expect.unreachable();
     } catch (err) {
       expect(err).toBeInstanceOf(EngineError);
-      if (err instanceof EngineError) expect(err.code).toBe("UNSUPPORTED");
+      if (err instanceof EngineError) {
+        expect(err.code).toBe("MODEL_UNRESOLVED");
+        expect(err.message).toContain("BOARDWALK_API_KEY");
+      }
     }
   });
 
@@ -163,9 +217,9 @@ describe("resolveModel", () => {
     }
   });
 
-  it("rejects an empty model id", () => {
+  it("rejects an empty model id for an explicit provider", () => {
     expect(() => resolveModel({ model: "openai/", config: none, getEnv: env({}) })).toThrow(
-      /empty model id/,
+      /needs a model id/,
     );
   });
 });
