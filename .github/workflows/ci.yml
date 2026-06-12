@@ -15,6 +15,15 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      # @boardwalk-labs/workflow isn't on npm yet; this repo consumes it via a pnpm override
+      # (link:../sdk). Clone + build the public SDK sibling at ../sdk so its types resolve for
+      # lint/typecheck/build. Remove this step once the SDK publishes to the registry.
+      - name: Build the sibling SDK (../sdk)
+        run: |
+          git clone --depth 1 https://github.com/boardwalk-labs/sdk.git "$GITHUB_WORKSPACE/../sdk"
+          cd "$GITHUB_WORKSPACE/../sdk"
+          pnpm install --no-frozen-lockfile
+          pnpm build
       - run: pnpm install --frozen-lockfile
       - run: pnpm format:check
       - run: pnpm lint
