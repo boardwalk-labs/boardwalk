@@ -17,7 +17,7 @@ A workflow is a plain TypeScript program. This engine runs it:
 - **Embedded mode** — `@boardwalk/engine` as a library: one run, in-process supervision; this is
   what `boardwalk dev` uses.
 
-Same engine, same semantics as Boardwalk Cloud: one run = one process, `sleep` holds the
+Same engine, same semantics as the Boardwalk platform: one run = one process, `sleep` holds the
 process, a crash restarts the run from the top, `workflows.call` re-attaches idempotently.
 The conformance suite in this repo is the arbiter of that parity promise.
 
