@@ -14,19 +14,24 @@ export const systemClock: Clock = {
   now: () => Date.now(),
   sleep(ms: number, signal?: AbortSignal): Promise<void> {
     return new Promise((resolve, reject) => {
-      if (signal?.aborted) {
-        reject(abortError(signal));
+      if (signal === undefined) {
+        setTimeout(resolve, ms);
+        return;
+      }
+      const sig = signal;
+      if (sig.aborted) {
+        reject(abortError(sig));
         return;
       }
       const timer = setTimeout(() => {
-        signal?.removeEventListener("abort", onAbort);
+        sig.removeEventListener("abort", onAbort);
         resolve();
       }, ms);
       const onAbort = (): void => {
         clearTimeout(timer);
-        reject(abortError(signal as AbortSignal));
+        reject(abortError(sig));
       };
-      signal?.addEventListener("abort", onAbort, { once: true });
+      sig.addEventListener("abort", onAbort, { once: true });
     });
   },
 };

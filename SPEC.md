@@ -25,13 +25,15 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 
 - In-process cron (5/6-field exprs, IANA timezones — same validation as the manifest schema).
 - **A due fire happens exactly once.** Fire records are written transactionally with run creation.
-- **Catch-up policy on restart:** missed fires are detected and _skipped with a logged notice_ (default), per-workflow override `catch_up: "skip" | "once"` (run once for any number of missed fires). Never silent, never a thundering herd.
+- **Catch-up policy on restart:** missed fires are detected and _skipped with a logged notice_ (default), per-workflow override `catch_up: "skip" | "once"` (run once for any number of missed fires). The override lives in the workflow's engine-side **deploy config**, not the manifest — the SDK manifest has no `catch_up` field; this is engine-operational policy, not workflow behavior. Never silent, never a thundering herd.
 - `concurrency` manifest modes honored: `unlimited`, `serial` (queue next fire until prior run terminal), `serial_by_key`.
 
 ### 2.2 Run lifecycle
 
 - Statuses exactly as MASTER_SPEC §2.4: `queued → pending → running → completed | failed | cancelled` (+ transitional `cancelling`).
-- **One run = one spawned Node process** with an isolated working directory; the parent supervises (heartbeat via IPC).
+- **One run = one spawned Node process** with an isolated working directory; the parent supervises. Liveness is the child's `exit` event (same machine — no heartbeat protocol needed; a hung program is caught by the duration budget); an engine-orphaned child exits on IPC disconnect and the boot sweep owns its restart.
+- **The program arrives pre-bundled** (one ESM file, `@boardwalk/workflow` left external — the CLI bundles at deploy). The run dir carries a `node_modules/@boardwalk/workflow` symlink to the engine's own SDK install, so the program and the engine's child entry load ONE module instance (the SDK host seam is a module-level singleton) with no bundler in the engine.
+- **Envelope authority is the supervisor's:** the child sends event _bodies_; the parent is the single place envelopes are stamped and cursors allocated, resuming past `maxCursor` across crash-restarts.
 - **Hold-and-pay:** `sleep`/child-waits hold the child process. No checkpointing.
 - **Restart-on-crash:** supervisor detects child death → run restarts from the top (bounded restarts, then `failed`). `workflows.call` children re-attach via idempotency key on the restarted pass.
 - **Crash-safe state:** kill the _engine_ at any moment; on boot, a recovery sweep marks orphaned `running` rows → `pending` → restart. All multi-row writes are transactional (CODE_QUALITY §2.2).
@@ -59,7 +61,7 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 
 ### 2.5 What is **not** in this engine
 
-No accounts/orgs/billing, no machine classes (`runs_on` ignored with a warning), no automatic model routing (MASTER_SPEC §6.1 — omitted model uses the _configured default_, never a router), no egress policy enforcement, no Cloud-extension manifest capabilities. Programs needing absent capabilities fail loudly at validation (capability-presence rule, §4). Note `tools`/`mcp`/`skills`/`memory` are **not** in this list — the full `agent()` capability set is core, implemented here.
+No accounts/orgs/billing, no machine classes (`runs_on` ignored with a warning), no automatic model routing (MASTER*SPEC §6.1 — omitted model uses the \_configured default*, never a router), no egress policy enforcement, no Cloud-extension manifest capabilities. Programs needing absent capabilities fail loudly at validation (capability-presence rule, §4). Note `tools`/`mcp`/`skills`/`memory` are **not** in this list — the full `agent()` capability set is core, implemented here.
 
 ## 3. The conformance suite
 

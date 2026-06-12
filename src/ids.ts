@@ -18,14 +18,13 @@ export function ulid(timeMs: number = Date.now()): string {
   let time = "";
   let t = timeMs;
   for (let i = 0; i < TIME_LEN; i++) {
-    time = ENCODING[t % 32] + time;
+    time = ENCODING.charAt(t % 32) + time;
     t = Math.floor(t / 32);
   }
-  const bytes = randomBytes(RANDOM_LEN);
   let rand = "";
-  for (let i = 0; i < RANDOM_LEN; i++) {
+  for (const byte of randomBytes(RANDOM_LEN)) {
     // Why modulo a byte: 256 % 32 === 0, so each character stays uniformly distributed.
-    rand += ENCODING[(bytes[i] as number) % 32];
+    rand += ENCODING.charAt(byte % 32);
   }
   return time + rand;
 }
@@ -42,7 +41,7 @@ export function ulidTime(id: string): number {
   if (!isUlid(id)) throw new RangeError(`not a ULID: ${id}`);
   let t = 0;
   for (let i = 0; i < TIME_LEN; i++) {
-    t = t * 32 + ENCODING.indexOf(id[i] as string);
+    t = t * 32 + ENCODING.indexOf(id.charAt(i));
   }
   return t;
 }
