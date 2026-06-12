@@ -23,13 +23,16 @@ const childEntryPath = join(repoRoot, "dist", "run", "child.js");
 interface FakeProvider {
   port: number;
   requests: string[];
-  /** Script the next responses: text + token usage. The last entry repeats. */
+  /** Script the steady-state reply: text + token usage. */
   respondWith: (text: string, usage: { in: number; out: number }) => void;
+  /** Queue full response bodies served (in order) BEFORE the steady-state reply. */
+  queueResponses: (...bodies: object[]) => void;
   close: () => Promise<void>;
 }
 
 function startFakeProvider(): Promise<FakeProvider> {
   const requests: string[] = [];
+  const queue: object[] = [];
   let reply = { text: "fake-reply", usage: { in: 1, out: 1 } };
   const server = http.createServer((req, res) => {
     let body = "";
@@ -37,11 +40,14 @@ function startFakeProvider(): Promise<FakeProvider> {
     req.on("end", () => {
       requests.push(body);
       res.setHeader("content-type", "application/json");
+      const queued = queue.shift();
       res.end(
-        JSON.stringify({
-          choices: [{ message: { content: reply.text } }],
-          usage: { prompt_tokens: reply.usage.in, completion_tokens: reply.usage.out },
-        }),
+        JSON.stringify(
+          queued ?? {
+            choices: [{ finish_reason: "stop", message: { content: reply.text } }],
+            usage: { prompt_tokens: reply.usage.in, completion_tokens: reply.usage.out },
+          },
+        ),
       );
     });
   });
@@ -54,6 +60,9 @@ function startFakeProvider(): Promise<FakeProvider> {
         requests,
         respondWith: (text, usage) => {
           reply = { text, usage };
+        },
+        queueResponses: (...bodies) => {
+          queue.push(...bodies);
         },
         close: () => new Promise((r) => server.close(() => r())),
       });
@@ -230,16 +239,101 @@ describe("agent() through the full run path", () => {
     expect(row?.error?.message).toContain("max_tokens");
   }, 30_000);
 
-  it("capability selections fail the run loudly (capability-presence rule)", async () => {
+  it("MCP selection fails the run loudly (capability-presence rule; not implemented yet)", async () => {
     const f = fixture();
     const runId = await f.run(
-      "wants-tools",
+      "wants-mcp",
       `import { agent } from "@boardwalk/workflow";
-                await agent("search", { model: "local/test-model", tools: ["web_search"] });`,
+       await agent("search", {
+         model: "local/test-model",
+         mcp: [{ name: "gh", transport: "http", url: "https://mcp.example.com" }],
+       });`,
     );
     const row = f.store.getRun(runId);
     expect(row?.status).toBe("failed");
     expect(row?.error?.code).toBe("UNSUPPORTED");
-    expect(row?.error?.message).toContain("tools");
+    expect(row?.error?.message).toContain("MCP");
+  }, 30_000);
+
+  it("runs a program-defined tool loop through the real child process", async () => {
+    const f = fixture();
+    provider.queueResponses({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            content: null,
+            tool_calls: [{ id: "c1", function: { name: "lookup", arguments: '{"key":"answer"}' } }],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 5, completion_tokens: 5 },
+    });
+    provider.respondWith("the looked-up answer is 42", { in: 6, out: 4 });
+    const runId = await f.run(
+      "tool-user",
+      `import { agent, output } from "@boardwalk/workflow";
+       const table = { answer: "42" };
+       output(
+         await agent("look up the answer", {
+           model: "local/test-model",
+           tools: [
+             {
+               name: "lookup",
+               description: "Look up a value by key",
+               inputSchema: { type: "object", properties: { key: { type: "string" } } },
+               execute: async (input) => table[input.key] ?? "missing",
+             },
+           ],
+         }),
+       );`,
+    );
+
+    const row = f.store.getRun(runId);
+    expect(row?.status).toBe("completed");
+    expect(row?.output).toBe("the looked-up answer is 42");
+    // Usage accumulated across BOTH model calls of the loop.
+    expect(row?.tokensIn).toBe(11);
+    const kinds = f.store.listEvents(runId).map((e) => e.event.kind);
+    expect(kinds).toContain("tool_call_start");
+    expect(kinds).toContain("tool_call_result");
+  }, 30_000);
+
+  it("memory auto-persists across runs with NO declaration anywhere", async () => {
+    const f = fixture();
+    const program = `import { agent, output } from "@boardwalk/workflow";
+       output(await agent("take notes", { model: "local/test-model", memory: "mem/notes" }));`;
+
+    // Run 1: the model writes a memory file through the scoped tool.
+    provider.queueResponses({
+      choices: [
+        {
+          finish_reason: "tool_calls",
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: "m1",
+                function: {
+                  name: "memory_write",
+                  arguments: '{"path":"learned.md","content":"the sky is blue"}',
+                },
+              },
+            ],
+          },
+        },
+      ],
+      usage: { prompt_tokens: 1, completion_tokens: 1 },
+    });
+    provider.respondWith("noted", { in: 1, out: 1 });
+    const first = await f.run("memory-keeper", program);
+    expect(f.store.getRun(first)?.status).toBe("completed");
+
+    // Run 2: a FRESH run sees the persisted memory in its turn-start index.
+    provider.respondWith("I remember", { in: 1, out: 1 });
+    const second = await f.run("memory-keeper", program);
+    expect(f.store.getRun(second)?.status).toBe("completed");
+    const secondRequest = provider.requests.at(-1) ?? "";
+    expect(secondRequest).toContain("learned.md");
   }, 30_000);
 });

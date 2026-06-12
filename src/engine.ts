@@ -7,7 +7,7 @@
 // Layering: this file only wires store + supervisor + scheduler together and translates
 // program source → manifest at the deploy boundary. No business logic lives here.
 
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JsonValue, WorkflowManifest } from "@boardwalk/workflow";
@@ -52,10 +52,17 @@ export interface DeployArgs {
   program: string;
   /** Engine-side deploy config (e.g. catch_up). Replaced wholesale on redeploy. */
   config?: Record<string, JsonValue>;
+  /**
+   * Skill markdown deployed alongside the program, keyed by skill name (the CLI ships the
+   * project's skills/ dir this way). Every name declared in meta.skills must be present;
+   * replaced wholesale on redeploy.
+   */
+  skills?: Record<string, string>;
 }
 
 export class Engine {
   readonly store: Store;
+  private readonly dataDir: string;
   private readonly supervisor: RunSupervisor;
   private readonly scheduler: Scheduler;
   private started = false;
@@ -63,6 +70,7 @@ export class Engine {
 
   constructor(opts: EngineOptions) {
     mkdirSync(opts.dataDir, { recursive: true });
+    this.dataDir = opts.dataDir;
     this.store = new Store(join(opts.dataDir, "engine.db"));
     this.supervisor = new RunSupervisor({
       store: this.store,
@@ -120,12 +128,25 @@ export class Engine {
   deployWorkflow(args: DeployArgs): WorkflowRow {
     this.assertOpen();
     const manifest: WorkflowManifest = extractManifest(args.program, { fileName: "index.mjs" });
-    return this.store.upsertWorkflow({
+    const workflow = this.store.upsertWorkflow({
       name: manifest.name,
       manifest,
       program: args.program,
       ...(args.config !== undefined ? { config: args.config } : {}),
     });
+    // Skills are deploy artifacts, replaced wholesale: stale files from a previous deploy must
+    // not survive a redeploy that dropped them. (Skills are per-agent — no manifest field —
+    // so an agent() selecting an undeployed skill fails at call time, not here.)
+    const skills = Object.entries(args.skills ?? {});
+    const skillsDir = join(this.dataDir, "skills", workflow.id);
+    rmSync(skillsDir, { recursive: true, force: true });
+    if (skills.length > 0) {
+      mkdirSync(skillsDir, { recursive: true });
+      for (const [name, markdown] of skills) {
+        writeFileSync(join(skillsDir, `${name}.md`), markdown, "utf8");
+      }
+    }
+    return workflow;
   }
 
   /**

@@ -65,14 +65,15 @@ export function removeRunDir(dataDir: string, runId: string): void {
 }
 
 // ----------------------------------------------------------------------------
-// Workspace persistence (manifest workspace.persist — SPEC §2.3)
+// Workspace persistence (manifest workspace.persist + per-agent memory dirs — SPEC §2.3)
 //
 // The durable store is a per-WORKFLOW directory tree under <dataDir>/persist/<workflowId>:
 // hydrated into the run's workspace at FIRST start (a crash-restart keeps the workspace as
 // the crashed pass left it — re-hydrating would erase exactly the mid-run writes the
-// restarted pass uses to recover), and written back wholesale at SUCCESSFUL run end only.
-// Concurrent runs sharing a persistent dir are last-writer-wins by contract; persist path
-// segments are already schema-validated by the SDK (no `..`/`.`/empty — one validator).
+// restarted pass uses to recover), and written back at SUCCESSFUL run end only. What gets
+// written back = the manifest's workspace.persist selection PLUS every memory dir agent()
+// calls used this run (memory is auto-persisted, no declaration). Concurrent runs sharing a
+// persistent dir are last-writer-wins by contract.
 // ----------------------------------------------------------------------------
 
 export type PersistSelection = boolean | readonly string[] | undefined;
@@ -82,36 +83,34 @@ export function persistRoot(dataDir: string, workflowId: string): string {
   return join(dataDir, "persist", workflowId);
 }
 
-/** Copy persisted state into a fresh run workspace (first attempt only — see above). */
-export function hydrateWorkspace(
-  root: string,
-  persist: PersistSelection,
-  workspaceDir: string,
-): void {
-  if (persist === undefined || persist === false) return;
-  if (persist === true) {
-    if (existsSync(root)) cpSync(root, workspaceDir, { recursive: true });
-    return;
-  }
-  for (const dir of persist) {
-    const source = join(root, dir);
-    if (existsSync(source)) cpSync(source, join(workspaceDir, dir), { recursive: true });
-  }
+/**
+ * Copy persisted state into a fresh run workspace (first attempt only — see above). The whole
+ * durable root is hydrated: it only ever contains what a previous successful run persisted
+ * (declared dirs + memory dirs), so all of it belongs in the workspace.
+ */
+export function hydrateWorkspace(root: string, workspaceDir: string): void {
+  if (existsSync(root)) cpSync(root, workspaceDir, { recursive: true });
 }
 
-/** Replace the durable store with the run's final state (successful runs only). */
+/**
+ * Replace the durable store with the run's final state (successful runs only). `memoryDirs`
+ * are the per-agent memory directories used this run — persisted in addition to the
+ * manifest's selection (deduplicated; a memory dir inside `persist: true` costs nothing).
+ */
 export function persistWorkspace(
   root: string,
   persist: PersistSelection,
+  memoryDirs: ReadonlySet<string>,
   workspaceDir: string,
 ): void {
-  if (persist === undefined || persist === false) return;
   if (persist === true) {
     rmSync(root, { recursive: true, force: true });
     cpSync(workspaceDir, root, { recursive: true });
     return;
   }
-  for (const dir of persist) {
+  const declared = persist === undefined || persist === false ? [] : persist;
+  const dirs = new Set([...declared, ...memoryDirs]);
+  for (const dir of dirs) {
     const source = join(workspaceDir, dir);
     const target = join(root, dir);
     rmSync(target, { recursive: true, force: true });

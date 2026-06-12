@@ -13,6 +13,7 @@ import type { WorkflowHost } from "@boardwalk/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk/workflow";
 import { runAgentLeaf } from "../agent/leaf.js";
 import { Redactor } from "../agent/redact.js";
+import type { ToolSetContext } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
   resolvedModelSchema,
@@ -30,6 +31,8 @@ export interface ChildHostIo {
   startTurn(turnId: string): void;
   /** Report leaf usage to the supervisor — the budget authority. */
   reportUsage(modelRef: string, usage: TokenUsage): void;
+  /** Tell the supervisor a memory dir is in use (auto-persisted at successful run end). */
+  memoryUsed(dir: string): void;
 }
 
 /** Rebuild a typed EngineError from its IPC shape so program-visible errors keep code + hint. */
@@ -38,7 +41,7 @@ export function errorFromIpc(shape: IpcErrorShape): Error {
   return new EngineError(code, shape.message, shape.hint);
 }
 
-export function createChildHost(io: ChildHostIo): WorkflowHost {
+export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): WorkflowHost {
   let phaseCount = 0;
   // One redactor for the whole run process: every secret value revealed to the program (and
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
@@ -62,7 +65,9 @@ export function createChildHost(io: ChildHostIo): WorkflowHost {
         startTurn: (turnId) => io.startTurn(turnId),
         emit: (turnId, body) => io.emit(body, turnId),
         reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
+        memoryUsed: (dir) => io.memoryUsed(dir),
         redactor,
+        capabilities,
       });
     },
 

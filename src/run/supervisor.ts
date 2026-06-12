@@ -19,7 +19,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import {
   makeCursor,
   runEventSchema,
@@ -32,6 +32,7 @@ import {
 import type { RunStatus } from "../store/store.js";
 import { usageUsdMicros } from "../agent/rates.js";
 import { resolveModel, type InferenceConfig } from "../agent/resolve.js";
+import { MEMORY_PATH_RE } from "../agent/tools.js";
 import { systemClock, type Clock } from "../clock.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
@@ -88,6 +89,8 @@ interface ActiveRun {
   cancelRequested: boolean;
   /** Set when a budget kill is in flight — names which budget, for the failure message. */
   budgetReason: string | null;
+  /** Memory dirs agent() calls used this run — auto-persisted at successful run end. */
+  memoryDirs: Set<string>;
   envelope: { turn: number; seq: number };
 }
 
@@ -159,6 +162,7 @@ export class RunSupervisor {
       child: null,
       cancelRequested: false,
       budgetReason: null,
+      memoryDirs: new Set(),
       envelope: this.resumeEnvelope(runId),
     };
     entry.promise = this.execute(run, entry)
@@ -268,11 +272,7 @@ export class RunSupervisor {
       const dirs = prepareRunDir(this.dataDir, run.id, workflow.program);
       if (!hydrated) {
         hydrated = true;
-        hydrateWorkspace(
-          persistRoot(this.dataDir, workflow.id),
-          manifest.workspace?.persist,
-          dirs.workspaceDir,
-        );
+        hydrateWorkspace(persistRoot(this.dataDir, workflow.id), dirs.workspaceDir);
       }
       const startedAt = firstStartedAt ?? this.clock.now();
       this.store.updateRunStatus(run.id, "running", { startedAt });
@@ -293,10 +293,12 @@ export class RunSupervisor {
           // never land on `completed` (the output event above is still preserved).
           if (entry.cancelRequested) return this.finishRun(run.id, entry, "cancelled", {});
           // Persist-back happens at SUCCESSFUL run end only (failed/cancelled runs must not
-          // overwrite the durable state with a half-finished workspace).
+          // overwrite the durable state with a half-finished workspace). Per-agent memory
+          // dirs used this run are persisted alongside the manifest's selection.
           persistWorkspace(
             persistRoot(this.dataDir, workflow.id),
             manifest.workspace?.persist,
+            entry.memoryDirs,
             dirs.workspaceDir,
           );
           return this.finishRun(run.id, entry, "completed", {
@@ -437,6 +439,15 @@ export class RunSupervisor {
           case "report_usage":
             this.recordUsage(run.id, entry, workflow, msg.modelRef, msg.usage);
             break;
+          case "memory_used":
+            // The child validated the path, but the parent persists it — re-check the shape
+            // before it can ever reach a filesystem copy (CODE_QUALITY §2.1).
+            if (MEMORY_PATH_RE.test(msg.dir) && !msg.dir.includes("\\")) {
+              entry.memoryDirs.add(msg.dir);
+            } else {
+              console.error(`run ${run.id}: ignored malformed memory dir from child`);
+            }
+            break;
           case "done":
             settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
             break;
@@ -459,6 +470,7 @@ export class RunSupervisor {
         runId: run.id,
         programPath: dirs.programPath,
         workspaceDir: dirs.workspaceDir,
+        skillsDir: this.skillsDirFor(workflow.id),
         input: run.input,
         config: workflow.config,
         manifest: workflow.manifest,
@@ -716,6 +728,12 @@ export class RunSupervisor {
     const run = this.store.getRun(runId);
     if (run === null) throw new EngineError("INTERNAL", `Run ${runId} vanished from the store.`);
     return run;
+  }
+
+  /** Deployed skills live at <dataDir>/skills/<workflowId>/<name>.md (written at deploy). */
+  private skillsDirFor(workflowId: string): string | null {
+    const dir = join(this.dataDir, "skills", workflowId);
+    return existsSync(dir) ? dir : null;
   }
 }
 

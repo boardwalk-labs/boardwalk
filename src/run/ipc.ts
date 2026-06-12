@@ -37,6 +37,8 @@ export interface InitMessage {
   programPath: string;
   /** The run's isolated working directory (the child chdirs here before importing the program). */
   workspaceDir: string;
+  /** Where this workflow's deployed skills live, or null when none were deployed. */
+  skillsDir: string | null;
   input: unknown;
   config: Record<string, JsonValue>;
   manifest: WorkflowManifest;
@@ -58,6 +60,7 @@ export const parentToChildSchema = z.union([
     runId: z.string().min(1),
     programPath: z.string().min(1),
     workspaceDir: z.string().min(1),
+    skillsDir: z.string().min(1).nullable(),
     input: z.unknown(),
     config: z.record(z.string(), z.unknown()),
     manifest: z.record(z.string(), z.unknown()),
@@ -117,6 +120,11 @@ export const childToParentSchema = z.union([
     type: z.literal("report_usage"),
     modelRef: z.string().min(1),
     usage: tokenUsageShape,
+  }),
+  z.object({
+    // An agent() call is using a memory dir — the supervisor auto-persists it at success.
+    type: z.literal("memory_used"),
+    dir: z.string().min(1),
   }),
   z.object({
     type: z.literal("done"),

@@ -55,36 +55,43 @@ process.on("message", (raw: unknown) => {
 
   if (initialized) return; // A second init is a protocol violation; ignore.
   initialized = true;
-  void runProgram(msg.programPath, msg.workspaceDir, msg.input, msg.config);
+  void runProgram(msg.programPath, msg.workspaceDir, msg.skillsDir, msg.input, msg.config);
 });
 
 async function runProgram(
   programPath: string,
   workspaceDir: string,
+  skillsDir: string | null,
   input: unknown,
   config: Record<string, unknown>,
 ): Promise<void> {
   try {
     process.chdir(workspaceDir);
     installHost(
-      createChildHost({
-        request(method, args) {
-          return new Promise((resolve, reject) => {
-            const callId = nextCallId++;
-            pending.set(callId, { resolve, reject });
-            send({ type: "host_call", callId, method, args });
-          });
+      createChildHost(
+        {
+          request(method, args) {
+            return new Promise((resolve, reject) => {
+              const callId = nextCallId++;
+              pending.set(callId, { resolve, reject });
+              send({ type: "host_call", callId, method, args });
+            });
+          },
+          emit(body: RunEventBody, turnId?: string) {
+            send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
+          },
+          startTurn(turnId: string) {
+            send({ type: "turn_started", turnId });
+          },
+          reportUsage(modelRef, usage) {
+            send({ type: "report_usage", modelRef, usage });
+          },
+          memoryUsed(dir) {
+            send({ type: "memory_used", dir });
+          },
         },
-        emit(body: RunEventBody, turnId?: string) {
-          send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
-        },
-        startTurn(turnId: string) {
-          send({ type: "turn_started", turnId });
-        },
-        reportUsage(modelRef, usage) {
-          send({ type: "report_usage", modelRef, usage });
-        },
-      }),
+        { workspaceDir, skillsDir },
+      ),
     );
     installInput(input);
     installConfig(narrowConfig(config));

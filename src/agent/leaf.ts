@@ -1,19 +1,21 @@
-// The agent() leaf, v0: single-turn inference with streaming events, secret redaction, schema
-// output, and usage reporting. Runs IN THE PROGRAM PROCESS (program-defined tools must execute
-// there when the tool loop lands); model/provider/key resolution happens supervisor-side and
-// arrives through `io.resolve`.
-//
-// Capability selections (tools/mcp/skills/memory) are NOT implemented yet — per the
-// capability-presence rule (MASTER_SPEC §4) a program asking for them fails loudly here
-// instead of silently degrading to bare inference.
+// The agent() leaf: a real agentic loop (SDK SPEC §2.1.1) — streamed model turns with tool
+// use (program-defined ToolDefs + memory file tools), skills loaded into context, schema
+// output, secret redaction, and usage reporting. Runs IN THE PROGRAM PROCESS (tool `execute`
+// must run in the trusted layer); model/provider/key resolution happens supervisor-side and
+// arrives through `io.resolve`. MCP server selection is the one capability still pending —
+// it fails loudly in buildToolSet per the capability-presence rule.
 
 import { randomUUID } from "node:crypto";
-import type { AgentOptions } from "@boardwalk/workflow";
-import type { TokenUsage } from "@boardwalk/workflow";
+import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk/workflow";
 import { EngineError } from "../errors.js";
-import { chatAnthropic, chatOpenAi, type ChatResult, type ProviderIo } from "./providers.js";
+import type { ChatMessage, ChatTurn, ToolCallRequest } from "./conversation.js";
+import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
+import { buildToolSet, type ExecutableTool, type ToolSetContext } from "./tools.js";
+
+/** Tool iterations per agent() call before the loop is declared runaway. */
+const MAX_TOOL_ITERATIONS = 25;
 
 /**
  * A leaf event body, scoped to the leaf's turn. `turn_started` itself is emitted by the
@@ -28,7 +30,12 @@ export type LeafEventBody =
     }
   | { kind: "text_start"; blockId: string }
   | { kind: "text_delta"; blockId: string; text: string }
-  | { kind: "text_end"; blockId: string };
+  | { kind: "text_end"; blockId: string }
+  | { kind: "tool_call_start"; toolCallId: string; toolName: string }
+  | { kind: "tool_call_input_complete"; toolCallId: string; input: Record<string, unknown> }
+  | { kind: "tool_call_executing"; toolCallId: string }
+  | { kind: "tool_call_result"; toolCallId: string; result: ToolReturn }
+  | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } };
 
 export interface LeafIo {
   /** Supervisor-side model resolution (config + key material never live in this process). */
@@ -36,9 +43,14 @@ export interface LeafIo {
   /** Open a new turn block; subsequent leaf events carry this turnId. */
   startTurn(turnId: string): void;
   emit(turnId: string, body: LeafEventBody): void;
-  /** Usage flows to the supervisor — the budget authority — as soon as it is known. */
+  /** Usage flows to the supervisor — the budget authority — after EVERY model call, so a
+   *  long tool loop can be terminated mid-flight. */
   reportUsage(modelRef: string, usage: TokenUsage): void;
+  /** Tell the engine a memory dir is in use — it auto-persists it across runs. */
+  memoryUsed(dir: string): void;
   redactor: Redactor;
+  /** Capability context: where the workspace and deployed skills live. */
+  capabilities: ToolSetContext;
   provider?: ProviderIo;
 }
 
@@ -48,22 +60,91 @@ export async function runAgentLeaf(
   opts: AgentOptions | undefined,
   io: LeafIo,
 ): Promise<unknown> {
-  rejectUnimplementedCapabilities(opts);
+  const { tools, preamble, memoryDir } = buildToolSet(opts, io.capabilities);
+  if (memoryDir !== null) io.memoryUsed(memoryDir);
 
   const resolved = await io.resolve(opts?.model, opts?.provider);
   // The provider key is now known to this process — make sure it can never reach the model.
   if (resolved.apiKey !== null) io.redactor.add(`api-key:${resolved.provider}`, resolved.apiKey);
 
-  const fullPrompt =
+  const schemaInstruction =
     opts?.schema === undefined
-      ? prompt
-      : `${prompt}\n\nRespond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`;
-  const redactedPrompt = io.redactor.redact(fullPrompt);
+      ? []
+      : [
+          `Respond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`,
+        ];
+  const firstMessage = [...preamble, prompt, ...schemaInstruction].join("\n\n");
 
   const turnId = `turn-${randomUUID()}`;
   io.startTurn(turnId);
 
-  const blockId = "text-1";
+  const totals: { inputTokens: number; outputTokens: number } = {
+    inputTokens: 0,
+    outputTokens: 0,
+  };
+  const messages: ChatMessage[] = [{ role: "user", text: io.redactor.redact(firstMessage) }];
+
+  let finalText: string;
+  try {
+    finalText = await runToolLoop(messages, tools, resolved, io, turnId, totals);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const code = err instanceof EngineError ? err.code : "PROVIDER_ERROR";
+    io.emit(turnId, { kind: "turn_ended", reason: "error", error: { code, message } });
+    throw err;
+  }
+  io.emit(turnId, {
+    kind: "turn_ended",
+    reason: "complete",
+    usage: { inputTokens: totals.inputTokens, outputTokens: totals.outputTokens },
+  });
+
+  return opts?.schema === undefined ? finalText : parseSchemaOutput(finalText);
+}
+
+async function runToolLoop(
+  messages: ChatMessage[],
+  tools: readonly ExecutableTool[],
+  resolved: ResolvedModel,
+  io: LeafIo,
+  turnId: string,
+  totals: { inputTokens: number; outputTokens: number },
+): Promise<string> {
+  for (let iteration = 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
+    const turn = await modelTurn(messages, tools, resolved, io, turnId, iteration);
+
+    totals.inputTokens += turn.usage.inputTokens ?? 0;
+    totals.outputTokens += turn.usage.outputTokens ?? 0;
+    io.reportUsage(resolved.ref, turn.usage);
+
+    if (!turn.wantsTools || turn.toolCalls.length === 0) {
+      return turn.text;
+    }
+
+    messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
+    const results = [];
+    for (const call of turn.toolCalls) {
+      results.push(await executeToolCall(call, tools, io, turnId));
+    }
+    messages.push({ role: "tool_results", results });
+  }
+  throw new EngineError(
+    "PROGRAM_ERROR",
+    `agent() exceeded ${String(MAX_TOOL_ITERATIONS)} tool iterations without a final answer.`,
+    "The model is looping on tool calls. Tighten the prompt, or split the work across calls.",
+  );
+}
+
+/** One model call with streamed text events (block ids are unique per iteration). */
+async function modelTurn(
+  messages: readonly ChatMessage[],
+  tools: readonly ExecutableTool[],
+  resolved: ResolvedModel,
+  io: LeafIo,
+  turnId: string,
+  iteration: number,
+): Promise<ChatTurn> {
+  const blockId = `text-${String(iteration)}`;
   let blockOpen = false;
   const providerIo: ProviderIo = {
     ...io.provider,
@@ -75,53 +156,71 @@ export async function runAgentLeaf(
       io.emit(turnId, { kind: "text_delta", blockId, text: io.redactor.redact(text) });
     },
   };
-
-  let result: ChatResult;
-  try {
-    const args = {
-      baseUrl: resolved.baseUrl,
-      apiKey: resolved.apiKey,
-      modelId: resolved.modelId,
-      prompt: redactedPrompt,
-    };
-    result =
-      resolved.protocol === "anthropic"
-        ? await chatAnthropic(args, providerIo)
-        : await chatOpenAi(args, providerIo);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const code = err instanceof EngineError ? err.code : "PROVIDER_ERROR";
-    io.emit(turnId, { kind: "turn_ended", reason: "error", error: { code, message } });
-    throw err;
-  }
+  const args: ChatArgs = {
+    baseUrl: resolved.baseUrl,
+    apiKey: resolved.apiKey,
+    modelId: resolved.modelId,
+    messages,
+    tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
+  };
+  const turn =
+    resolved.protocol === "anthropic"
+      ? await chatAnthropic(args, providerIo)
+      : await chatOpenAi(args, providerIo);
   if (blockOpen) io.emit(turnId, { kind: "text_end", blockId });
-  io.emit(turnId, { kind: "turn_ended", reason: "complete", usage: result.usage });
-  io.reportUsage(resolved.ref, result.usage);
-
-  return opts?.schema === undefined ? result.text : parseSchemaOutput(result.text);
+  return turn;
 }
 
-function rejectUnimplementedCapabilities(opts: AgentOptions | undefined): void {
-  const wanted: string[] = [];
-  if (opts?.tools !== undefined && opts.tools.length > 0) wanted.push("tools");
-  if (opts?.mcp !== undefined && opts.mcp.length > 0) wanted.push("mcp");
-  if (opts?.skills !== undefined && opts.skills.length > 0) wanted.push("skills");
-  if (opts?.memory !== undefined) wanted.push("memory");
-  if (wanted.length > 0) {
-    throw new EngineError(
-      "UNSUPPORTED",
-      `agent() capability selection (${wanted.join(", ")}) is not implemented in this engine build yet.`,
-      "The full capability set (tools, MCP, skills, memory) is on the engine roadmap; " +
-        "plain agent(prompt) and agent(prompt, { schema }) work today.",
-    );
+/** Run one tool call; failures return to the MODEL as error results, they don't fail the run. */
+async function executeToolCall(
+  call: ToolCallRequest,
+  tools: readonly ExecutableTool[],
+  io: LeafIo,
+  turnId: string,
+): Promise<{ id: string; content: string; isError: boolean }> {
+  io.emit(turnId, { kind: "tool_call_start", toolCallId: call.id, toolName: call.name });
+  io.emit(turnId, { kind: "tool_call_input_complete", toolCallId: call.id, input: call.input });
+
+  const tool = tools.find((t) => t.name === call.name);
+  if (tool === undefined) {
+    // The model invented a tool name — its mistake to recover from, not a run failure.
+    const message = `Unknown tool "${call.name}".`;
+    io.emit(turnId, {
+      kind: "tool_call_error",
+      toolCallId: call.id,
+      error: { code: "VALIDATION", message },
+    });
+    return { id: call.id, content: message, isError: true };
   }
+
+  io.emit(turnId, { kind: "tool_call_executing", toolCallId: call.id });
+  try {
+    // Tool results enter model context → redact (MASTER_SPEC §6.2 covers tool results too).
+    const content = io.redactor.redact(await tool.execute(call.input));
+    io.emit(turnId, {
+      kind: "tool_call_result",
+      toolCallId: call.id,
+      result: { humanSummary: summarize(content) },
+    });
+    return { id: call.id, content, isError: false };
+  } catch (err) {
+    const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
+    const code = err instanceof EngineError ? err.code : "PROGRAM_ERROR";
+    io.emit(turnId, { kind: "tool_call_error", toolCallId: call.id, error: { code, message } });
+    return { id: call.id, content: `Tool failed: ${message}`, isError: true };
+  }
+}
+
+function summarize(content: string): string {
+  const flat = content.replaceAll("\n", " ");
+  return flat.length <= 120 ? flat : `${flat.slice(0, 117)}…`;
 }
 
 /**
  * Schema mode: parse the model's final text as JSON; a non-JSON answer fails the run (the
  * documented contract). Code fences are stripped first — models add them despite instructions.
- * v0 parity note: like the Boardwalk platform today, the schema drives the PROMPT and the JSON parse;
- * structural validation against the schema itself is a later, cross-engine decision.
+ * v0 parity note: like the hosted platform today, the schema drives the PROMPT and the JSON
+ * parse; structural validation against the schema itself is a later, cross-engine decision.
  */
 function parseSchemaOutput(text: string): unknown {
   const stripped = text

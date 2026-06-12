@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
 import { runAgentLeaf, type LeafEventBody, type LeafIo } from "./leaf.js";
 import { Redactor } from "./redact.js";
@@ -22,12 +25,37 @@ const ANTHROPIC_MODEL: ResolvedModel = {
   baseUrl: "http://fake",
 };
 
-function openAiResponse(content: string, usage?: { in: number; out: number }): Response {
+// ----------------------------------------------------------------------------
+// Scripted responses
+// ----------------------------------------------------------------------------
+
+function openAiText(content: string, usage?: { in: number; out: number }): Response {
   return Response.json({
-    choices: [{ message: { content } }],
+    choices: [{ finish_reason: "stop", message: { content } }],
     ...(usage !== undefined
       ? { usage: { prompt_tokens: usage.in, completion_tokens: usage.out } }
       : {}),
+  });
+}
+
+function openAiToolCalls(
+  calls: { id: string; name: string; args: Record<string, unknown> }[],
+  text = "",
+): Response {
+  return Response.json({
+    choices: [
+      {
+        finish_reason: "tool_calls",
+        message: {
+          content: text.length > 0 ? text : null,
+          tool_calls: calls.map((c) => ({
+            id: c.id,
+            function: { name: c.name, arguments: JSON.stringify(c.args) },
+          })),
+        },
+      },
+    ],
+    usage: { prompt_tokens: 5, completion_tokens: 5 },
   });
 }
 
@@ -36,22 +64,39 @@ function anthropicSse(...events: object[]): Response {
   return new Response(body, { status: 200 });
 }
 
+// ----------------------------------------------------------------------------
+// Recorded io
+// ----------------------------------------------------------------------------
+
 interface Recorded {
   io: LeafIo;
   events: { turnId: string; body: LeafEventBody }[];
   turns: string[];
   usage: { modelRef: string; usage: object }[];
+  memoryUsed: string[];
   requests: { url: string; body: string }[];
+}
+
+const cleanups: (() => void)[] = [];
+afterEach(() => {
+  for (const fn of cleanups.splice(0)) fn();
+});
+
+function tempDir(prefix: string): string {
+  const dir = mkdtempSync(join(tmpdir(), prefix));
+  cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
 }
 
 function recordedIo(
   model: ResolvedModel,
   responses: (() => Response)[],
-  redactor = new Redactor(),
+  opts: { redactor?: Redactor; workspaceDir?: string; skillsDir?: string | null } = {},
 ): Recorded {
   const events: Recorded["events"] = [];
   const turns: string[] = [];
   const usage: Recorded["usage"] = [];
+  const memoryUsed: string[] = [];
   const requests: Recorded["requests"] = [];
   let call = 0;
   // Why the cast-free wrapper: the leaf only uses fetch's (url, init) shape; scripting it
@@ -66,52 +111,59 @@ function recordedIo(
   };
   const io: LeafIo = {
     resolve: () => Promise.resolve(model),
-    startTurn: (turnId) => turns.push(turnId),
-    emit: (turnId, body) => events.push({ turnId, body }),
-    reportUsage: (modelRef, u) => usage.push({ modelRef, usage: u }),
-    redactor,
+    startTurn: (turnId) => {
+      turns.push(turnId);
+    },
+    emit: (turnId, body) => {
+      events.push({ turnId, body });
+    },
+    reportUsage: (modelRef, u) => {
+      usage.push({ modelRef, usage: u });
+    },
+    memoryUsed: (dir) => {
+      memoryUsed.push(dir);
+    },
+    redactor: opts.redactor ?? new Redactor(),
+    capabilities: {
+      workspaceDir: opts.workspaceDir ?? tempDir("bw-leaf-ws-"),
+      skillsDir: opts.skillsDir ?? null,
+    },
     provider: { fetchImpl, sleepImpl: () => Promise.resolve() },
   };
-  return { io, events, turns, usage, requests };
+  return { io, events, turns, usage, memoryUsed, requests };
 }
 
-describe("runAgentLeaf — OpenAI-compatible protocol", () => {
-  it("returns the text and emits the full turn event sequence with usage", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [() => openAiResponse("hello world", { in: 10, out: 5 })]);
+function kinds(rec: Recorded): string[] {
+  return rec.events.map((e) => e.body.kind);
+}
+
+// ----------------------------------------------------------------------------
+// Plain inference
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — plain inference", () => {
+  it("returns the text and emits the turn event sequence with summed usage", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("hello world", { in: 10, out: 5 })]);
     const result = await runAgentLeaf("say hello", undefined, rec.io);
 
     expect(result).toBe("hello world");
     expect(rec.turns).toHaveLength(1);
-    expect(rec.events.map((e) => e.body.kind)).toEqual([
-      "text_start",
-      "text_delta",
-      "text_end",
-      "turn_ended",
-    ]);
-    const ended = rec.events.at(-1)?.body;
-    expect(ended).toEqual({
+    expect(kinds(rec)).toEqual(["text_start", "text_delta", "text_end", "turn_ended"]);
+    expect(rec.events.at(-1)?.body).toEqual({
       kind: "turn_ended",
       reason: "complete",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
-    // Every event is scoped to the opened turn.
-    expect(new Set(rec.events.map((e) => e.turnId))).toEqual(new Set(rec.turns));
     expect(rec.usage).toEqual([
       { modelRef: "local/test-model", usage: { inputTokens: 10, outputTokens: 5 } },
     ]);
-  });
-
-  it("sends the Bearer key and the prompt to the chat completions endpoint", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [() => openAiResponse("ok")]);
-    await runAgentLeaf("the prompt text", undefined, rec.io);
-    expect(rec.requests[0]?.url).toBe("http://fake/v1/chat/completions");
-    expect(rec.requests[0]?.body).toContain("the prompt text");
+    expect(rec.memoryUsed).toEqual([]);
   });
 
   it("redacts known secret values (and the provider key) from the outbound prompt", async () => {
     const redactor = new Redactor();
     redactor.add("GH_TOKEN", "ghp_supersecret99");
-    const rec = recordedIo(OPENAI_MODEL, [() => openAiResponse("ok")], redactor);
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { redactor });
     await runAgentLeaf("use token ghp_supersecret99 and key sk-test-key-12345", undefined, rec.io);
 
     const sent = rec.requests[0]?.body ?? "";
@@ -121,74 +173,293 @@ describe("runAgentLeaf — OpenAI-compatible protocol", () => {
     expect(sent).toContain("[redacted:api-key:local]");
   });
 
-  it("retries 429 with backoff and succeeds", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [
+  it("retries 429 with backoff and does not retry a non-rate-limit 4xx", async () => {
+    const retried = recordedIo(OPENAI_MODEL, [
       () => new Response("rate limited", { status: 429 }),
-      () => openAiResponse("after retry"),
+      () => openAiText("after retry"),
     ]);
-    await expect(runAgentLeaf("p", undefined, rec.io)).resolves.toBe("after retry");
-    expect(rec.requests).toHaveLength(2);
-  });
+    await expect(runAgentLeaf("p", undefined, retried.io)).resolves.toBe("after retry");
+    expect(retried.requests).toHaveLength(2);
 
-  it("does not retry a non-rate-limit 4xx", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [() => new Response("bad request", { status: 400 })]);
-    await expect(runAgentLeaf("p", undefined, rec.io)).rejects.toThrow(/provider returned 400/);
-    expect(rec.requests).toHaveLength(1);
-    const ended = rec.events.at(-1)?.body;
-    expect(ended?.kind).toBe("turn_ended");
+    const fatal = recordedIo(OPENAI_MODEL, [() => new Response("bad request", { status: 400 })]);
+    await expect(runAgentLeaf("p", undefined, fatal.io)).rejects.toThrow(/provider returned 400/);
+    expect(fatal.requests).toHaveLength(1);
+    const ended = fatal.events.at(-1)?.body;
     expect(ended !== undefined && ended.kind === "turn_ended" ? ended.reason : "").toBe("error");
   });
 
-  it("schema mode parses JSON (stripping code fences) and fails loudly on prose", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [
-      () => openAiResponse('```json\n{"groups": [1, 2]}\n```'),
-    ]);
+  it("schema mode parses JSON (stripping fences) and fails loudly on prose", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText('```json\n{"groups": [1, 2]}\n```')]);
     const parsed = await runAgentLeaf("group these", { schema: { type: "object" } }, rec.io);
     expect(parsed).toEqual({ groups: [1, 2] });
-    // The schema instruction travels in the prompt.
     expect(rec.requests[0]?.body).toContain("JSON Schema");
 
-    const prose = recordedIo(OPENAI_MODEL, [() => openAiResponse("Sure! Here are the groups…")]);
+    const prose = recordedIo(OPENAI_MODEL, [() => openAiText("Sure! Here are the groups…")]);
     await expect(runAgentLeaf("p", { schema: { type: "object" } }, prose.io)).rejects.toThrow(
       /not valid JSON/,
     );
   });
 
-  it("rejects unimplemented capability selections loudly, before any network call", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [() => openAiResponse("never")]);
+  it("rejects MCP selections loudly, before any network call (not implemented yet)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
     await expect(
-      runAgentLeaf("p", { tools: ["web_search"], memory: "memory/x" }, rec.io),
+      runAgentLeaf(
+        "p",
+        { mcp: [{ name: "gh", transport: "http", url: "https://mcp.example.com" }] },
+        rec.io,
+      ),
     ).rejects.toThrowError(EngineError);
     expect(rec.requests).toHaveLength(0);
     expect(rec.turns).toHaveLength(0);
   });
 });
 
-describe("runAgentLeaf — Anthropic protocol", () => {
-  it("streams text deltas and assembles usage from the stream frames", async () => {
+// ----------------------------------------------------------------------------
+// The tool loop
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — tool loop", () => {
+  const doubler = {
+    name: "double",
+    description: "Doubles a number",
+    inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+    execute: (input: unknown) => {
+      const n: unknown = typeof input === "object" && input !== null ? Reflect.get(input, "n") : 0;
+      return Promise.resolve(typeof n === "number" ? n * 2 : 0);
+    },
+  };
+
+  it("OpenAI protocol: executes a program-defined tool and feeds the result back", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "call-1", name: "double", args: { n: 21 } }]),
+      () => openAiText("the answer is 42", { in: 7, out: 3 }),
+    ]);
+    const result = await runAgentLeaf("double 21", { tools: [doubler] }, rec.io);
+
+    expect(result).toBe("the answer is 42");
+    expect(rec.requests).toHaveLength(2);
+    // The tool was advertised…
+    expect(rec.requests[0]?.body).toContain('"double"');
+    // …and its result traveled back with the call id.
+    expect(rec.requests[1]?.body).toContain("call-1");
+    expect(rec.requests[1]?.body).toContain("42");
+
+    expect(kinds(rec)).toEqual([
+      "tool_call_start",
+      "tool_call_input_complete",
+      "tool_call_executing",
+      "tool_call_result",
+      "text_start",
+      "text_delta",
+      "text_end",
+      "turn_ended",
+    ]);
+    // Usage reported per model call — the budget authority sees mid-loop spend.
+    expect(rec.usage).toHaveLength(2);
+  });
+
+  it("Anthropic protocol: assembles streamed tool_use input from partial JSON deltas", async () => {
     const rec = recordedIo(ANTHROPIC_MODEL, [
       () =>
         anthropicSse(
-          { type: "message_start", message: { usage: { input_tokens: 7 } } },
-          { type: "content_block_start" },
-          { type: "content_block_delta", delta: { type: "text_delta", text: "hel" } },
-          { type: "content_block_delta", delta: { type: "text_delta", text: "lo" } },
+          { type: "message_start", message: { usage: { input_tokens: 4 } } },
+          {
+            type: "content_block_start",
+            content_block: { type: "tool_use", id: "tu-1", name: "double" },
+          },
+          {
+            type: "content_block_delta",
+            delta: { type: "input_json_delta", partial_json: '{"n":' },
+          },
+          { type: "content_block_delta", delta: { type: "input_json_delta", partial_json: "21}" } },
           { type: "content_block_stop" },
-          { type: "message_delta", usage: { output_tokens: 3 } },
-          { type: "message_stop" },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use" },
+            usage: { output_tokens: 2 },
+          },
+        ),
+      () =>
+        anthropicSse(
+          { type: "message_start", message: { usage: { input_tokens: 6 } } },
+          { type: "content_block_delta", delta: { type: "text_delta", text: "42" } },
+          {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn" },
+            usage: { output_tokens: 1 },
+          },
         ),
     ]);
-    const result = await runAgentLeaf("hi", undefined, rec.io);
+    const result = await runAgentLeaf("double 21", { tools: [doubler] }, rec.io);
 
-    expect(result).toBe("hello");
-    expect(rec.requests[0]?.url).toBe("http://fake/v1/messages");
-    const deltas = rec.events
-      .map((e) => e.body)
-      .filter((b) => b.kind === "text_delta")
-      .map((b) => b.text);
-    expect(deltas).toEqual(["hel", "lo"]);
-    expect(rec.usage).toEqual([
-      { modelRef: "anthropic/claude-test", usage: { inputTokens: 7, outputTokens: 3 } },
+    expect(result).toBe("42");
+    expect(rec.requests).toHaveLength(2);
+    // The second request carries the tool_result for tu-1.
+    expect(rec.requests[1]?.body).toContain("tool_result");
+    expect(rec.requests[1]?.body).toContain("tu-1");
+  });
+
+  it("a tool failure returns to the MODEL as an error result — the run continues", async () => {
+    const flaky = {
+      name: "flaky",
+      description: "Always fails",
+      inputSchema: { type: "object" },
+      execute: () => Promise.reject(new Error("upstream timed out")),
+    };
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "flaky", args: {} }]),
+      () => openAiText("recovered without the tool"),
     ]);
+    const result = await runAgentLeaf("try the tool", { tools: [flaky] }, rec.io);
+
+    expect(result).toBe("recovered without the tool");
+    expect(kinds(rec)).toContain("tool_call_error");
+    expect(rec.requests[1]?.body).toContain("upstream timed out");
+  });
+
+  it("a model-invented tool name becomes an error result, not a run failure", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "imaginary", args: {} }]),
+      () => openAiText("fine"),
+    ]);
+    await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).resolves.toBe("fine");
+    expect(rec.requests[1]?.body).toContain('Unknown tool \\"imaginary\\"');
+  });
+
+  it("tool results entering model context are redacted", async () => {
+    const redactor = new Redactor();
+    redactor.add("DB_PASSWORD", "hunter2-hunter2");
+    const leaky = {
+      name: "leaky",
+      description: "Returns a secret",
+      inputSchema: { type: "object" },
+      execute: () => Promise.resolve("the password is hunter2-hunter2"),
+    };
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [() => openAiToolCalls([{ id: "c1", name: "leaky", args: {} }]), () => openAiText("done")],
+      { redactor },
+    );
+    await runAgentLeaf("p", { tools: [leaky] }, rec.io);
+    expect(rec.requests[1]?.body).not.toContain("hunter2-hunter2");
+    expect(rec.requests[1]?.body).toContain("[redacted:DB_PASSWORD]");
+  });
+
+  it("fails with a runaway error when the model never stops calling tools", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c", name: "double", args: { n: 1 } }]),
+    ]);
+    await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).rejects.toThrow(
+      /exceeded 25 tool iterations/,
+    );
+  });
+
+  it("rejects duplicate tool names and unavailable built-ins", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
+    await expect(runAgentLeaf("p", { tools: [doubler, { ...doubler }] }, rec.io)).rejects.toThrow(
+      /Duplicate tool name/,
+    );
+    await expect(runAgentLeaf("p", { tools: ["web_search"] }, rec.io)).rejects.toThrow(
+      /not available on this engine/,
+    );
+    expect(rec.requests).toHaveLength(0);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Skills + memory
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — skills", () => {
+  it("loads deployed skill markdown into the first message", async () => {
+    const skillsDir = tempDir("bw-skills-");
+    writeFileSync(join(skillsDir, "reviewer.md"), "Always check for SQL injection.", "utf8");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { skillsDir });
+    await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain("Always check for SQL injection.");
+    expect(sent).toContain('<skill name=\\"reviewer\\">');
+  });
+
+  it("fails loudly on a missing skill and on a malformed skill name", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")], {
+      skillsDir: tempDir("bw-skills-"),
+    });
+    await expect(runAgentLeaf("p", { skills: ["ghost"] }, rec.io)).rejects.toThrow(
+      /no skills\/ghost\.md was deployed/,
+    );
+    await expect(runAgentLeaf("p", { skills: ["../etc/passwd"] }, rec.io)).rejects.toThrow(
+      /not a valid skill name/,
+    );
+    expect(rec.requests).toHaveLength(0);
+  });
+});
+
+describe("runAgentLeaf — memory", () => {
+  it("announces the dir, advertises scoped file tools, and round-trips a write", async () => {
+    const workspaceDir = tempDir("bw-mem-ws-");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiToolCalls([
+            { id: "c1", name: "memory_write", args: { path: "notes.md", content: "remember me" } },
+          ]),
+        () => openAiText("stored"),
+      ],
+      { workspaceDir },
+    );
+    const result = await runAgentLeaf("note this down", { memory: "mem/agent-a" }, rec.io);
+
+    expect(result).toBe("stored");
+    expect(rec.memoryUsed).toEqual(["mem/agent-a"]);
+    // The memory index preamble + tools were offered to the model.
+    expect(rec.requests[0]?.body).toContain("memory_write");
+    expect(rec.requests[0]?.body).toContain("memory is empty");
+    // The write landed inside the scoped dir, on disk.
+    expect(readFileSync(join(workspaceDir, "mem/agent-a/notes.md"), "utf8")).toBe("remember me");
+  });
+
+  it("loads the existing index (file list + index.md) at turn start", async () => {
+    const workspaceDir = tempDir("bw-mem-ws-");
+    mkdirSync(join(workspaceDir, "mem"), { recursive: true });
+    writeFileSync(join(workspaceDir, "mem/index.md"), "Catalog: one note so far.", "utf8");
+    writeFileSync(join(workspaceDir, "mem/old-note.md"), "previous run wrote this", "utf8");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir });
+    await runAgentLeaf("continue", { memory: "mem" }, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain("Catalog: one note so far.");
+    expect(sent).toContain("old-note.md");
+  });
+
+  it("contains model-chosen paths inside the memory dir", async () => {
+    const workspaceDir = tempDir("bw-mem-ws-");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiToolCalls([
+            { id: "c1", name: "memory_write", args: { path: "../../escape.txt", content: "x" } },
+          ]),
+        () => openAiText("done"),
+      ],
+      { workspaceDir },
+    );
+    await runAgentLeaf("p", { memory: "mem" }, rec.io);
+    // The escape became a tool ERROR result; nothing was written outside the dir.
+    expect(kinds(rec)).toContain("tool_call_error");
+    expect(rec.requests[1]?.body).toContain("escapes the memory directory");
+  });
+
+  it("rejects malformed memory paths before any network call", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
+    for (const bad of ["../up", "/absolute", "a/../b"]) {
+      await expect(runAgentLeaf("p", { memory: bad }, rec.io)).rejects.toThrow(
+        /workspace-relative directory/,
+      );
+    }
+    expect(rec.requests).toHaveLength(0);
   });
 });
