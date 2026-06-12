@@ -22,6 +22,8 @@ describe("resolveModel", () => {
       protocol: "anthropic",
       baseUrl: "https://api.anthropic.com",
       apiKey: "sk-ant-x",
+      headers: {},
+      secretHeaderNames: [],
     });
   });
 
@@ -86,6 +88,8 @@ describe("resolveModel", () => {
       protocol: "openai",
       baseUrl: "https://api.boardwalk.sh/v1",
       apiKey: "bw-key",
+      headers: {},
+      secretHeaderNames: [],
     });
   });
 
@@ -146,6 +150,8 @@ describe("resolveModel", () => {
       protocol: "openai",
       baseUrl: "http://localhost:11434/v1",
       apiKey: null,
+      headers: {},
+      secretHeaderNames: [],
     });
   });
 
@@ -225,6 +231,49 @@ describe("resolveModel", () => {
         expect(err.hint).toContain("inference.providers.nope");
       }
     }
+  });
+
+  it("resolves custom headers: static verbatim, from_env fail-closed, secret names tracked", () => {
+    const config: InferenceConfig = {
+      providers: {
+        azure: {
+          base_url: "https://my-rg.openai.azure.example/openai/deployments/gpt4",
+          headers: { "api-key": { from_env: "AZURE_KEY" }, "x-ms-client": "boardwalk" },
+        },
+      },
+    };
+    const r = resolveModel({
+      model: "gpt-4o",
+      provider: "azure",
+      config,
+      getEnv: env({ AZURE_KEY: "az-secret-1" }),
+    });
+    expect(r.headers).toEqual({ "api-key": "az-secret-1", "x-ms-client": "boardwalk" });
+    expect(r.secretHeaderNames).toEqual(["api-key"]); // only the env-sourced one is redacted
+    expect(r.apiKey).toBeNull(); // no api_key_env — the custom header IS the auth
+
+    try {
+      resolveModel({ model: "gpt-4o", provider: "azure", config, getEnv: env({}) });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError);
+      if (err instanceof EngineError) {
+        expect(err.code).toBe("PROVIDER_ERROR");
+        expect(err.message).toContain("AZURE_KEY");
+        expect(err.message).toContain("api-key");
+      }
+    }
+  });
+
+  it("rejects a configured content-type header — the engine owns the body format", () => {
+    const config: InferenceConfig = {
+      providers: {
+        bad: { base_url: "https://x.example/v1", headers: { "Content-Type": "text/plain" } },
+      },
+    };
+    expect(() => resolveModel({ model: "m", provider: "bad", config, getEnv: env({}) })).toThrow(
+      /content-type/,
+    );
   });
 
   it("rejects an empty model id for an explicit provider", () => {

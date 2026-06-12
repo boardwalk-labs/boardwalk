@@ -17,6 +17,9 @@ import { sseDataLines } from "./sse.js";
 export interface ChatArgs {
   baseUrl: string;
   apiKey: string | null;
+  /** Extra request headers (custom auth schemes etc.). WIN over computed auth on collision;
+   *  content-type stays engine-owned. */
+  headers?: Record<string, string>;
   /** Opaque model string, sent verbatim. */
   model: string;
   messages: readonly ChatMessage[];
@@ -108,9 +111,12 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
     const res = await doFetch(`${args.baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
         "anthropic-version": "2023-06-01",
         ...(args.apiKey !== null ? { "x-api-key": args.apiKey } : {}),
+        // Custom headers win over computed auth (the point: non-standard auth schemes);
+        // content-type comes last — the engine owns the body format.
+        ...args.headers,
+        "content-type": "application/json",
       },
       body: JSON.stringify({
         model: args.model,
@@ -275,8 +281,11 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
     const res = await doFetch(`${args.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
-        "content-type": "application/json",
         ...(args.apiKey !== null ? { authorization: `Bearer ${args.apiKey}` } : {}),
+        // Custom headers win over computed auth (the point: non-standard auth schemes);
+        // content-type comes last — the engine owns the body format.
+        ...args.headers,
+        "content-type": "application/json",
       },
       body: JSON.stringify({
         model: args.model,

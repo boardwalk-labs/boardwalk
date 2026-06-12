@@ -134,6 +134,33 @@ describe("loadServerConfig", () => {
     });
   });
 
+  it("parses provider headers: static strings and { from_env } refs", () => {
+    const config = loadServerConfig({
+      BOARDWALK_PROVIDERS: JSON.stringify({
+        azure: {
+          base_url: "https://my-rg.openai.azure.example/openai",
+          headers: { "api-key": { from_env: "AZURE_KEY" }, "x-ms-client": "boardwalk" },
+        },
+      }),
+    });
+    expect(config.inference?.providers).toStrictEqual({
+      azure: {
+        base_url: "https://my-rg.openai.azure.example/openai",
+        headers: { "api-key": { from_env: "AZURE_KEY" }, "x-ms-client": "boardwalk" },
+      },
+    });
+  });
+
+  it("rejects a malformed header value, naming the path", () => {
+    const raw = JSON.stringify({
+      azure: { base_url: "https://x.example/v1", headers: { "api-key": { fromenv: "K" } } },
+    });
+    const err = captureEngineError(() => loadServerConfig({ BOARDWALK_PROVIDERS: raw }));
+    expect(err.code).toBe("VALIDATION");
+    expect(err.message).toContain("azure");
+    expect(err.message).toContain("api-key");
+  });
+
   it("rejects BOARDWALK_PROVIDERS that is not valid JSON", () => {
     const err = captureEngineError(() => loadServerConfig({ BOARDWALK_PROVIDERS: "{nope" }));
     expect(err.code).toBe("VALIDATION");

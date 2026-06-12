@@ -33,6 +33,10 @@ const AUTO_MODEL = "auto";
 // ROUTER itself lives in hosted Boardwalk — this engine only forwards to the gateway.
 const DEFAULT_BOARDWALK_INFERENCE_URL = "https://api.boardwalk.sh/v1";
 
+/** A custom header value: a static string, or `{ from_env }` to read it from the engine's
+ *  environment at call time (for secret-bearing headers — values never sit in config). */
+export type HeaderValue = string | { from_env: string };
+
 /** One entry in the engine config's provider table. */
 export interface ProviderConfig {
   /** OpenAI-compatible endpoint base URL (e.g. http://localhost:11434/v1 for a local Ollama). */
@@ -41,6 +45,13 @@ export interface ProviderConfig {
   api_key_env?: string;
   /** Defaults to "openai" — the lingua franca of self-hosted/compatible endpoints. */
   protocol?: ProviderProtocol;
+  /**
+   * Extra request headers, for endpoints whose auth isn't bearer/x-api-key shaped (e.g. Azure
+   * OpenAI's `api-key`). Custom headers WIN over the computed auth header on collision;
+   * `content-type` is engine-owned and cannot be overridden. `{ from_env }` values are
+   * redacted from all model-bound context, like the API key.
+   */
+  headers?: Record<string, HeaderValue>;
 }
 
 export interface InferenceConfig {
@@ -61,6 +72,10 @@ export interface ResolvedModel {
   baseUrl: string;
   /** Plaintext key, resolved from the environment. Null when the provider needs none. */
   apiKey: string | null;
+  /** Extra request headers, already resolved (custom auth schemes, org headers, …). */
+  headers: Record<string, string>;
+  /** Names of `headers` whose values came from the environment — redacted like the API key. */
+  secretHeaderNames: readonly string[];
 }
 
 interface BuiltinProvider {
@@ -164,6 +179,8 @@ function resolveBoardwalk(model: string | undefined, args: ResolveArgs): Resolve
     protocol: "openai",
     baseUrl,
     apiKey,
+    headers: {},
+    secretHeaderNames: [],
   };
 }
 
@@ -185,13 +202,50 @@ function resolveConfigured(
     }
     apiKey = value;
   }
+  const { headers, secretHeaderNames } = resolveHeaders(provider, configured.headers, getEnv);
   return {
     provider,
     model,
     protocol: configured.protocol ?? "openai",
     baseUrl: configured.base_url,
     apiKey,
+    headers,
+    secretHeaderNames,
   };
+}
+
+/** Resolve a provider's custom header map; `{ from_env }` values are looked up fail-closed. */
+function resolveHeaders(
+  provider: string,
+  configured: Record<string, HeaderValue> | undefined,
+  getEnv: (name: string) => string | undefined,
+): { headers: Record<string, string>; secretHeaderNames: string[] } {
+  const headers: Record<string, string> = {};
+  const secretHeaderNames: string[] = [];
+  for (const [name, value] of Object.entries(configured ?? {})) {
+    if (name.toLowerCase() === "content-type") {
+      // The engine owns the body format; a configured content-type would silently break it.
+      throw new EngineError(
+        "VALIDATION",
+        `Provider "${provider}" configures a content-type header — the engine owns that header.`,
+      );
+    }
+    if (typeof value === "string") {
+      headers[name] = value;
+      continue;
+    }
+    const resolved = getEnv(value.from_env);
+    if (resolved === undefined || resolved.length === 0) {
+      throw new EngineError(
+        "PROVIDER_ERROR",
+        `Provider "${provider}" header "${name}" needs ${value.from_env}, which is not set.`,
+        `Set ${value.from_env} in the engine's environment.`,
+      );
+    }
+    headers[name] = resolved;
+    secretHeaderNames.push(name);
+  }
+  return { headers, secretHeaderNames };
 }
 
 function resolveBuiltin(
@@ -214,5 +268,7 @@ function resolveBuiltin(
     protocol: builtin.protocol,
     baseUrl: builtin.baseUrl,
     apiKey,
+    headers: {},
+    secretHeaderNames: [],
   };
 }

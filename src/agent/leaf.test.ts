@@ -15,6 +15,8 @@ const OPENAI_MODEL: ResolvedModel = {
   protocol: "openai",
   baseUrl: "http://fake/v1",
   apiKey: "sk-test-key-12345",
+  headers: {},
+  secretHeaderNames: [],
 };
 
 const ANTHROPIC_MODEL: ResolvedModel = {
@@ -395,6 +397,42 @@ describe("runAgentLeaf — MCP", () => {
 // ----------------------------------------------------------------------------
 // The tool loop
 // ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — custom provider headers", () => {
+  it("sends custom headers (winning over computed auth) and redacts env-sourced values", async () => {
+    const azureModel: ResolvedModel = {
+      provider: "azure",
+      model: "gpt-4o",
+      protocol: "openai",
+      baseUrl: "http://fake/azure",
+      apiKey: null,
+      headers: { "api-key": "az-secret-headerval", "x-ms-client": "boardwalk" },
+      secretHeaderNames: ["api-key"],
+    };
+    const requests: { headers: Record<string, string>; body: string }[] = [];
+    const fetchImpl: typeof fetch = (_input, init) => {
+      const headers: Record<string, string> = {};
+      for (const [k, v] of Object.entries(init?.headers ?? {})) {
+        if (typeof v === "string") headers[k] = v;
+      }
+      requests.push({ headers, body: typeof init?.body === "string" ? init.body : "" });
+      return Promise.resolve(openAiText("ok"));
+    };
+    const rec = recordedIo(azureModel, [() => openAiText("ok")]);
+    const io: LeafIo = { ...rec.io, provider: { fetchImpl, sleepImpl: () => Promise.resolve() } };
+
+    await runAgentLeaf("the api-key is az-secret-headerval by the way", undefined, io);
+
+    expect(requests[0]?.headers["api-key"]).toBe("az-secret-headerval");
+    expect(requests[0]?.headers["x-ms-client"]).toBe("boardwalk");
+    expect(requests[0]?.headers["content-type"]).toBe("application/json");
+    expect(requests[0]?.headers.authorization).toBeUndefined(); // no apiKey → no bearer
+    // The env-sourced header VALUE is redacted from the model-bound prompt…
+    expect(requests[0]?.body).not.toContain("az-secret-headerval");
+    expect(requests[0]?.body).toContain("[redacted:header:api-key]");
+    // …while the static header value is not a secret and passes through.
+  });
+});
 
 describe("runAgentLeaf — tool loop", () => {
   const doubler = {

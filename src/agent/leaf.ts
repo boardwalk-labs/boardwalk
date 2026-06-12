@@ -106,8 +106,13 @@ async function runLeafWithTools(
   assertUniqueToolNames(tools);
 
   const resolved = await io.resolve(opts?.model, opts?.provider);
-  // The provider key is now known to this process — make sure it can never reach the model.
+  // The provider key (and any env-sourced custom headers) are now known to this process —
+  // make sure they can never reach the model.
   if (resolved.apiKey !== null) io.redactor.add(`api-key:${resolved.provider}`, resolved.apiKey);
+  for (const name of resolved.secretHeaderNames) {
+    const value = resolved.headers[name];
+    if (value !== undefined) io.redactor.add(`header:${name}`, value);
+  }
 
   const schemaInstruction =
     opts?.schema === undefined
@@ -210,6 +215,7 @@ async function modelTurn(
   const args: ChatArgs = {
     baseUrl: resolved.baseUrl,
     apiKey: resolved.apiKey,
+    headers: resolved.headers,
     model: resolved.model,
     messages,
     tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),

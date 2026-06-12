@@ -165,6 +165,10 @@ export const resolvedModelSchema = z.strictObject({
   protocol: z.enum(["anthropic", "openai"]),
   baseUrl: z.string().min(1),
   apiKey: z.string().nullable(),
+  /** Extra request headers, resolved supervisor-side. */
+  headers: z.record(z.string(), z.string()),
+  /** Header names whose values are env-sourced — the leaf redacts them like the API key. */
+  secretHeaderNames: z.array(z.string()),
 });
 /**
  * mcp_token: the child asks the engine for an OAuth bearer token for an MCP server (token

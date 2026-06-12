@@ -36,10 +36,18 @@ export interface ServerConfig {
 
 // Why strictObject: a typo'd provider key ("apikey_env") silently doing nothing is exactly
 // the config bug an operator can't see — fail loudly at boot instead.
+// Header values: most-specific-first — the { from_env } object before the bare string, so the
+// object variant can't be string-coerced (zod unions are first-match-wins).
+const headerValueSchema = z.union([
+  z.strictObject({ from_env: z.string().min(1) }),
+  z.string().min(1),
+]);
+
 const providerEntrySchema = z.strictObject({
   base_url: z.url(),
   api_key_env: z.string().min(1).optional(),
   protocol: z.enum(["anthropic", "openai"]).optional(),
+  headers: z.record(z.string().min(1), headerValueSchema).optional(),
 });
 
 const providersSchema = z.record(z.string().min(1), providerEntrySchema);
@@ -106,6 +114,7 @@ function parseProviders(raw: string | undefined): Record<string, ProviderConfig>
       base_url: entry.base_url,
       ...(entry.api_key_env !== undefined ? { api_key_env: entry.api_key_env } : {}),
       ...(entry.protocol !== undefined ? { protocol: entry.protocol } : {}),
+      ...(entry.headers !== undefined ? { headers: entry.headers } : {}),
     };
   }
   return providers;
