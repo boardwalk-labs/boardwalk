@@ -23,10 +23,11 @@ function expectValidationError(fn: () => unknown, messagePart: string): void {
   } catch (err) {
     thrown = err;
   }
-  expect(thrown).toBeInstanceOf(EngineError);
-  const err = thrown as EngineError;
-  expect(err.code).toBe("VALIDATION");
-  expect(err.message).toContain(messagePart);
+  if (!(thrown instanceof EngineError)) {
+    throw new Error(`expected an EngineError, got: ${String(thrown)}`);
+  }
+  expect(thrown.code).toBe("VALIDATION");
+  expect(thrown.message).toContain(messagePart);
 }
 
 describe("parseCron — field syntax", () => {

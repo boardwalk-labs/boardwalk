@@ -4,7 +4,7 @@
 // never logged). Zod-validated on every read because a disk file is a trust boundary even
 // when we wrote it.
 
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { z } from "zod";
 import { EngineError } from "../errors.js";
@@ -94,10 +94,15 @@ export class McpTokenStore {
 
   private writeAll(all: Record<string, McpTokenEntry>): void {
     mkdirSync(dirname(this.path), { recursive: true });
-    writeFileSync(this.path, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
-    // writeFileSync only applies `mode` on create — re-assert on every write so a file that
-    // predates this code (or was touched externally) ends up locked down too.
-    chmodSync(this.path, 0o600);
+    // Write-tmp-then-rename so a crash mid-write can't corrupt the token file (which would
+    // force re-authorizing every MCP server). rename is atomic within a filesystem; the tmp
+    // sibling shares the data dir so it's never a cross-device move.
+    const tmp = `${this.path}.${String(process.pid)}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(all, null, 2)}\n`, { mode: 0o600 });
+    // writeFileSync only applies `mode` on create — re-assert so an existing tmp from a prior
+    // crash ends up locked down before it becomes the real file.
+    chmodSync(tmp, 0o600);
+    renameSync(tmp, this.path);
   }
 
   private corruptError(): EngineError {

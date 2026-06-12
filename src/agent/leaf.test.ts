@@ -196,6 +196,25 @@ describe("runAgentLeaf — plain inference", () => {
     expect(ended !== undefined && ended.kind === "turn_ended" ? ended.reason : "").toBe("error");
   });
 
+  it("REDACTS the provider key from a provider-error path — into the event AND the thrown error", async () => {
+    // A provider echoing request headers (the API key) into a 4xx body must not persist it:
+    // the error text rides both the turn_ended event and the rethrown error (the run's failed row).
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => new Response(`bad key: ${OPENAI_MODEL.apiKey ?? ""}`, { status: 400 }),
+    ]);
+    let thrown: unknown;
+    await runAgentLeaf("p", undefined, rec.io).catch((err: unknown) => {
+      thrown = err;
+    });
+    const ended = rec.events.at(-1)?.body;
+    const eventMessage =
+      ended !== undefined && ended.kind === "turn_ended" ? (ended.error?.message ?? "") : "";
+    expect(eventMessage).not.toContain("sk-test-key-12345");
+    expect(eventMessage).toContain("[redacted:api-key:local]");
+    const thrownMessage = thrown instanceof Error ? thrown.message : String(thrown);
+    expect(thrownMessage).not.toContain("sk-test-key-12345");
+  });
+
   it("schema mode parses JSON (stripping fences) and fails loudly on prose", async () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText('```json\n{"groups": [1, 2]}\n```')]);
     const parsed = await runAgentLeaf("group these", { schema: { type: "object" } }, rec.io);

@@ -130,10 +130,19 @@ async function runLeafWithTools(
   try {
     finalText = await runToolLoop(messages, tools, resolved, io, turnId, totals);
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Redact like the tool path does: a misbehaving provider can echo request headers (the
+    // API key) into an error body, and this message persists in run_events AND — via the
+    // rethrow — in the run's failed row. The secrets invariant covers error paths too.
+    const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
     const code = err instanceof EngineError ? err.code : "PROVIDER_ERROR";
     io.emit(turnId, { kind: "turn_ended", reason: "error", error: { code, message } });
-    throw err;
+    throw new EngineError(
+      code,
+      message,
+      err instanceof EngineError && err.hint !== undefined
+        ? io.redactor.redact(err.hint)
+        : undefined,
+    );
   }
   io.emit(turnId, {
     kind: "turn_ended",

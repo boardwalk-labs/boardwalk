@@ -13,6 +13,7 @@ import {
   takeDeclaredOutput,
 } from "@boardwalk/workflow/runtime";
 import type { JsonValue } from "@boardwalk/workflow";
+import type { Redactor } from "../agent/redact.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
 import { createChildHost, errorFromIpc } from "./child_host.js";
@@ -65,34 +66,35 @@ async function runProgram(
   input: unknown,
   config: Record<string, unknown>,
 ): Promise<void> {
+  let redactor: Redactor | undefined;
   try {
     process.chdir(workspaceDir);
-    installHost(
-      createChildHost(
-        {
-          request(method, args) {
-            return new Promise((resolve, reject) => {
-              const callId = nextCallId++;
-              pending.set(callId, { resolve, reject });
-              send({ type: "host_call", callId, method, args });
-            });
-          },
-          emit(body: RunEventBody, turnId?: string) {
-            send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
-          },
-          startTurn(turnId: string) {
-            send({ type: "turn_started", turnId });
-          },
-          reportUsage(modelRef, usage) {
-            send({ type: "report_usage", modelRef, usage });
-          },
-          memoryUsed(dir) {
-            send({ type: "memory_used", dir });
-          },
+    const childHost = createChildHost(
+      {
+        request(method, args) {
+          return new Promise((resolve, reject) => {
+            const callId = nextCallId++;
+            pending.set(callId, { resolve, reject });
+            send({ type: "host_call", callId, method, args });
+          });
         },
-        { workspaceDir, skillsDir },
-      ),
+        emit(body: RunEventBody, turnId?: string) {
+          send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
+        },
+        startTurn(turnId: string) {
+          send({ type: "turn_started", turnId });
+        },
+        reportUsage(modelRef, usage) {
+          send({ type: "report_usage", modelRef, usage });
+        },
+        memoryUsed(dir) {
+          send({ type: "memory_used", dir });
+        },
+      },
+      { workspaceDir, skillsDir },
     );
+    redactor = childHost.redactor;
+    installHost(childHost.host);
     installInput(input);
     installConfig(narrowConfig(config));
 
@@ -108,9 +110,21 @@ async function runProgram(
       outputDeclared: declared !== null,
     });
   } catch (err) {
+    // Program errors can carry secret values the program legitimately read (secrets.get) —
+    // this report persists in the run row and event stream, so it gets the same redaction
+    // as everything model-bound. `redactor` may be unset if the failure preceded host setup;
+    // nothing secret can have been revealed before that point.
+    const scrub = (text: string): string => redactor?.redact(text) ?? text;
     const shape = toErrorShape(err);
     const hint = err instanceof EngineError ? err.hint : undefined;
-    send({ type: "failed", error: { ...shape, ...(hint !== undefined ? { hint } : {}) } });
+    send({
+      type: "failed",
+      error: {
+        ...shape,
+        message: scrub(shape.message),
+        ...(hint !== undefined ? { hint: scrub(hint) } : {}),
+      },
+    });
   } finally {
     // Why disconnect-then-exit: process.send is async under the hood; disconnecting flushes
     // the channel so the final message is never lost to an immediate exit.

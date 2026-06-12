@@ -3,9 +3,8 @@
 // Split of responsibilities (SPEC §2.3): anything that only needs the local process happens
 // here (sleep — hold-and-pay is literally just holding this process; phase markers); anything
 // that touches engine state (secrets, durable child runs, artifacts) is brokered to the
-// supervisor over IPC. agent() will run its loop in THIS process too (program-defined tools
-// must execute in the program process) — it lands with the inference milestone and fails
-// clearly until then.
+// supervisor over IPC. agent() runs its loop in THIS process too — program-defined tools and
+// MCP connections must execute where the program lives (the trusted layer).
 
 import { z } from "zod";
 import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk/workflow";
@@ -42,13 +41,19 @@ export function errorFromIpc(shape: IpcErrorShape): Error {
   return new EngineError(code, shape.message, shape.hint);
 }
 
-export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): WorkflowHost {
+export interface ChildHost {
+  host: WorkflowHost;
+  /** The run process's one redactor — the child entry scrubs failure reports with it too. */
+  redactor: Redactor;
+}
+
+export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): ChildHost {
   let phaseCount = 0;
   // One redactor for the whole run process: every secret value revealed to the program (and
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
   const redactor = new Redactor();
 
-  return {
+  const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
       io.emit({ kind: "phase", name, id: opts?.id ?? `phase-${String(phaseCount)}` });
@@ -99,12 +104,17 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async sleep(arg: SleepArg): Promise<void> {
-      const ms = sleepMs(arg);
-      if (ms <= 0) return;
       // Hold-and-pay: the process just waits. Locals stay in memory; nothing is checkpointed.
-      await new Promise<void>((resolve) => {
-        setTimeout(resolve, ms);
-      });
+      // Chunked so a multi-week sleep({ until }) doesn't overflow setTimeout's 2^31-1 ms cap
+      // (~24.8 days), which would otherwise fire ~immediately — there is no hard duration cap.
+      let remaining = sleepMs(arg);
+      while (remaining > 0) {
+        const slice = Math.min(remaining, MAX_TIMEOUT_MS);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, slice);
+        });
+        remaining -= slice;
+      }
     },
 
     async getSecret(name: string): Promise<string> {
@@ -129,7 +139,11 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       return artifactRefSchema.parse(value);
     },
   };
+  return { host, redactor };
 }
+
+/** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer sleeps are chunked. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 // Supervisor responses are validated like any other boundary input — the channel being ours
 // doesn't exempt it (CODE_QUALITY §2.1).

@@ -235,6 +235,23 @@ describe("RunSupervisor", () => {
     expect(missing.error?.code).toBe("SECRET_MISSING");
   }, 30_000);
 
+  it("redacts a secret value from a program error in the run row AND event stream", async () => {
+    const f = fixture({ env: { API_TOKEN: "canary-secret-abc123" } });
+    f.deploy(
+      "leaky-error",
+      `import { secrets } from "@boardwalk/workflow";
+       const token = await secrets.get("API_TOKEN");
+       throw new Error("request to upstream failed with token=" + token);`,
+      { secrets: [{ name: "API_TOKEN" }] },
+    );
+    const row = await f.supervisor.supervise(f.startRun("leaky-error"));
+    expect(row.status).toBe("failed");
+    expect(row.error?.message).not.toContain("canary-secret-abc123");
+    expect(row.error?.message).toContain("[redacted:API_TOKEN]");
+    // And nowhere in the persisted stream either.
+    expect(JSON.stringify(f.store.listEvents(row.id))).not.toContain("canary-secret-abc123");
+  }, 20_000);
+
   it("workflows.call awaits the child's output and re-attaches idempotently across a parent crash", async () => {
     const f = fixture();
     f.deploy(

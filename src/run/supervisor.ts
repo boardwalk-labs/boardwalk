@@ -178,9 +178,16 @@ export class RunSupervisor {
     entry.promise = this.execute(run, entry)
       .catch((err: unknown) => {
         // Engine-internal failure (store error, spawn impossible). Record it; never throw
-        // out of supervision — a run must always land on a terminal row.
-        this.finishRun(runId, entry, "failed", { error: toErrorShape(err) });
-        return this.mustGetRun(runId);
+        // out of supervision — a run must always land on a terminal row. The recovery write
+        // itself can throw if the store closed under a shutdown race, so it is guarded: a
+        // void-dispatched supervise() must never surface an unhandled rejection.
+        try {
+          this.finishRun(runId, entry, "failed", { error: toErrorShape(err) });
+          return this.mustGetRun(runId);
+        } catch (recoveryErr) {
+          console.error(`run ${runId}: failed to record terminal state`, recoveryErr);
+          return run;
+        }
       })
       .finally(() => this.active.delete(runId));
     this.active.set(runId, entry);

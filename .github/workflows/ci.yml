@@ -21,7 +21,7 @@ jobs:
       - run: pnpm format:check
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
+      - run: pnpm coverage
       - run: pnpm build
       - name: Inspect publish contents
         run: npm pack --dry-run
