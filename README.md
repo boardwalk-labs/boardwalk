@@ -19,7 +19,7 @@ A workflow is a plain TypeScript program. This engine runs it:
 
 Same engine, same semantics as the Boardwalk platform: one run = one process, `sleep` holds the
 process, a crash restarts the run from the top, `workflows.call` re-attaches idempotently.
-The conformance suite in this repo is the arbiter of that parity promise.
+The conformance suite in this repo tests that parity.
 
 ## Quickstart
 
