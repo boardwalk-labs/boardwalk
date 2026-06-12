@@ -1,0 +1,203 @@
+// The engine facade — the one object both consumers construct (SPEC §1):
+//   - SERVER mode: `start()` boots the recovery sweep + the cron scheduler loop and the
+//     process stays up (the HTTP surface sits on top of this object).
+//   - EMBEDDED mode: construct, `runOnce()`, `close()` — what `boardwalk dev` does. No
+//     scheduler loop, no recovery thread; one run, in-process supervision, exit.
+//
+// Layering: this file only wires store + supervisor + scheduler together and translates
+// program source → manifest at the deploy boundary. No business logic lives here.
+
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { JsonValue, WorkflowManifest } from "@boardwalk/workflow";
+import { extractManifest } from "@boardwalk/workflow/extract";
+import type { InferenceConfig } from "./agent/resolve.js";
+import type { Clock } from "./clock.js";
+import { EngineError } from "./errors.js";
+import { Scheduler } from "./scheduler/scheduler.js";
+import {
+  Store,
+  type EventRow,
+  type RunRow,
+  type TriggerKind,
+  type WorkflowRow,
+} from "./store/store.js";
+import { isTerminal, RunSupervisor } from "./run/supervisor.js";
+
+export interface EngineOptions {
+  /** Everything lives under here: `engine.db`, `runs/<id>/`. Created if missing. */
+  dataDir: string;
+  /** The local secret/env source (parsed .env contents). process.env is the fallback. */
+  env?: Record<string, string>;
+  /** Where secrets come from, for error hints (e.g. the .env path). Never values. */
+  envLabel?: string;
+  /** Default model + provider table for agent() leaves. */
+  inference?: InferenceConfig;
+  clock?: Clock;
+  /** Engine diagnostics (scheduler notices). Default: stderr. */
+  log?: (line: string) => void;
+  /** Crash restarts per run. Default 2. */
+  maxRestarts?: number;
+  /** Cooperative-cancellation window before SIGKILL. Default 10s. */
+  cancelGraceMs?: number;
+  /** Override the spawned run-process entry (tests point this at a built dist). */
+  childEntryPath?: string;
+  /** Scheduler loop cadence. Default 1s. */
+  tickIntervalMs?: number;
+}
+
+export interface DeployArgs {
+  /** The bundled workflow program (ESM, `@boardwalk/workflow` external, pure-literal meta). */
+  program: string;
+  /** Engine-side deploy config (e.g. catch_up). Replaced wholesale on redeploy. */
+  config?: Record<string, JsonValue>;
+}
+
+export class Engine {
+  readonly store: Store;
+  private readonly supervisor: RunSupervisor;
+  private readonly scheduler: Scheduler;
+  private started = false;
+  private closed = false;
+
+  constructor(opts: EngineOptions) {
+    mkdirSync(opts.dataDir, { recursive: true });
+    this.store = new Store(join(opts.dataDir, "engine.db"));
+    this.supervisor = new RunSupervisor({
+      store: this.store,
+      dataDir: opts.dataDir,
+      childEntryPath: opts.childEntryPath ?? defaultChildEntryPath(),
+      env: new Map(Object.entries(opts.env ?? {})),
+      envLabel: opts.envLabel ?? "the engine environment",
+      ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
+      ...(opts.maxRestarts !== undefined ? { maxRestarts: opts.maxRestarts } : {}),
+      ...(opts.cancelGraceMs !== undefined ? { cancelGraceMs: opts.cancelGraceMs } : {}),
+      ...(opts.inference !== undefined ? { inference: opts.inference } : {}),
+    });
+    this.scheduler = new Scheduler({
+      store: this.store,
+      dispatch: (runId) => void this.supervisor.supervise(runId),
+      emitQueued: (runId) => this.supervisor.emitQueued(runId),
+      ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
+      ...(opts.log !== undefined ? { log: opts.log } : {}),
+      ...(opts.tickIntervalMs !== undefined ? { tickIntervalMs: opts.tickIntervalMs } : {}),
+    });
+  }
+
+  /**
+   * Server-mode boot: finalize/restart whatever a dead engine left behind, then run the cron
+   * loop. Embedded consumers never call this.
+   */
+  start(): { resumed: string[]; cancelled: string[] } {
+    this.assertOpen();
+    if (this.started) return { resumed: [], cancelled: [] };
+    this.started = true;
+    const swept = this.supervisor.recoverOnBoot();
+    this.scheduler.start();
+    return swept;
+  }
+
+  /** Stop scheduling, signal children (next boot's sweep recovers them), release the DB. */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.scheduler.stop();
+    this.supervisor.shutdown();
+    this.store.close();
+  }
+
+  /** Subscribe to every stamped run event (feeds SSE, the CLI renderer, the log UI). */
+  onEvent(listener: (row: EventRow) => void): () => void {
+    return this.supervisor.onEvent(listener);
+  }
+
+  /**
+   * Deploy (or redeploy, by manifest name) a workflow from its bundled program source. The
+   * manifest is DERIVED from the program's pure-literal `meta` — the program file is the
+   * author's source of truth, manifest drift is impossible by construction.
+   */
+  deployWorkflow(args: DeployArgs): WorkflowRow {
+    this.assertOpen();
+    const manifest: WorkflowManifest = extractManifest(args.program, { fileName: "index.mjs" });
+    return this.store.upsertWorkflow({
+      name: manifest.name,
+      manifest,
+      program: args.program,
+      ...(args.config !== undefined ? { config: args.config } : {}),
+    });
+  }
+
+  /**
+   * Queue a run and dispatch it through the concurrency gate. Returns the queued row
+   * immediately; `waitForRun` for the terminal row.
+   */
+  startRun(
+    workflowName: string,
+    opts: { input?: JsonValue; triggerKind?: TriggerKind } = {},
+  ): RunRow {
+    this.assertOpen();
+    const workflow = this.store.getWorkflow(workflowName);
+    if (workflow === null) {
+      throw new EngineError(
+        "NOT_FOUND",
+        `Workflow "${workflowName}" is not deployed on this engine.`,
+      );
+    }
+    const { run } = this.store.createRun({
+      workflowId: workflow.id,
+      triggerKind: opts.triggerKind ?? "manual",
+      ...(opts.input !== undefined ? { input: opts.input } : {}),
+    });
+    this.supervisor.emitQueued(run.id);
+    // Why a synchronous tick: run-now should not wait for the next loop iteration, and manual
+    // runs go through the same dispatch gate as cron fires so concurrency modes hold uniformly.
+    this.scheduler.tick();
+    return run;
+  }
+
+  /**
+   * One scheduler pass (fire due crons, dispatch queued runs through the concurrency gate).
+   * The background loop calls this every tick; expose it so embedders and tests can drive
+   * dispatch deterministically without the loop.
+   */
+  tick(): void {
+    this.assertOpen();
+    this.scheduler.tick();
+  }
+
+  /** Resolve when the run reaches a terminal status (idempotent; safe to call repeatedly). */
+  waitForRun(runId: string): Promise<RunRow> {
+    this.assertOpen();
+    const run = this.store.getRun(runId);
+    if (run === null) throw new EngineError("NOT_FOUND", `Unknown run: ${runId}`);
+    if (isTerminal(run.status)) return Promise.resolve(run);
+    return this.supervisor.supervise(runId);
+  }
+
+  cancelRun(runId: string): Promise<void> {
+    this.assertOpen();
+    return this.supervisor.cancel(runId);
+  }
+
+  /**
+   * Embedded one-shot (the `boardwalk dev` path): deploy, run, await terminal. The workflow
+   * persists in the data dir like any other — dev reuses a throwaway dir per invocation.
+   */
+  async runOnce(args: DeployArgs & { input?: JsonValue }): Promise<RunRow> {
+    const workflow = this.deployWorkflow(args);
+    const run = this.startRun(workflow.name, {
+      ...(args.input !== undefined ? { input: args.input } : {}),
+    });
+    return await this.waitForRun(run.id);
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new EngineError("INTERNAL", "This engine has been closed.");
+  }
+}
+
+/** The compiled child entry that ships next to this module in dist/. */
+function defaultChildEntryPath(): string {
+  return fileURLToPath(new URL("./run/child.js", import.meta.url));
+}

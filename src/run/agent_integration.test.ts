@@ -3,7 +3,6 @@
 // the redaction invariant and the usage-budget kill are proven against actual processes,
 // not unit fakes.
 
-import { execSync } from "node:child_process";
 import http from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,7 +66,6 @@ function startFakeProvider(): Promise<FakeProvider> {
 let provider: FakeProvider;
 
 beforeAll(async () => {
-  execSync("pnpm build", { cwd: repoRoot, stdio: "pipe" });
   provider = await startFakeProvider();
 }, 120_000);
 
@@ -140,9 +138,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "with-agent",
       `import { agent, output } from "@boardwalk/workflow";
-       export default async function run() {
-         output(await agent("summarize this", { model: "local/test-model" }));
-       }`,
+                output(await agent("summarize this", { model: "local/test-model" }));`,
     );
 
     const row = f.store.getRun(runId);
@@ -172,7 +168,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "agent-default-model",
       `import { agent, output } from "@boardwalk/workflow";
-       export default async function run() { output(await agent("hi")); }`,
+       output(await agent("hi"));`,
     );
     expect(f.store.getRun(runId)?.status).toBe("completed");
     expect(provider.requests.at(-1)).toContain("default-test-model");
@@ -185,10 +181,8 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "leaky",
       `import { agent, output, secrets } from "@boardwalk/workflow";
-       export default async function run() {
-         const token = await secrets.get("API_TOKEN");
-         output(await agent("please use token " + token + " to fetch the data"));
-       }`,
+                const token = await secrets.get("API_TOKEN");
+         output(await agent("please use token " + token + " to fetch the data"));`,
       { secrets: [{ name: "API_TOKEN" }] },
     );
 
@@ -208,10 +202,8 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "overspender",
       `import { agent, sleep } from "@boardwalk/workflow";
-       export default async function run() {
-         await agent("burn tokens", { model: "local/test-model" });
-         await sleep(30_000); // the budget kill lands here, not at process exit
-       }`,
+                await agent("burn tokens", { model: "local/test-model" });
+         await sleep(30_000); // the budget kill lands here, not at process exit`,
       { budget: { max_usd: 0.01 } },
     );
 
@@ -227,10 +219,8 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "token-hog",
       `import { agent, sleep } from "@boardwalk/workflow";
-       export default async function run() {
-         await agent("talk a lot", { model: "local/test-model" });
-         await sleep(30_000);
-       }`,
+                await agent("talk a lot", { model: "local/test-model" });
+         await sleep(30_000);`,
       { budget: { max_tokens: 1000 } },
     );
 
@@ -245,9 +235,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "wants-tools",
       `import { agent } from "@boardwalk/workflow";
-       export default async function run() {
-         await agent("search", { model: "local/test-model", tools: ["web_search"] });
-       }`,
+                await agent("search", { model: "local/test-model", tools: ["web_search"] });`,
     );
     const row = f.store.getRun(runId);
     expect(row?.status).toBe("failed");

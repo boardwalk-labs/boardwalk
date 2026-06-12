@@ -1,8 +1,9 @@
 // The run-process entry point. Spawned by the supervisor with an IPC channel; never run
-// directly. Protocol: wait for `init`, install the SDK host + run inputs, import the program
-// bundle, execute its default export, report `done`/`failed`, exit. A thrown error anywhere
-// is reported over IPC when possible — the supervisor treats an exit without a report as a
-// crash (which triggers restart-from-the-top, the documented semantics).
+// directly. Protocol: wait for `init`, install the SDK host + run inputs, then IMPORT the
+// program bundle — the module body is the program, so importing the file IS running it
+// (MASTER_SPEC §2.1; no entrypoint convention). Report `done`/`failed`, exit. A thrown error
+// anywhere is reported over IPC when possible — the supervisor treats an exit without a
+// report as a crash (which triggers restart-from-the-top, the documented semantics).
 
 import { pathToFileURL } from "node:url";
 import {
@@ -88,16 +89,10 @@ async function runProgram(
     installInput(input);
     installConfig(narrowConfig(config));
 
+    // Importing IS running: the module body is the program; top-level await is the norm; the
+    // run completes when evaluation finishes and fails when the body throws.
     const programModule: unknown = await import(pathToFileURL(programPath).href);
-    const entry = runEntryOf(programModule);
-    if (entry === null) {
-      throw new EngineError(
-        "VALIDATION",
-        "The workflow program must `export default` an async run function.",
-        "export default async function run(): Promise<void> { … }",
-      );
-    }
-    await entry();
+    warnOnLegacyDefaultExport(programModule);
 
     const declared = takeDeclaredOutput();
     send({
@@ -126,13 +121,19 @@ function narrowConfig(config: Record<string, unknown>): Record<string, JsonValue
   return out;
 }
 
-/** The program's run entrypoint, or null when the module shape is wrong. */
-function runEntryOf(programModule: unknown): (() => Promise<unknown>) | null {
-  if (typeof programModule !== "object" || programModule === null) return null;
+/**
+ * The rescinded draft convention wrapped the program in `export default async function run()`.
+ * Such a function is NEVER called (the module body is the program) — warn so an author who
+ * wrapped their logic learns why nothing happened. Stderr lands in the run log.
+ */
+function warnOnLegacyDefaultExport(programModule: unknown): void {
+  if (typeof programModule !== "object" || programModule === null) return;
   const candidate: unknown = Reflect.get(programModule, "default");
-  return isRunFunction(candidate) ? candidate : null;
-}
-
-function isRunFunction(value: unknown): value is () => Promise<unknown> {
-  return typeof value === "function";
+  if (typeof candidate === "function") {
+    console.error(
+      "warning: this workflow exports a default function, which Boardwalk does not call — " +
+        "the module body IS the program. Move the function's body to the top level " +
+        "(top-level await is supported).",
+    );
+  }
 }
