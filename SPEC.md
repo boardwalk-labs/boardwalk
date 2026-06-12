@@ -90,6 +90,6 @@ The Phase 2 gates (MASTER_SPEC §9), restated as this repo's checklist:
 
 1. Docker quickstart on a clean host: cron workflow scheduled, fired, visible in run history + local log UI — no account.
 2. Survives: engine kill mid-run, child kill mid-run, multi-minute sleep, `workflows.call` chain — all per conformance.
-3. Full conformance suite green in CI; every `boardwalk-examples` template passes under this engine.
+3. Full conformance suite green in CI; every `examples` template passes under this engine.
 4. `@boardwalk-labs/cli dev` runs on the published `@boardwalk-labs/engine`.
 5. Publication checklist (MASTER_SPEC §8) passes.

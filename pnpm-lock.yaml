@@ -5,15 +5,15 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@boardwalk-labs/workflow': link:../boardwalk-sdk
+  '@boardwalk-labs/workflow': link:../sdk
 
 importers:
 
   .:
     dependencies:
       '@boardwalk-labs/workflow':
-        specifier: link:../boardwalk-sdk
-        version: link:../boardwalk-sdk
+        specifier: link:../sdk
+        version: link:../sdk
       zod:
         specifier: ^4.0.0
         version: 4.4.3
