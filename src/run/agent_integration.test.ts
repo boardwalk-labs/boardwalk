@@ -239,19 +239,35 @@ describe("agent() through the full run path", () => {
     expect(row?.error?.message).toContain("max_tokens");
   }, 30_000);
 
-  it("MCP selection fails the run loudly (capability-presence rule; not implemented yet)", async () => {
+  it("an MCP server that cannot be reached fails the run loudly (capability-presence rule)", async () => {
     const f = fixture();
     const runId = await f.run(
       "wants-mcp",
       `import { agent } from "@boardwalk/workflow";
        await agent("search", {
          model: "local/test-model",
-         mcp: [{ name: "gh", transport: "http", url: "https://mcp.example.com" }],
+         mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
        });`,
     );
     const row = f.store.getRun(runId);
     expect(row?.status).toBe("failed");
-    expect(row?.error?.code).toBe("UNSUPPORTED");
+    // The leaf failed before any model call — the named server must resolve, never degrade.
+    expect(row?.error?.message).toMatch(/gh|fetch failed/);
+  }, 30_000);
+
+  it("a malformed MCP ref fails the run with VALIDATION before anything connects", async () => {
+    const f = fixture();
+    const runId = await f.run(
+      "bad-mcp-ref",
+      `import { agent } from "@boardwalk/workflow";
+       await agent("search", {
+         model: "local/test-model",
+         mcp: [{ name: "gh", transport: "carrier-pigeon", coop: "roof" }],
+       });`,
+    );
+    const row = f.store.getRun(runId);
+    expect(row?.status).toBe("failed");
+    expect(row?.error?.code).toBe("VALIDATION");
     expect(row?.error?.message).toContain("MCP");
   }, 30_000);
 

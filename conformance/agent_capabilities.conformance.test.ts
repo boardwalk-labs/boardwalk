@@ -162,7 +162,7 @@ describe("conformance: agent() capabilities", () => {
     expect(done.error?.message).toContain("nonexistent");
   }, 30_000);
 
-  it("any MCP selection fails the run loudly (capability-presence rule)", async () => {
+  it("an MCP server that cannot resolve fails the run loudly (capability-presence rule)", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
@@ -170,11 +170,29 @@ describe("conformance: agent() capabilities", () => {
         export const meta = { name: "wants-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
           model: "local/test-model",
-          mcp: [{ name: "gh", transport: "http", url: "https://mcp.example.com" }],
+          // Nothing listens here — the named server must resolve, never silently degrade.
+          mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
         });
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-mcp").id);
+    expect(done.status).toBe("failed");
+    expect(done.error?.message).toContain("gh");
+  }, 30_000);
+
+  it("a malformed MCP server ref fails the run loudly before anything connects", async () => {
+    const { engine } = createEngine({ inference: localInference(provider) });
+    engine.deployWorkflow({
+      program: `
+        import { agent } from "@boardwalk/workflow";
+        export const meta = { name: "bad-mcp", triggers: [{ kind: "manual" }] };
+        await agent("search", {
+          model: "local/test-model",
+          mcp: [{ name: "gh", transport: "http", url: "not a url" }],
+        });
+      `,
+    });
+    const done = await engine.waitForRun(engine.startRun("bad-mcp").id);
     expect(done.status).toBe("failed");
     expect(["UNSUPPORTED", "VALIDATION"]).toContain(done.error?.code);
     expect(done.error?.message).toContain("MCP");

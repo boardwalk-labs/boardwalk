@@ -3,9 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
+import { startFakeMcpServer } from "../testing/fake_mcp.js";
 import { runAgentLeaf, type LeafEventBody, type LeafIo } from "./leaf.js";
 import { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
+import type { McpTokenResult } from "./tools.js";
 
 const OPENAI_MODEL: ResolvedModel = {
   ref: "local/test-model",
@@ -91,7 +93,12 @@ function tempDir(prefix: string): string {
 function recordedIo(
   model: ResolvedModel,
   responses: (() => Response)[],
-  opts: { redactor?: Redactor; workspaceDir?: string; skillsDir?: string | null } = {},
+  opts: {
+    redactor?: Redactor;
+    workspaceDir?: string;
+    skillsDir?: string | null;
+    mcpToken?: (serverUrl: string, invalidateToken?: string) => Promise<McpTokenResult>;
+  } = {},
 ): Recorded {
   const events: Recorded["events"] = [];
   const turns: string[] = [];
@@ -123,6 +130,7 @@ function recordedIo(
     memoryUsed: (dir) => {
       memoryUsed.push(dir);
     },
+    mcpToken: opts.mcpToken ?? (() => Promise.resolve({ accessToken: null })),
     redactor: opts.redactor ?? new Redactor(),
     capabilities: {
       workspaceDir: opts.workspaceDir ?? tempDir("bw-leaf-ws-"),
@@ -200,17 +208,170 @@ describe("runAgentLeaf — plain inference", () => {
     );
   });
 
-  it("rejects MCP selections loudly, before any network call (not implemented yet)", async () => {
+  it("rejects malformed MCP refs and duplicate server names before anything connects", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
+    await expect(
+      runAgentLeaf("p", { mcp: [{ name: "gh", transport: "http", url: "not-a-url" }] }, rec.io),
+    ).rejects.toThrow(/malformed MCP server ref/);
+    await expect(
+      runAgentLeaf(
+        "p",
+        {
+          mcp: [
+            { name: "gh", transport: "http", url: "https://mcp.example.com" },
+            { name: "gh", transport: "stdio", command: "gh-mcp" },
+          ],
+        },
+        rec.io,
+      ),
+    ).rejects.toThrow(/Duplicate MCP server name/);
+    await expect(
+      runAgentLeaf("p", { mcp: [{ name: "bad name!", transport: "stdio", command: "x" }] }, rec.io),
+    ).rejects.toThrowError(EngineError);
+    expect(rec.requests).toHaveLength(0);
+    expect(rec.turns).toHaveLength(0);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// MCP servers (inline http refs against a real local fake server)
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — MCP", () => {
+  it("advertises namespaced server tools and round-trips a call through the loop", async () => {
+    const mcp = await startFakeMcpServer({
+      tools: [
+        {
+          name: "lookup",
+          description: "Looks things up",
+          handler: (args) => ({ text: `looked up ${String(args["key"])}` }),
+        },
+      ],
+    });
+    cleanups.push(() => void mcp.close());
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "db__lookup", args: { key: "answer" } }]),
+      () => openAiText("found it"),
+    ]);
+
+    const result = await runAgentLeaf(
+      "look it up",
+      { mcp: [{ name: "db", transport: "http", url: mcp.url }] },
+      rec.io,
+    );
+
+    expect(result).toBe("found it");
+    // The namespaced tool (with the server's metadata) was advertised to the model…
+    expect(rec.requests[0]?.body).toContain('"db__lookup"');
+    expect(rec.requests[0]?.body).toContain("Looks things up");
+    // …its result traveled back into model context…
+    expect(rec.requests[1]?.body).toContain("looked up answer");
+    expect(kinds(rec)).toContain("tool_call_result");
+    // …and the connection was torn down at completion (DELETE-less server: check via requests).
+    expect(mcp.requests.some((r) => r.rpcMethod === "tools/call")).toBe(true);
+  });
+
+  it("an MCP tool error returns to the MODEL as an error result — the run continues", async () => {
+    const mcp = await startFakeMcpServer({
+      tools: [{ name: "flaky", handler: () => ({ text: "upstream exploded", isError: true }) }],
+    });
+    cleanups.push(() => void mcp.close());
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "srv__flaky", args: {} }]),
+      () => openAiText("recovered"),
+    ]);
+    const result = await runAgentLeaf(
+      "try it",
+      { mcp: [{ name: "srv", transport: "http", url: mcp.url }] },
+      rec.io,
+    );
+    expect(result).toBe("recovered");
+    expect(kinds(rec)).toContain("tool_call_error");
+    expect(rec.requests[1]?.body).toContain("upstream exploded");
+  });
+
+  it("disconnects (DELETEs the session) on completion AND on a model error", async () => {
+    const completed = await startFakeMcpServer({
+      tools: [{ name: "noop", handler: () => ({ text: "ok" }) }],
+      sessionId: "sess-complete",
+    });
+    cleanups.push(() => void completed.close());
+    const ok = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf(
+      "p",
+      { mcp: [{ name: "srv", transport: "http", url: completed.url }] },
+      ok.io,
+    );
+    expect(completed.deletes).toBe(1);
+
+    const errored = await startFakeMcpServer({
+      tools: [{ name: "noop", handler: () => ({ text: "ok" }) }],
+      sessionId: "sess-error",
+    });
+    cleanups.push(() => void errored.close());
+    const bad = recordedIo(OPENAI_MODEL, [() => new Response("bad request", { status: 400 })]);
+    await expect(
+      runAgentLeaf("p", { mcp: [{ name: "srv", transport: "http", url: errored.url }] }, bad.io),
+    ).rejects.toThrow(/provider returned 400/);
+    expect(errored.deletes).toBe(1);
+  });
+
+  it("an unreachable MCP server fails the leaf loudly before any model call", async () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
     await expect(
       runAgentLeaf(
         "p",
-        { mcp: [{ name: "gh", transport: "http", url: "https://mcp.example.com" }] },
+        // A port nothing listens on: connection refused at initialize time.
+        { mcp: [{ name: "ghost", transport: "http", url: "http://127.0.0.1:9/mcp" }] },
         rec.io,
       ),
-    ).rejects.toThrowError(EngineError);
+    ).rejects.toThrow();
     expect(rec.requests).toHaveLength(0);
-    expect(rec.turns).toHaveLength(0);
+  });
+
+  it("a 401 server with no engine token fails with the authorizeMcpServer hint", async () => {
+    const mcp = await startFakeMcpServer({
+      tools: [],
+      auth: { validTokens: new Set(["never-issued"]) },
+    });
+    cleanups.push(() => void mcp.close());
+    const asked: (string | undefined)[] = [];
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")], {
+      mcpToken: (serverUrl, invalidateToken) => {
+        asked.push(invalidateToken);
+        expect(serverUrl).toBe(mcp.url);
+        return Promise.resolve({ accessToken: null, hint: "run engine.authorizeMcpServer(...)" });
+      },
+    });
+    const error: unknown = await runAgentLeaf(
+      "p",
+      { mcp: [{ name: "locked", transport: "http", url: mcp.url }] },
+      rec.io,
+    ).catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(EngineError);
+    expect(error instanceof EngineError ? error.message : "").toContain("locked");
+    expect(error instanceof EngineError ? (error.hint ?? "") : "").toContain("authorizeMcpServer");
+    expect(asked).toEqual([undefined]); // asked once, nothing to invalidate, no retry loop
+    expect(rec.requests).toHaveLength(0); // never reached the model
+  });
+
+  it("a brokered token is used as a Bearer and registered with the redactor", async () => {
+    const redactor = new Redactor();
+    const mcp = await startFakeMcpServer({
+      tools: [{ name: "noop", handler: () => ({ text: "ok" }) }],
+      auth: { validTokens: new Set(["secret-bearer-token"]) },
+    });
+    cleanups.push(() => void mcp.close());
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("token is secret-bearer-token")], {
+      redactor,
+      mcpToken: () => Promise.resolve({ accessToken: "secret-bearer-token" }),
+    });
+    await runAgentLeaf("p", { mcp: [{ name: "srv", transport: "http", url: mcp.url }] }, rec.io);
+    const authed = mcp.requests.find((r) => r.headers.authorization !== undefined);
+    expect(authed?.headers.authorization).toBe("Bearer secret-bearer-token");
+    // The token is now redactor-known: nothing model-bound may carry it.
+    expect(redactor.redact("leak secret-bearer-token")).toBe("leak [redacted:mcp:srv]");
   });
 });
 

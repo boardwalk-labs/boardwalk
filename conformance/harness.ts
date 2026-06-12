@@ -26,6 +26,15 @@ import { expect } from "vitest";
 import { Engine } from "../src/index.js";
 import type { EngineOptions, EventRow, InferenceConfig, RunStatus } from "../src/index.js";
 
+// A scriptable MCP server (streamable HTTP) for the MCP conformance cases. Re-exported from
+// the engine's test doubles: knowing how to fake an MCP server is harness knowledge (another
+// engine implementation swaps this file), not conformance-case knowledge.
+export {
+  startFakeMcpServer,
+  type FakeMcpServer,
+  type FakeMcpTool,
+} from "../src/testing/fake_mcp.js";
+
 // The engine type doesn't export its Clock interface; derive it from the public options so
 // the harness never reaches into engine internals.
 export type EngineClock = NonNullable<EngineOptions["clock"]>;

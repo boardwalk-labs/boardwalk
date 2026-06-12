@@ -86,6 +86,7 @@ export const HOST_METHODS = [
   "run_workflow",
   "write_artifact",
   "resolve_model",
+  "mcp_token",
 ] as const;
 export type HostMethod = (typeof HOST_METHODS)[number];
 
@@ -164,4 +165,20 @@ export const resolvedModelSchema = z.strictObject({
   protocol: z.enum(["anthropic", "openai"]),
   baseUrl: z.string().min(1),
   apiKey: z.string().nullable(),
+});
+/**
+ * mcp_token: the child asks the engine for an OAuth bearer token for an MCP server (token
+ * state is PARENT-owned — the run process never sees refresh tokens or the store).
+ * `invalidateToken` names a token the server just rejected, so the supervisor refreshes
+ * instead of handing the same dead value back.
+ */
+export const mcpTokenArgsSchema = z.strictObject({
+  serverUrl: z.string().min(1),
+  invalidateToken: z.string().min(1).optional(),
+});
+/** The supervisor's mcp_token response. null accessToken ⇒ interaction would be required —
+ *  the hint names the `engine.authorizeMcpServer(...)` call that fixes it. */
+export const mcpTokenResultSchema = z.strictObject({
+  accessToken: z.string().nullable(),
+  hint: z.string().optional(),
 });

@@ -15,6 +15,8 @@ import { extractManifest } from "@boardwalk/workflow/extract";
 import type { InferenceConfig } from "./agent/resolve.js";
 import type { Clock } from "./clock.js";
 import { EngineError } from "./errors.js";
+import { runAuthorizationFlow } from "./mcp/oauth.js";
+import { McpTokenStore, MCP_TOKENS_FILENAME } from "./mcp/token_store.js";
 import { Scheduler } from "./scheduler/scheduler.js";
 import {
   Store,
@@ -45,6 +47,16 @@ export interface EngineOptions {
   childEntryPath?: string;
   /** Scheduler loop cadence. Default 1s. */
   tickIntervalMs?: number;
+}
+
+export interface AuthorizeMcpServerOptions {
+  /**
+   * Receives the authorization URL a HUMAN must open in a browser. The engine never opens a
+   * browser itself — the consumer (CLI prints it, a UI links it) owns that interaction.
+   */
+  onAuthorizationUrl: (url: string) => void;
+  /** How long to wait for the human to complete authorization. Default 5 minutes. */
+  timeoutMs?: number;
 }
 
 export interface DeployArgs {
@@ -199,6 +211,23 @@ export class Engine {
   cancelRun(runId: string): Promise<void> {
     this.assertOpen();
     return this.supervisor.cancel(runId);
+  }
+
+  /**
+   * The ONE-TIME interactive step for an OAuth-protected MCP server: discovery (RFC 9728 +
+   * 8414), dynamic client registration (RFC 7591), and the authorization-code + PKCE grant
+   * over a loopback redirect. Tokens land in `<dataDir>/mcp_tokens.json` (0600); after this,
+   * runs use the server headlessly (the engine refreshes silently). A headless run that needs
+   * authorization never prompts — it fails with a hint naming this method.
+   */
+  async authorizeMcpServer(serverUrl: string, opts: AuthorizeMcpServerOptions): Promise<void> {
+    this.assertOpen();
+    await runAuthorizationFlow({
+      serverUrl,
+      store: new McpTokenStore(join(this.dataDir, MCP_TOKENS_FILENAME)),
+      onAuthorizationUrl: opts.onAuthorizationUrl,
+      ...(opts.timeoutMs !== undefined ? { timeoutMs: opts.timeoutMs } : {}),
+    });
   }
 
   /**

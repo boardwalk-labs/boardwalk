@@ -62,6 +62,8 @@ console.log(run.status, run.output);
 engine.close();
 ```
 
+For OAuth-protected MCP servers an `agent()` call connects to, `engine.authorizeMcpServer(url, { onAuthorizationUrl })` performs the one-time interactive grant; after that, runs use (and silently refresh) the stored token headlessly — see [SPEC.md §2.3](./SPEC.md).
+
 ## License
 
 Apache-2.0 — see [LICENSE](./LICENSE).

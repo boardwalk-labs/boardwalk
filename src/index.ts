@@ -3,7 +3,12 @@
 // Two consumers, one implementation (SPEC §1): the CLI embeds it for `boardwalk dev`
 // (construct → runOnce → close), the server binary runs it long-lived (construct → start).
 
-export { Engine, type EngineOptions, type DeployArgs } from "./engine.js";
+export {
+  Engine,
+  type EngineOptions,
+  type DeployArgs,
+  type AuthorizeMcpServerOptions,
+} from "./engine.js";
 export type { InferenceConfig, ProviderConfig } from "./agent/resolve.js";
 export type {
   EventRow,

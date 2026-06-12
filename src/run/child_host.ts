@@ -16,6 +16,7 @@ import { Redactor } from "../agent/redact.js";
 import type { ToolSetContext } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
+  mcpTokenResultSchema,
   resolvedModelSchema,
   type IpcErrorShape,
   type HostMethod,
@@ -66,6 +67,15 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
         emit: (turnId, body) => io.emit(body, turnId),
         reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
         memoryUsed: (dir) => io.memoryUsed(dir),
+        // MCP OAuth tokens are engine state: brokered per use, validated like any other
+        // supervisor response; refresh tokens and the store never enter this process.
+        mcpToken: async (serverUrl, invalidateToken) =>
+          mcpTokenResultSchema.parse(
+            await io.request("mcp_token", {
+              serverUrl,
+              ...(invalidateToken !== undefined ? { invalidateToken } : {}),
+            }),
+          ),
         redactor,
         capabilities,
       });

@@ -36,12 +36,15 @@ import { MEMORY_PATH_RE } from "../agent/tools.js";
 import { systemClock, type Clock } from "../clock.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
+import { refreshAccessToken } from "../mcp/oauth.js";
+import { McpTokenStore, MCP_TOKENS_FILENAME } from "../mcp/token_store.js";
 import type { EventRow, RunRow, Store, WorkflowRow } from "../store/store.js";
 import { defaultIdempotencyKey } from "./idempotency.js";
 import {
   callWorkflowArgsSchema,
   childToParentSchema,
   getSecretArgsSchema,
+  mcpTokenArgsSchema,
   resolveModelArgsSchema,
   writeArtifactArgsSchema,
   type HostMethod,
@@ -96,6 +99,10 @@ interface ActiveRun {
 
 const TERMINAL_STATUSES: readonly RunStatus[] = ["completed", "failed", "cancelled"];
 
+/** Treat an MCP access token expiring this soon as already expired — a token that dies
+ *  between the broker reply and the server call would burn the child's whole 401 retry. */
+const MCP_TOKEN_EXPIRY_SKEW_MS = 30_000;
+
 /** True when a run can no longer change state. */
 export function isTerminal(status: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
@@ -111,6 +118,7 @@ export class RunSupervisor {
   private readonly maxRestarts: number;
   private readonly cancelGraceMs: number;
   private readonly inference: InferenceConfig;
+  private readonly mcpTokens: McpTokenStore;
   private readonly active = new Map<string, ActiveRun>();
   private readonly listeners = new Set<(row: EventRow) => void>();
 
@@ -124,6 +132,8 @@ export class RunSupervisor {
     this.maxRestarts = opts.maxRestarts ?? 2;
     this.cancelGraceMs = opts.cancelGraceMs ?? 10_000;
     this.inference = opts.inference ?? {};
+    // Same path Engine.authorizeMcpServer writes — the interactive grant lands where runs read.
+    this.mcpTokens = new McpTokenStore(join(opts.dataDir, MCP_TOKENS_FILENAME));
   }
 
   /** Subscribe to every stamped run event (the local feed for SSE/log UIs). */
@@ -552,6 +562,10 @@ export class RunSupervisor {
         void this.supervise(child.id);
         return child.id;
       }
+      case "mcp_token": {
+        const a = mcpTokenArgsSchema.parse(args);
+        return await this.resolveMcpToken(a.serverUrl, a.invalidateToken);
+      }
       case "write_artifact": {
         const a = writeArtifactArgsSchema.parse(args);
         if (a.name.includes("/") || a.name.includes("\\") || a.name.includes("..")) {
@@ -604,6 +618,54 @@ export class RunSupervisor {
     });
     if (created) this.emitQueued(run.id);
     return run;
+  }
+
+  /**
+   * The engine side of MCP OAuth: hand the child a usable access token, refreshing SILENTLY
+   * when the stored one is expired (clock + skew) or the child reports the server rejected it
+   * (`invalidateToken` — the child retries at most once, so a second rejection lands back here
+   * as a failure). When only a human could fix it, answer null + a hint naming
+   * engine.authorizeMcpServer — a headless run must fail loudly, never prompt.
+   */
+  private async resolveMcpToken(
+    serverUrl: string,
+    invalidateToken: string | undefined,
+  ): Promise<{ accessToken: string | null; hint?: string }> {
+    const hint =
+      `No usable OAuth token for this MCP server — authorize it once with ` +
+      `engine.authorizeMcpServer("${serverUrl}") (boardwalk dev / the server UI expose this), ` +
+      `then re-run.`;
+    const entry = this.mcpTokens.get(serverUrl);
+    if (entry === null) return { accessToken: null, hint };
+
+    const invalidated = invalidateToken !== undefined && invalidateToken === entry.accessToken;
+    const expired =
+      entry.expiresAt !== undefined && entry.expiresAt - MCP_TOKEN_EXPIRY_SKEW_MS <= Date.now();
+    if (!invalidated && !expired) return { accessToken: entry.accessToken };
+
+    if (entry.refreshToken === undefined || entry.tokenEndpoint === undefined) {
+      return { accessToken: null, hint };
+    }
+    try {
+      const grant = await refreshAccessToken({
+        tokenEndpoint: entry.tokenEndpoint,
+        clientId: entry.clientId,
+        refreshToken: entry.refreshToken,
+        resource: entry.resource,
+      });
+      this.mcpTokens.set(serverUrl, {
+        ...entry,
+        accessToken: grant.accessToken,
+        // An AS may rotate the refresh token on use (OAuth 2.1 encourages it) — keep the new one.
+        ...(grant.refreshToken !== undefined ? { refreshToken: grant.refreshToken } : {}),
+        ...(grant.expiresAt !== undefined ? { expiresAt: grant.expiresAt } : {}),
+      });
+      return { accessToken: grant.accessToken };
+    } catch {
+      // The entry stays: a transient AS outage must not destroy a working grant. The run
+      // fails with the authorize hint; a later run retries the refresh.
+      return { accessToken: null, hint };
+    }
   }
 
   private resolveSecret(manifest: WorkflowManifest, name: string): string {

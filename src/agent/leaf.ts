@@ -1,9 +1,9 @@
 // The agent() leaf: a real agentic loop (SDK SPEC §2.1.1) — streamed model turns with tool
-// use (program-defined ToolDefs + memory file tools), skills loaded into context, schema
-// output, secret redaction, and usage reporting. Runs IN THE PROGRAM PROCESS (tool `execute`
-// must run in the trusted layer); model/provider/key resolution happens supervisor-side and
-// arrives through `io.resolve`. MCP server selection is the one capability still pending —
-// it fails loudly in buildToolSet per the capability-presence rule.
+// use (program-defined ToolDefs + memory file tools + MCP server tools), skills loaded into
+// context, schema output, secret redaction, and usage reporting. Runs IN THE PROGRAM PROCESS
+// (tool `execute` must run in the trusted layer, and MCP connections live where their tools
+// execute); model/provider/key resolution and MCP OAuth token state stay supervisor-side and
+// arrive through `io.resolve` / `io.mcpToken`.
 
 import { randomUUID } from "node:crypto";
 import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk/workflow";
@@ -12,7 +12,14 @@ import type { ChatMessage, ChatTurn, ToolCallRequest } from "./conversation.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
-import { buildToolSet, type ExecutableTool, type ToolSetContext } from "./tools.js";
+import {
+  assertUniqueToolNames,
+  buildToolSet,
+  connectMcpServers,
+  type ExecutableTool,
+  type McpTokenResult,
+  type ToolSetContext,
+} from "./tools.js";
 
 /** Tool iterations per agent() call before the loop is declared runaway. */
 const MAX_TOOL_ITERATIONS = 25;
@@ -48,6 +55,8 @@ export interface LeafIo {
   reportUsage(modelRef: string, usage: TokenUsage): void;
   /** Tell the engine a memory dir is in use — it auto-persists it across runs. */
   memoryUsed(dir: string): void;
+  /** Broker an MCP OAuth bearer token from the engine (token state never lives here). */
+  mcpToken(serverUrl: string, invalidateToken?: string): Promise<McpTokenResult>;
   redactor: Redactor;
   /** Capability context: where the workspace and deployed skills live. */
   capabilities: ToolSetContext;
@@ -60,8 +69,41 @@ export async function runAgentLeaf(
   opts: AgentOptions | undefined,
   io: LeafIo,
 ): Promise<unknown> {
-  const { tools, preamble, memoryDir } = buildToolSet(opts, io.capabilities);
-  if (memoryDir !== null) io.memoryUsed(memoryDir);
+  const base = buildToolSet(opts, io.capabilities);
+  if (base.memoryDir !== null) io.memoryUsed(base.memoryDir);
+
+  // MCP connections open AFTER sync validation and BEFORE the first model call; a server the
+  // call named must resolve or the leaf fails here, never silently degrading the tool set.
+  const connected =
+    base.mcp.length === 0
+      ? null
+      : await connectMcpServers(base.mcp, {
+          mcpToken: (serverUrl, invalidateToken) => io.mcpToken(serverUrl, invalidateToken),
+          redactor: io.redactor,
+        });
+  try {
+    return await runLeafWithTools(
+      prompt,
+      opts,
+      io,
+      [...base.tools, ...(connected?.tools ?? [])],
+      base.preamble,
+    );
+  } finally {
+    // Disconnect on completion AND on error — stdio servers are real child processes.
+    if (connected !== null) await connected.disconnect();
+  }
+}
+
+async function runLeafWithTools(
+  prompt: string,
+  opts: AgentOptions | undefined,
+  io: LeafIo,
+  tools: readonly ExecutableTool[],
+  preamble: readonly string[],
+): Promise<unknown> {
+  // Re-check across the MERGED set: a namespaced MCP tool can collide with a program tool.
+  assertUniqueToolNames(tools);
 
   const resolved = await io.resolve(opts?.model, opts?.provider);
   // The provider key is now known to this process — make sure it can never reach the model.

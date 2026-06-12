@@ -10,9 +10,13 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { AgentOptions, ToolDef } from "@boardwalk/workflow";
+import type { AgentOptions, McpServerRef, ToolDef } from "@boardwalk/workflow";
 import { EngineError } from "../errors.js";
+import { McpConnection } from "../mcp/client.js";
+import { HttpTransport } from "../mcp/transport_http.js";
+import { StdioTransport } from "../mcp/transport_stdio.js";
 import type { ToolSpec } from "./conversation.js";
+import type { Redactor } from "./redact.js";
 
 /** A tool the loop can actually run. `execute` resolves to model-bound text (pre-redaction). */
 export interface ExecutableTool extends ToolSpec {
@@ -32,6 +36,8 @@ export interface ToolSet {
   preamble: string[];
   /** The memory dir the call uses (workspace-relative) — the engine auto-persists it. */
   memoryDir: string | null;
+  /** Shape-validated MCP server refs; connecting them is the async step (connectMcpServers). */
+  mcp: readonly McpServerRef[];
 }
 
 /**
@@ -42,16 +48,13 @@ export interface ToolSet {
  */
 const BUILTIN_TOOLS: ReadonlyMap<string, ExecutableTool> = new Map();
 
-/** Resolve the call's per-agent capability selection into an executable tool set. */
+/**
+ * Resolve the call's per-agent capability selection into an executable tool set. Sync by
+ * design — every selection is shape-validated here so misconfiguration fails BEFORE anything
+ * spawns a process or opens a connection; the async MCP step is `connectMcpServers`.
+ */
 export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext): ToolSet {
-  if (opts?.mcp !== undefined && opts.mcp.length > 0) {
-    throw new EngineError(
-      "UNSUPPORTED",
-      "agent() MCP server connections are not implemented in this engine build yet.",
-      "Tools, skills, and memory work today; MCP is next on the engine roadmap.",
-    );
-  }
-
+  const mcp = validateMcpRefs(opts?.mcp);
   const tools: ExecutableTool[] = [];
   const preamble: string[] = [];
 
@@ -75,6 +78,12 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     memoryDir = opts.memory;
   }
 
+  assertUniqueToolNames(tools);
+  return { tools, preamble, memoryDir, mcp };
+}
+
+/** Tool names must be unique across the WHOLE advertised set — providers reject duplicates. */
+export function assertUniqueToolNames(tools: readonly ExecutableTool[]): void {
   const seen = new Set<string>();
   for (const tool of tools) {
     if (seen.has(tool.name)) {
@@ -82,7 +91,6 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     }
     seen.add(tool.name);
   }
-  return { tools, preamble, memoryDir };
 }
 
 // ----------------------------------------------------------------------------
@@ -116,6 +124,166 @@ function wrapProgramTool(def: ToolDef): ExecutableTool {
       return typeof result === "string" ? result : JSON.stringify(result);
     },
   };
+}
+
+// ----------------------------------------------------------------------------
+// MCP servers (inline McpServerRefs — stdio + streamable HTTP)
+// ----------------------------------------------------------------------------
+
+// Server names prefix tool names (`<server>__<tool>`) — keep them tool-name-shaped.
+const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+// AgentOptions comes straight from user program code — the TS types are aspirational at
+// runtime, so each ref is Zod-checked before anything spawns or connects (CODE_QUALITY §2.1).
+const mcpServerRefSchema = z.discriminatedUnion("transport", [
+  z.strictObject({
+    name: z.string().regex(MCP_NAME_RE),
+    transport: z.literal("stdio"),
+    command: z.string().min(1),
+    args: z.array(z.string()).optional(),
+    env: z.record(z.string(), z.string()).optional(),
+  }),
+  z.strictObject({
+    name: z.string().regex(MCP_NAME_RE),
+    transport: z.literal("http"),
+    url: z
+      .string()
+      .min(1)
+      .refine((value) => /^https?:\/\//.test(value), { error: "must be an http(s) URL" }),
+    headers: z.record(z.string(), z.string()).optional(),
+  }),
+]);
+
+function validateMcpRefs(refs: readonly McpServerRef[] | undefined): readonly McpServerRef[] {
+  const out = refs ?? [];
+  const seen = new Set<string>();
+  for (const ref of out) {
+    const parsed = mcpServerRefSchema.safeParse(ref);
+    if (!parsed.success) {
+      throw new EngineError(
+        "VALIDATION",
+        `agent() got a malformed MCP server ref${typeof ref.name === "string" ? ` "${ref.name}"` : ""}: ` +
+          `${parsed.error.issues.map((issue) => issue.message).join("; ")}.`,
+        'An MCP server is { name, transport: "stdio", command, args?, env? } or ' +
+          '{ name, transport: "http", url, headers? }.',
+      );
+    }
+    if (seen.has(ref.name)) {
+      throw new EngineError(
+        "VALIDATION",
+        `Duplicate MCP server name in agent() call: "${ref.name}".`,
+      );
+    }
+    seen.add(ref.name);
+  }
+  return out;
+}
+
+/** What the engine answered when the child asked for an MCP bearer token (see ipc.ts). */
+export interface McpTokenResult {
+  accessToken: string | null;
+  hint?: string | undefined;
+}
+
+/** The child-side effects MCP connection needs (the OAuth broker hook + the redactor). */
+export interface McpConnectIo {
+  /** Broker a bearer token from the engine; `invalidateToken` names a just-rejected token. */
+  mcpToken(serverUrl: string, invalidateToken?: string): Promise<McpTokenResult>;
+  /** Brokered tokens are credentials — register them so they can never reach model context. */
+  redactor: Redactor;
+}
+
+export interface ConnectedMcpServers {
+  tools: ExecutableTool[];
+  /** Tear down every connection (kill stdio children, DELETE HTTP sessions). Never throws. */
+  disconnect(): Promise<void>;
+}
+
+/**
+ * The async half of MCP capability assembly: connect each validated ref, list its tools, and
+ * wrap them as ExecutableTools named `<server>__<tool>`. Runs in the program process (tool
+ * calls execute here); OAuth token STATE stays parent-side behind `io.mcpToken`. Connection
+ * or listing failure fails the call loudly — per the capability-presence rule, a server the
+ * agent named must resolve. Callers must invoke `disconnect()` in a finally.
+ */
+export async function connectMcpServers(
+  refs: readonly McpServerRef[],
+  io: McpConnectIo,
+): Promise<ConnectedMcpServers> {
+  const connections: McpConnection[] = [];
+  const tools: ExecutableTool[] = [];
+  const disconnect = async (): Promise<void> => {
+    for (const connection of connections) {
+      try {
+        await connection.close();
+      } catch {
+        // Teardown is best-effort: a dead server must not mask the run's real outcome.
+      }
+    }
+  };
+  try {
+    for (const ref of refs) {
+      const connection = new McpConnection(transportFor(ref, io), { serverName: ref.name });
+      connections.push(connection);
+      await connection.initialize();
+      for (const tool of await connection.listTools()) {
+        tools.push({
+          name: `${ref.name}__${tool.name}`,
+          description: tool.description,
+          inputSchema: tool.inputSchema,
+          execute: async (input: Record<string, unknown>): Promise<string> => {
+            const result = await connection.callTool(tool.name, input);
+            // isError throws so the loop's standard tool-failure path (tool_call_error event,
+            // error result back to the model) handles MCP and program tools identically.
+            if (result.isError) {
+              throw new EngineError(
+                "PROVIDER_ERROR",
+                result.content.length > 0
+                  ? result.content
+                  : `MCP tool "${tool.name}" reported an error with no content.`,
+              );
+            }
+            return result.content;
+          },
+        });
+      }
+    }
+  } catch (err) {
+    await disconnect(); // never leak spawned server processes when a later server fails
+    throw err;
+  }
+  return { tools, disconnect };
+}
+
+function transportFor(ref: McpServerRef, io: McpConnectIo): HttpTransport | StdioTransport {
+  if (ref.transport === "stdio") {
+    return new StdioTransport({
+      serverName: ref.name,
+      command: ref.command,
+      args: ref.args,
+      env: ref.env,
+    });
+  }
+  return new HttpTransport({
+    serverName: ref.name,
+    url: ref.url,
+    headers: ref.headers,
+    // Program-supplied headers are the first line of credentials; this hook only ever fires
+    // after the server answered 401 (the transport owns that escalation order).
+    acquireToken: async (failedToken: string | null): Promise<string> => {
+      const result = await io.mcpToken(ref.url, failedToken ?? undefined);
+      if (result.accessToken === null) {
+        throw new EngineError(
+          "PROVIDER_ERROR",
+          `MCP server "${ref.name}" (${ref.url}) requires OAuth authorization and this engine ` +
+            "holds no usable token.",
+          result.hint ?? `Authorize once with engine.authorizeMcpServer("${ref.url}").`,
+        );
+      }
+      io.redactor.add(`mcp:${ref.name}`, result.accessToken);
+      return result.accessToken;
+    },
+  });
 }
 
 // ----------------------------------------------------------------------------

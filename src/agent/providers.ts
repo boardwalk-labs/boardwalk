@@ -12,6 +12,7 @@ import { z } from "zod";
 import { EngineError } from "../errors.js";
 import { isJsonValue, isPlainObject } from "../json_value.js";
 import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
+import { sseDataLines } from "./sse.js";
 
 export interface ChatArgs {
   baseUrl: string;
@@ -366,31 +367,6 @@ async function withRetry<T>(io: ProviderIo, fn: () => Promise<T>): Promise<T> {
     "PROVIDER_ERROR",
     `Provider still failing after ${String(RETRY_ATTEMPTS)} attempts: ${detail}`,
   );
-}
-
-/** Iterate the `data:` payloads of an SSE response body. */
-async function* sseDataLines(response: Response): AsyncGenerator<string> {
-  const body = response.body;
-  if (body === null) return;
-  const decoder = new TextDecoder();
-  let buffer = "";
-  // Why the explicit AsyncIterable<unknown>: undici types the stream's chunks as `any`;
-  // narrowing each chunk keeps the no-unsafe rules honest.
-  const chunks: AsyncIterable<unknown> = body;
-  for await (const chunk of chunks) {
-    if (!(chunk instanceof Uint8Array)) continue;
-    buffer += decoder.decode(chunk, { stream: true });
-    let newline = buffer.indexOf("\n");
-    while (newline >= 0) {
-      const line = buffer.slice(0, newline).trimEnd();
-      buffer = buffer.slice(newline + 1);
-      if (line.startsWith("data:")) {
-        const data = line.slice(5).trim();
-        if (data.length > 0 && data !== "[DONE]") yield data;
-      }
-      newline = buffer.indexOf("\n");
-    }
-  }
 }
 
 function safeJson(text: string): unknown {
