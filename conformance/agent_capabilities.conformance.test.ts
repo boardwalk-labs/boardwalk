@@ -41,7 +41,7 @@ describe("conformance: agent() capabilities", () => {
         export const meta = { name: "tool-user", triggers: [{ kind: "manual" }] };
         const table = { answer: "tool-answer-9b1c" };
         output(await agent("look it up", {
-          model: "local/test-model",
+          model: "test-model",
           tools: [
             {
               name: "lookup",
@@ -72,7 +72,7 @@ describe("conformance: agent() capabilities", () => {
       program: `
         import { agent, output } from "@boardwalk/workflow";
         export const meta = { name: "memory-keeper", triggers: [{ kind: "manual" }] };
-        output(await agent("take notes", { model: "local/test-model", memory: "mem/notes" }));
+        output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));
       `,
     });
 
@@ -105,7 +105,7 @@ describe("conformance: agent() capabilities", () => {
         import { agent, output } from "@boardwalk/workflow";
         export const meta = { name: "skilled", triggers: [{ kind: "manual" }] };
         output(await agent("inspect the boat", {
-          model: "local/test-model",
+          model: "test-model",
           skills: ["review-checklist"],
         }));
       `,
@@ -123,7 +123,7 @@ describe("conformance: agent() capabilities", () => {
       program: `
         import { agent } from "@boardwalk/workflow";
         export const meta = { name: "memory-escape", triggers: [{ kind: "manual" }] };
-        await agent("hi", { model: "local/test-model", memory: "../outside" });
+        await agent("hi", { model: "test-model", memory: "../outside" });
       `,
     });
     const done = await engine.waitForRun(engine.startRun("memory-escape").id);
@@ -138,7 +138,7 @@ describe("conformance: agent() capabilities", () => {
       program: `
         import { agent } from "@boardwalk/workflow";
         export const meta = { name: "wants-builtin", triggers: [{ kind: "manual" }] };
-        await agent("search", { model: "local/test-model", tools: ["definitely_not_a_tool"] });
+        await agent("search", { model: "test-model", tools: ["definitely_not_a_tool"] });
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-builtin").id);
@@ -153,7 +153,7 @@ describe("conformance: agent() capabilities", () => {
       program: `
         import { agent } from "@boardwalk/workflow";
         export const meta = { name: "wants-skill", triggers: [{ kind: "manual" }] };
-        await agent("go", { model: "local/test-model", skills: ["nonexistent"] });
+        await agent("go", { model: "test-model", skills: ["nonexistent"] });
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-skill").id);
@@ -169,7 +169,7 @@ describe("conformance: agent() capabilities", () => {
         import { agent } from "@boardwalk/workflow";
         export const meta = { name: "wants-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
-          model: "local/test-model",
+          model: "test-model",
           // Nothing listens here — the named server must resolve, never silently degrade.
           mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
         });
@@ -187,7 +187,7 @@ describe("conformance: agent() capabilities", () => {
         import { agent } from "@boardwalk/workflow";
         export const meta = { name: "bad-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
-          model: "local/test-model",
+          model: "test-model",
           mcp: [{ name: "gh", transport: "http", url: "not a url" }],
         });
       `,

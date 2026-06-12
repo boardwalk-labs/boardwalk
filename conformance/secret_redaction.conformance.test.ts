@@ -48,7 +48,7 @@ describe("conformance: secret redaction canary", () => {
         };
         const token = await secrets.get("CANARY_TOKEN");
         output(await agent("use the token " + token + " to fetch the data", {
-          model: "local/test-model",
+          model: "test-model",
           tools: [
             {
               name: "fetch_credential",

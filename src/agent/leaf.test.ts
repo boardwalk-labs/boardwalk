@@ -10,9 +10,8 @@ import type { ResolvedModel } from "./resolve.js";
 import type { McpTokenResult } from "./tools.js";
 
 const OPENAI_MODEL: ResolvedModel = {
-  ref: "local/test-model",
   provider: "local",
-  modelId: "test-model",
+  model: "test-model",
   protocol: "openai",
   baseUrl: "http://fake/v1",
   apiKey: "sk-test-key-12345",
@@ -20,9 +19,8 @@ const OPENAI_MODEL: ResolvedModel = {
 
 const ANTHROPIC_MODEL: ResolvedModel = {
   ...OPENAI_MODEL,
-  ref: "anthropic/claude-test",
   provider: "anthropic",
-  modelId: "claude-test",
+  model: "claude-test",
   protocol: "anthropic",
   baseUrl: "http://fake",
 };
@@ -163,7 +161,7 @@ describe("runAgentLeaf — plain inference", () => {
       usage: { inputTokens: 10, outputTokens: 5 },
     });
     expect(rec.usage).toEqual([
-      { modelRef: "local/test-model", usage: { inputTokens: 10, outputTokens: 5 } },
+      { modelRef: "test-model", usage: { inputTokens: 10, outputTokens: 5 } },
     ]);
     expect(rec.memoryUsed).toEqual([]);
   });

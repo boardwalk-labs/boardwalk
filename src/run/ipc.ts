@@ -159,9 +159,9 @@ export const resolveModelArgsSchema = z.strictObject({
 });
 /** The supervisor's resolve_model response, re-validated child-side before use. */
 export const resolvedModelSchema = z.strictObject({
-  ref: z.string().min(1),
   provider: z.string().min(1),
-  modelId: z.string().min(1),
+  /** Opaque — passed verbatim to the provider; never parsed. */
+  model: z.string().min(1),
   protocol: z.enum(["anthropic", "openai"]),
   baseUrl: z.string().min(1),
   apiKey: z.string().nullable(),

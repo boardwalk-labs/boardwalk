@@ -103,11 +103,14 @@ function fixture(env: Record<string, string> = {}): {
     store,
     dataDir,
     childEntryPath,
-    env: new Map(Object.entries(env)),
+    // The managed (boardwalk) lane — the DEFAULT path — points at the fake gateway; one
+    // explicit provider entry exercises the named-provider path.
+    env: new Map(Object.entries({ ...env, BOARDWALK_API_KEY: "test-managed-key" })),
     envLabel: ".env (test fixture)",
     cancelGraceMs: 250,
     inference: {
-      default_model: "local/default-test-model",
+      default_model: "default-test-model",
+      boardwalk_base_url: `http://127.0.0.1:${String(provider.port)}/v1`,
       providers: { local: { base_url: `http://127.0.0.1:${String(provider.port)}/v1` } },
     },
   });
@@ -147,7 +150,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "with-agent",
       `import { agent, output } from "@boardwalk/workflow";
-                output(await agent("summarize this", { model: "local/test-model" }));`,
+                output(await agent("summarize this", { model: "test-model" }));`,
     );
 
     const row = f.store.getRun(runId);
@@ -211,7 +214,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "overspender",
       `import { agent, sleep } from "@boardwalk/workflow";
-                await agent("burn tokens", { model: "local/test-model" });
+                await agent("burn tokens", { model: "test-model" });
          await sleep(30_000); // the budget kill lands here, not at process exit`,
       { budget: { max_usd: 0.01 } },
     );
@@ -228,7 +231,7 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "token-hog",
       `import { agent, sleep } from "@boardwalk/workflow";
-                await agent("talk a lot", { model: "local/test-model" });
+                await agent("talk a lot", { model: "test-model" });
          await sleep(30_000);`,
       { budget: { max_tokens: 1000 } },
     );
@@ -245,7 +248,7 @@ describe("agent() through the full run path", () => {
       "wants-mcp",
       `import { agent } from "@boardwalk/workflow";
        await agent("search", {
-         model: "local/test-model",
+         model: "test-model",
          mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
        });`,
     );
@@ -261,7 +264,7 @@ describe("agent() through the full run path", () => {
       "bad-mcp-ref",
       `import { agent } from "@boardwalk/workflow";
        await agent("search", {
-         model: "local/test-model",
+         model: "test-model",
          mcp: [{ name: "gh", transport: "carrier-pigeon", coop: "roof" }],
        });`,
     );
@@ -292,7 +295,7 @@ describe("agent() through the full run path", () => {
        const table = { answer: "42" };
        output(
          await agent("look up the answer", {
-           model: "local/test-model",
+           model: "test-model",
            tools: [
              {
                name: "lookup",
@@ -318,7 +321,7 @@ describe("agent() through the full run path", () => {
   it("memory auto-persists across runs with NO declaration anywhere", async () => {
     const f = fixture();
     const program = `import { agent, output } from "@boardwalk/workflow";
-       output(await agent("take notes", { model: "local/test-model", memory: "mem/notes" }));`;
+       output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));`;
 
     // Run 1: the model writes a memory file through the scoped tool.
     provider.queueResponses({

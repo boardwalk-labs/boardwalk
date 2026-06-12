@@ -110,7 +110,8 @@ function deployProgram(engine: Engine): void {
       import { agent, output } from "@boardwalk/workflow";
       export const meta = { name: "mcp-user", triggers: [{ kind: "manual" }] };
       output(await agent("greet the world", {
-        model: "local/test-model",
+        model: "test-model",
+        provider: "local",
         mcp: [{ name: "locked", transport: "http", url: ${JSON.stringify(mcp.url)} }],
       }));
     `,

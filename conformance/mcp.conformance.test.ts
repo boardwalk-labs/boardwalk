@@ -54,7 +54,7 @@ function deployMcpUser(engine: ReturnType<typeof createEngine>["engine"], url: s
       // Reading the secret teaches the run's redactor its value — the canary path.
       await secrets.get("CANARY_TOKEN");
       output(await agent("look it up", {
-        model: "local/test-model",
+        model: "test-model",
         mcp: [{ name: "kb", transport: "http", url: ${JSON.stringify(url)} }],
       }));
     `,

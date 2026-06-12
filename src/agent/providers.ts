@@ -17,7 +17,8 @@ import { sseDataLines } from "./sse.js";
 export interface ChatArgs {
   baseUrl: string;
   apiKey: string | null;
-  modelId: string;
+  /** Opaque model string, sent verbatim. */
+  model: string;
   messages: readonly ChatMessage[];
   tools: readonly ToolSpec[];
   /** Anthropic requires max_tokens; this default is deliberately generous. */
@@ -112,7 +113,7 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
         ...(args.apiKey !== null ? { "x-api-key": args.apiKey } : {}),
       },
       body: JSON.stringify({
-        model: args.modelId,
+        model: args.model,
         max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
         stream: true,
         messages: anthropicMessages(args.messages),
@@ -278,7 +279,7 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
         ...(args.apiKey !== null ? { authorization: `Bearer ${args.apiKey}` } : {}),
       },
       body: JSON.stringify({
-        model: args.modelId,
+        model: args.model,
         messages: openAiMessages(args.messages),
         ...(args.tools.length > 0
           ? {

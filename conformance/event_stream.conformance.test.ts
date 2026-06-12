@@ -61,7 +61,7 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
       console.log("stdout line");
       console.error("stderr line");
       const reply = await agent("do the thing", {
-        model: "local/test-model",
+        model: "test-model",
         tools: [
           {
             name: "probe",

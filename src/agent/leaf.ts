@@ -166,7 +166,7 @@ async function runToolLoop(
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
     totals.outputTokens += turn.usage.outputTokens ?? 0;
-    io.reportUsage(resolved.ref, turn.usage);
+    io.reportUsage(resolved.model, turn.usage);
 
     if (!turn.wantsTools || turn.toolCalls.length === 0) {
       return turn.text;
@@ -210,7 +210,7 @@ async function modelTurn(
   const args: ChatArgs = {
     baseUrl: resolved.baseUrl,
     apiKey: resolved.apiKey,
-    modelId: resolved.modelId,
+    model: resolved.model,
     messages,
     tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   };

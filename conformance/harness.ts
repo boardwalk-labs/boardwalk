@@ -88,7 +88,7 @@ export function createEngine(opts: CreateEngineOpts = {}): EngineHandle {
   const dataDir = opts.dataDir ?? mkdtempSync(join(tmpdir(), "bw-conformance-"));
   const engine = new Engine({
     dataDir,
-    env: opts.env ?? {},
+    env: { ...MANAGED_KEY_ENV, ...(opts.env ?? {}) },
     envLabel: ".env (conformance harness)",
     childEntryPath,
     cancelGraceMs: 250,
@@ -164,13 +164,20 @@ export function startFakeProvider(): Promise<FakeProvider> {
   });
 }
 
-/** Engine inference config routing the `local/...` model refs at the fake provider. */
+/**
+ * Engine inference config pointing the DEFAULT (boardwalk managed) lane at the fake provider —
+ * the path a model named with no `provider` takes. Pair with {@link MANAGED_KEY_ENV} in the
+ * engine env (createEngine adds it automatically).
+ */
 export function localInference(provider: FakeProvider): InferenceConfig {
   return {
-    default_model: "local/default-test-model",
-    providers: { local: { base_url: `http://127.0.0.1:${String(provider.port)}/v1` } },
+    default_model: "default-test-model",
+    boardwalk_base_url: `http://127.0.0.1:${String(provider.port)}/v1`,
   };
 }
+
+/** The managed-lane credential the conformance engines run with. */
+export const MANAGED_KEY_ENV = { BOARDWALK_API_KEY: "conformance-managed-key" };
 
 /** An OpenAI-shaped tool-call response body for {@link FakeProvider.queueResponses}. */
 export function toolCallResponse(
