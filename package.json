@@ -3,6 +3,11 @@
   "version": "0.1.0",
   "description": "The Boardwalk single-node engine: cron scheduling, run lifecycle, SQLite state, and the local run log. Powers `boardwalk dev` and the self-hosted server.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/boardwalk-labs/boardwalk.git"
+  },
+  "homepage": "https://github.com/boardwalk-labs/boardwalk#readme",
   "type": "module",
   "engines": {
     "node": ">=24.0.0"
@@ -15,7 +20,7 @@
     }
   },
   "bin": {
-    "boardwalk-server": "./bin/boardwalk-server.js"
+    "boardwalk-server": "bin/boardwalk-server.js"
   },
   "files": [
     "bin",
