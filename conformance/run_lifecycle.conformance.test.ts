@@ -79,4 +79,32 @@ describe("conformance: run lifecycle", () => {
       expect(last.error?.message).toContain("conformance kaboom");
     }
   }, 20_000);
+
+  it("a verdict output() before a throw is preserved on the failed run (verdict-then-throw)", async () => {
+    const { engine } = createEngine();
+    engine.deployWorkflow({
+      program: `
+        import { output } from "@boardwalk-labs/workflow";
+        export const meta = { name: "verdict", triggers: [{ kind: "manual" }] };
+        output({ healthy: false, reason: "deadline passed" });
+        throw new Error("target was not healthy in time");
+      `,
+    });
+
+    const run = engine.startRun("verdict");
+    const done = await engine.waitForRun(run.id);
+
+    expect(done.status).toBe("failed");
+    expect(done.output).toEqual({ healthy: false, reason: "deadline passed" });
+    expect(done.error?.message).toContain("not healthy");
+
+    // The output event lands BEFORE the failed status (the verdict reads before the failure).
+    expect(kindsOf(engine, done.id)).toEqual([
+      "run_status", // queued
+      "run_status", // pending
+      "run_status", // running
+      "output",
+      "run_status", // failed
+    ]);
+  }, 20_000);
 });

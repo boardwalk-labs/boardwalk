@@ -1,0 +1,40 @@
+name: Bug report
+description: Something behaves differently than documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got. Include the exact command/code.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest workflow program / command sequence that shows the problem.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Which engine mode?
+      options:
+        - boardwalk dev (CLI)
+        - Self-hosted server (docker / boardwalk-server)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Versions
+      placeholder: "@boardwalk-labs/engine 0.1.0, @boardwalk-labs/workflow 0.1.0, node 24.x, macOS 15"
+    validations:
+      required: true
+  - type: markdown
+    attributes:
+      value: |
+        **Security issue?** Do not file it here — see SECURITY.md (private reporting).
+        Never paste secret values, tokens, or `.env` contents into an issue.

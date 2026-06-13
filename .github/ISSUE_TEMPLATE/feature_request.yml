@@ -1,0 +1,20 @@
+name: Feature request
+description: Propose an addition or change.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that you can't today? Concrete use case beats abstract capability.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: What would the API / behavior look like? Sketches welcome. Note any parity implications across engine modes.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds considered

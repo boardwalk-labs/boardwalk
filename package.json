@@ -43,11 +43,6 @@
     "@boardwalk-labs/workflow": "^0.1.0",
     "zod": "^4.0.0"
   },
-  "pnpm": {
-    "overrides": {
-      "@boardwalk-labs/workflow": "link:../sdk"
-    }
-  },
   "devDependencies": {
     "@eslint/js": "^9.18.0",
     "@types/node": "^24.0.0",

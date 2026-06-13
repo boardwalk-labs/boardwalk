@@ -173,12 +173,8 @@ describe("agent() through the full run path", () => {
     const turnIds = new Set(events.filter((e) => e.turnId !== runId).map((e) => e.turnId));
     expect(turnIds.size).toBe(1);
     // turn_started / turn_ended carry the leaf's identity; an unnamed call has agentId only.
-    const turnFrames = events.filter(
-      (e) => e.kind === "turn_started" || e.kind === "turn_ended",
-    );
-    const agentIds = new Set(
-      turnFrames.map((e) => ("agentId" in e ? e.agentId : undefined)),
-    );
+    const turnFrames = events.filter((e) => e.kind === "turn_started" || e.kind === "turn_ended");
+    const agentIds = new Set(turnFrames.map((e) => ("agentId" in e ? e.agentId : undefined)));
     expect(agentIds).toEqual(new Set(["agent-1"]));
     expect(turnFrames.every((e) => !("agentName" in e))).toBe(true);
   }, 30_000);

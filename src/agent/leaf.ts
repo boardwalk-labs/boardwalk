@@ -152,7 +152,12 @@ async function runLeafWithTools(
     // rethrow — in the run's failed row. The secrets invariant covers error paths too.
     const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
     const code = err instanceof EngineError ? err.code : "PROVIDER_ERROR";
-    io.emit(turnId, { kind: "turn_ended", ...io.identity, reason: "error", error: { code, message } });
+    io.emit(turnId, {
+      kind: "turn_ended",
+      ...io.identity,
+      reason: "error",
+      error: { code, message },
+    });
     throw new EngineError(
       code,
       message,

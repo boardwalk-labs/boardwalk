@@ -118,7 +118,10 @@ function recordedIo(
     return Promise.resolve(make());
   };
   const io: LeafIo = {
-    identity: { agentId: "agent-1", ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}) },
+    identity: {
+      agentId: "agent-1",
+      ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
+    },
     resolve: () => Promise.resolve(model),
     startTurn: (turnId) => {
       turns.push(turnId);
