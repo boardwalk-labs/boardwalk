@@ -81,7 +81,7 @@ export interface SupervisorOptions {
 
 type SpawnResult =
   | { kind: "done"; output: unknown; outputDeclared: boolean }
-  | { kind: "failed"; error: IpcErrorShape }
+  | { kind: "failed"; error: IpcErrorShape; output: unknown; outputDeclared: boolean }
   | { kind: "crashed" }
   | { kind: "cancelled" }
   | { kind: "budget" };
@@ -322,8 +322,17 @@ export class RunSupervisor {
             output: result.outputDeclared ? result.output : null,
           });
         }
-        case "failed":
-          return this.finishRun(run.id, entry, "failed", { error: result.error });
+        case "failed": {
+          // A verdict output() before the throw is emitted (before the failed status) and kept
+          // on the row — same as the completed path, so failed runs aren't silently output-less.
+          if (result.outputDeclared) {
+            this.stampAndStore(run.id, entry.envelope, { kind: "output", value: result.output });
+          }
+          return this.finishRun(run.id, entry, "failed", {
+            error: result.error,
+            ...(result.outputDeclared ? { output: result.output } : {}),
+          });
+        }
         case "cancelled":
           return this.finishRun(run.id, entry, "cancelled", {});
         case "budget":
@@ -448,10 +457,20 @@ export class RunSupervisor {
             this.emitBody(run.id, entry, msg.body, msg.turnId);
             break;
           case "turn_started":
-            // A new agent turn: bump the cursor stride block, then emit its opening frame.
+            // A new agent turn: bump the cursor stride block, then emit its opening frame —
+            // naming the leaf (agentId + optional agentName) so consumers can attribute it.
             entry.envelope.turn += 1;
             entry.envelope.seq = 0;
-            this.emitBody(run.id, entry, { kind: "turn_started" }, msg.turnId);
+            this.emitBody(
+              run.id,
+              entry,
+              {
+                kind: "turn_started",
+                agentId: msg.agentId,
+                ...(msg.agentName !== undefined ? { agentName: msg.agentName } : {}),
+              },
+              msg.turnId,
+            );
             break;
           case "report_usage":
             this.recordUsage(run.id, entry, workflow, msg.modelRef, msg.usage);
@@ -469,7 +488,12 @@ export class RunSupervisor {
             settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
             break;
           case "failed":
-            settle({ kind: "failed", error: msg.error });
+            settle({
+              kind: "failed",
+              error: msg.error,
+              output: msg.output,
+              outputDeclared: msg.outputDeclared,
+            });
             break;
         }
       });

@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
-import { runAgentLeaf } from "../agent/leaf.js";
+import { runAgentLeaf, type AgentIdentity } from "../agent/leaf.js";
 import { Redactor } from "../agent/redact.js";
 import type { ToolSetContext } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
@@ -27,8 +27,8 @@ export interface ChildHostIo {
   request(method: HostMethod, args: Record<string, unknown>): Promise<unknown>;
   /** Emit a run-event body (the supervisor stamps the envelope). turnId scopes leaf frames. */
   emit(body: RunEventBody, turnId?: string): void;
-  /** Tell the supervisor to open a new turn block (it emits turn_started). */
-  startTurn(turnId: string): void;
+  /** Tell the supervisor to open a new turn block (it emits turn_started naming the leaf). */
+  startTurn(turnId: string, identity: AgentIdentity): void;
   /** Report leaf usage to the supervisor — the budget authority. */
   reportUsage(modelRef: string, usage: TokenUsage): void;
   /** Tell the supervisor a memory dir is in use (auto-persisted at successful run end). */
@@ -49,6 +49,9 @@ export interface ChildHost {
 
 export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): ChildHost {
   let phaseCount = 0;
+  // One counter per run → a stable, run-unique id for each agent() call. The author's optional
+  // name rides alongside as the display label; concurrent agents stay distinguishable either way.
+  let agentCount = 0;
   // One redactor for the whole run process: every secret value revealed to the program (and
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
   const redactor = new Redactor();
@@ -60,7 +63,13 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
+      agentCount += 1;
+      const identity: AgentIdentity = {
+        agentId: `agent-${String(agentCount)}`,
+        ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
+      };
       return await runAgentLeaf(prompt, opts, {
+        identity,
         resolve: async (model, provider) =>
           resolvedModelSchema.parse(
             await io.request("resolve_model", {
@@ -68,7 +77,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
               ...(provider !== undefined ? { provider } : {}),
             }),
           ),
-        startTurn: (turnId) => io.startTurn(turnId),
+        startTurn: (turnId) => io.startTurn(turnId, identity),
         emit: (turnId, body) => io.emit(body, turnId),
         reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
         memoryUsed: (dir) => io.memoryUsed(dir),

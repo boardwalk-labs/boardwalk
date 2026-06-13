@@ -97,6 +97,7 @@ function recordedIo(
     redactor?: Redactor;
     workspaceDir?: string;
     skillsDir?: string | null;
+    agentName?: string;
     mcpToken?: (serverUrl: string, invalidateToken?: string) => Promise<McpTokenResult>;
   } = {},
 ): Recorded {
@@ -117,6 +118,7 @@ function recordedIo(
     return Promise.resolve(make());
   };
   const io: LeafIo = {
+    identity: { agentId: "agent-1", ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}) },
     resolve: () => Promise.resolve(model),
     startTurn: (turnId) => {
       turns.push(turnId);
@@ -159,6 +161,7 @@ describe("runAgentLeaf — plain inference", () => {
     expect(kinds(rec)).toEqual(["text_start", "text_delta", "text_end", "turn_ended"]);
     expect(rec.events.at(-1)?.body).toEqual({
       kind: "turn_ended",
+      agentId: "agent-1",
       reason: "complete",
       usage: { inputTokens: 10, outputTokens: 5 },
     });
@@ -166,6 +169,19 @@ describe("runAgentLeaf — plain inference", () => {
       { modelRef: "test-model", usage: { inputTokens: 10, outputTokens: 5 } },
     ]);
     expect(rec.memoryUsed).toEqual([]);
+  });
+
+  it("stamps the leaf's agentName onto turn_ended when the call was named", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("hi", { in: 1, out: 1 })], {
+      agentName: "reviewer",
+    });
+    await runAgentLeaf("review this", undefined, rec.io);
+
+    const ended = rec.events.at(-1)?.body;
+    expect(ended?.kind === "turn_ended" ? ended : null).toMatchObject({
+      agentId: "agent-1",
+      agentName: "reviewer",
+    });
   });
 
   it("redacts known secret values (and the provider key) from the outbound prompt", async () => {

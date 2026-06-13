@@ -13,6 +13,7 @@ import {
   takeDeclaredOutput,
 } from "@boardwalk-labs/workflow/runtime";
 import type { JsonValue } from "@boardwalk-labs/workflow";
+import type { AgentIdentity } from "../agent/leaf.js";
 import type { Redactor } from "../agent/redact.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
@@ -81,8 +82,8 @@ async function runProgram(
         emit(body: RunEventBody, turnId?: string) {
           send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
         },
-        startTurn(turnId: string) {
-          send({ type: "turn_started", turnId });
+        startTurn(turnId: string, identity: AgentIdentity) {
+          send({ type: "turn_started", turnId, ...identity });
         },
         reportUsage(modelRef, usage) {
           send({ type: "report_usage", modelRef, usage });
@@ -117,6 +118,10 @@ async function runProgram(
     const scrub = (text: string): string => redactor?.redact(text) ?? text;
     const shape = toErrorShape(err);
     const hint = err instanceof EngineError ? err.hint : undefined;
+    // Output declared before the throw still counts (verdict-then-throw): the success path
+    // reports it, so the failure path must too, or the verdict is lost. Safe even when the
+    // failure preceded host setup — nothing was declared, so this is null/false.
+    const declared = takeDeclaredOutput();
     send({
       type: "failed",
       error: {
@@ -124,6 +129,8 @@ async function runProgram(
         message: scrub(shape.message),
         ...(hint !== undefined ? { hint: scrub(hint) } : {}),
       },
+      output: declared === null ? null : declared.value,
+      outputDeclared: declared !== null,
     });
   } finally {
     // Why disconnect-then-exit: process.send is async under the hood; disconnecting flushes

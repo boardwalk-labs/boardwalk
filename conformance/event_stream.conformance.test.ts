@@ -139,5 +139,14 @@ describe("conformance: event stream contract", () => {
       if (channelOf(row.event) !== "agent") expect(row.event.turnId).toBe(runId);
       expect(row.event.runId).toBe(runId);
     }
+
+    // The turn frames name the leaf: a stable, run-unique agentId shared by turn_started/turn_ended.
+    const turnFrames = events
+      .map((row) => row.event)
+      .filter((event) => event.kind === "turn_started" || event.kind === "turn_ended");
+    expect(turnFrames.length).toBeGreaterThanOrEqual(2);
+    const agentIds = new Set(turnFrames.map((event) => ("agentId" in event ? event.agentId : "")));
+    expect(agentIds.size).toBe(1);
+    expect([...agentIds][0]).toBeTruthy();
   }, 30_000);
 });

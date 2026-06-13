@@ -25,16 +25,26 @@ import {
 const MAX_TOOL_ITERATIONS = 25;
 
 /**
+ * Identity of one `agent()` leaf, carried on its `turn_started`/`turn_ended` frames so a stream
+ * consumer can tell concurrent agents apart. `agentId` is stable and run-unique (engine-assigned);
+ * `agentName` is the author's `AgentOptions.name`, present only when they set one.
+ */
+export interface AgentIdentity {
+  agentId: string;
+  agentName?: string;
+}
+
+/**
  * A leaf event body, scoped to the leaf's turn. `turn_started` itself is emitted by the
  * supervisor when the turn opens (io.startTurn) — the leaf only emits what follows.
  */
 export type LeafEventBody =
-  | {
+  | ({
       kind: "turn_ended";
       reason: "complete" | "error";
       usage?: TokenUsage;
       error?: { code: string; message: string };
-    }
+    } & AgentIdentity)
   | { kind: "text_start"; blockId: string }
   | { kind: "text_delta"; blockId: string; text: string }
   | { kind: "text_end"; blockId: string }
@@ -45,6 +55,8 @@ export type LeafEventBody =
   | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } };
 
 export interface LeafIo {
+  /** This leaf's identity — stamped onto its turn_started (via startTurn) and turn_ended frames. */
+  identity: AgentIdentity;
   /** Supervisor-side model resolution (config + key material never live in this process). */
   resolve(model: string | undefined, provider: string | undefined): Promise<ResolvedModel>;
   /** Open a new turn block; subsequent leaf events carry this turnId. */
@@ -140,7 +152,7 @@ async function runLeafWithTools(
     // rethrow — in the run's failed row. The secrets invariant covers error paths too.
     const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
     const code = err instanceof EngineError ? err.code : "PROVIDER_ERROR";
-    io.emit(turnId, { kind: "turn_ended", reason: "error", error: { code, message } });
+    io.emit(turnId, { kind: "turn_ended", ...io.identity, reason: "error", error: { code, message } });
     throw new EngineError(
       code,
       message,
@@ -151,6 +163,7 @@ async function runLeafWithTools(
   }
   io.emit(turnId, {
     kind: "turn_ended",
+    ...io.identity,
     reason: "complete",
     usage: { inputTokens: totals.inputTokens, outputTokens: totals.outputTokens },
   });

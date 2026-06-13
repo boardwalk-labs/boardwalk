@@ -113,8 +113,11 @@ export const childToParentSchema = z.union([
   }),
   z.object({
     // Opens a new turn block: the supervisor bumps its cursor stride and emits turn_started.
+    // Carries the leaf's identity so the stamped turn_started names which agent is starting.
     type: z.literal("turn_started"),
     turnId: z.string().min(1),
+    agentId: z.string().min(1),
+    agentName: z.string().min(1).optional(),
   }),
   z.object({
     // Leaf usage report — the supervisor's budget authority consumes this (tokens + max_usd).
@@ -135,6 +138,10 @@ export const childToParentSchema = z.union([
   z.object({
     type: z.literal("failed"),
     error: errorShapeSchema,
+    // Output declared (output()) BEFORE the program threw still counts — a watch/check often
+    // output()s its verdict and then throws to mark the run failed. Mirrors `done`.
+    output: z.unknown(),
+    outputDeclared: z.boolean(),
   }),
 ]);
 export type ChildToParent = z.infer<typeof childToParentSchema>;

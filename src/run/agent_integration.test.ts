@@ -172,6 +172,35 @@ describe("agent() through the full run path", () => {
     // Agent frames share one turnId, distinct from the run's.
     const turnIds = new Set(events.filter((e) => e.turnId !== runId).map((e) => e.turnId));
     expect(turnIds.size).toBe(1);
+    // turn_started / turn_ended carry the leaf's identity; an unnamed call has agentId only.
+    const turnFrames = events.filter(
+      (e) => e.kind === "turn_started" || e.kind === "turn_ended",
+    );
+    const agentIds = new Set(
+      turnFrames.map((e) => ("agentId" in e ? e.agentId : undefined)),
+    );
+    expect(agentIds).toEqual(new Set(["agent-1"]));
+    expect(turnFrames.every((e) => !("agentName" in e))).toBe(true);
+  }, 30_000);
+
+  it("stamps the author's agent name onto the turn frames", async () => {
+    const f = fixture();
+    provider.respondWith("named answer", { in: 1, out: 1 });
+    const runId = await f.run(
+      "named-agent",
+      `import { agent, output } from "@boardwalk-labs/workflow";
+       output(await agent("review", { model: "test-model", name: "reviewer" }));`,
+    );
+
+    expect(f.store.getRun(runId)?.status).toBe("completed");
+    const turnFrames = f.store
+      .listEvents(runId)
+      .map((e) => e.event)
+      .filter((e) => e.kind === "turn_started" || e.kind === "turn_ended");
+    expect(turnFrames.length).toBeGreaterThanOrEqual(2);
+    for (const e of turnFrames) {
+      expect(e).toMatchObject({ agentId: "agent-1", agentName: "reviewer" });
+    }
   }, 30_000);
 
   it("omitted model falls back to the engine's default_model", async () => {
