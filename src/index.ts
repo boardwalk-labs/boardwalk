@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // @boardwalk-labs/engine — the open-source single-node runtime.
 //
 // Two consumers, one implementation (SPEC §1): the CLI embeds it for `boardwalk dev`

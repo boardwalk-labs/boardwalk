@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The engine's HTTP surface (SPEC §2.4): JSON API + SSE live tail + webhook triggers + the
 // local run-log page, on bare node:http. This file owns the socket lifecycle only — routing
 // lives in routes/router.ts, and every handler goes through engine/store methods, never SQL.

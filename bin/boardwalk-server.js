@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+
 // Thin launcher for `boardwalk-server` (SPEC §5). All real logic lives in compiled,
 // type-checked, tested TypeScript (src/server_main.ts) — this shim only exists so npm `bin`
 // and the Docker CMD share one entrypoint that resolves dist/ relative to the package.

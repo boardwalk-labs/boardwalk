@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // POST /hooks/:workflow/:triggerIndex — the webhook trigger endpoint, and this engine's v0
 // answer to the open webhook-auth question (documented in SPEC §2.4):
 // per-workflow credentials live in *server* environment variables —

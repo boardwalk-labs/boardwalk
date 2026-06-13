@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+
 # ghcr.io/boardwalk-labs/boardwalk — the self-hosted Boardwalk engine in server mode (SPEC §5).
 #
 #   docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk

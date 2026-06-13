@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // URL → handler resolution for the engine server. One flat match over decoded path segments —
 // the route table is small enough that a real trie/middleware stack would be pure ceremony.
 // Method mismatches on a known path get 405 + Allow (not 404), so clients can tell "wrong

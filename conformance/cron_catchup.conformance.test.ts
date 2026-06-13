@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: cron catch-up policy (SPEC §3 + §2.1).
 //
 // Fires missed while no engine was running are NEVER silent and NEVER a thundering herd: the

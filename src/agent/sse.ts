@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Server-Sent Events parsing, shared by the provider adapters (streamed model turns) and the
 // MCP streamable-HTTP transport (a server may answer any POST with an SSE stream). One parser
 // so the two consumers can't drift on framing edge cases (CRLF, split chunks, [DONE]).

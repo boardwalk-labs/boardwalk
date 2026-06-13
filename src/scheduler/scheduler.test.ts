@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, expect, it } from "vitest";
 import { workflowManifestSchema, type WorkflowManifest } from "@boardwalk-labs/workflow";
 import type { Clock } from "../clock.js";

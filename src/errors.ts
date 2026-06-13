@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Engine errors carry a stable machine-readable code (surfaced in run_status `failed` events
 // and API responses) plus an actionable message. Messages NEVER contain secret values.
 

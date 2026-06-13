@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Cron parsing + next-fire computation for the scheduler (SPEC §2.1).
 //
 // One-validator philosophy: the SDK manifest schema only checks a cron trigger shallowly

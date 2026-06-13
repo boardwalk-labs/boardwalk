@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Provider adapters for the agent() leaf — two wire protocols cover everything (SPEC §2.3):
 // Anthropic's Messages API (streamed) and OpenAI-style chat completions (the lingua franca of
 // OpenAI, Google's compat surface, vLLM, Ollama, Together, Fireworks, Groq…). Each adapter

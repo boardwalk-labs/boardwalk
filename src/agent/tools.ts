@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Capability assembly for an agent() call (SDK SPEC §2.1.1). Capabilities are PER-AGENT
 // (decided 2026-06-11): each call brings its own tools/skills/memory — there is nothing to
 // check against the manifest, but everything the call names must RESOLVE (fail loudly —

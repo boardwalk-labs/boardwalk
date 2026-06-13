@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Exercises the streamable-HTTP transport against real local servers: single-JSON replies,
 // SSE replies, Mcp-Session-Id capture + replay + DELETE teardown, the MCP-Protocol-Version
 // header, and the 401 → acquireToken → retry → invalidate dance the OAuth design hangs on.

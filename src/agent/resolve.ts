@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Model + provider resolution for the agent() leaf (SPEC §2.3 "model resolution").
 //
 // `provider` and `model` are ORTHOGONAL (decided 2026-06-12):

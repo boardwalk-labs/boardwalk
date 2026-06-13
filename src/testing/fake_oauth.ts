@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Test double: a minimal OAuth 2.1 authorization server (RFC 8414 metadata, RFC 7591 dynamic
 // registration, authorization endpoint that just 302s back with a code, token endpoint with
 // authorization_code + refresh_token grants, real S256 PKCE verification). Also serves RFC

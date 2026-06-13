@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: concurrency modes (SPEC §3 + §2.1).
 //
 // Concurrency gates DISPATCH, not queueing: under `serial`, a second run stays `queued` until

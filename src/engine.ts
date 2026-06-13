@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The engine facade — the one object both consumers construct (SPEC §1):
 //   - SERVER mode: `start()` boots the recovery sweep + the cron scheduler loop and the
 //     process stays up (the HTTP surface sits on top of this object).

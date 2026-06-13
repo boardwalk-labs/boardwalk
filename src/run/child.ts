@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The run-process entry point. Spawned by the supervisor with an IPC channel; never run
 // directly. Protocol: wait for `init`, install the SDK host + run inputs, then IMPORT the
 // program bundle — the module body is the program, so importing the file IS running it

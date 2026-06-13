@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The JSON API (SPEC §2.4): list workflows/runs, trigger a manual run, read a run + its
 // events, cancel. Handlers translate HTTP into engine/store calls and nothing else — all SQL
 // lives in the store, all run semantics in the engine.

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The engine's one persistence module — every SQL statement in the engine lives here
 // (storage access goes through one persistence module). The backend is
 // node:sqlite, synchronous on purpose: a single-node engine gains nothing from an async

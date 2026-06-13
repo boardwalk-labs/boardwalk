@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // JSON-RPC 2.0 request/notification correlation for the hand-rolled MCP client (the
 // @modelcontextprotocol/sdk dependency tree was rejected for the flagship — zero new deps).
 // The transport moves frames; this layer owns ids, correlation, timeouts, and the trust

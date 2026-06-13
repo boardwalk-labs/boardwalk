@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Shared HTTP plumbing for the engine server: the error type every route throws, JSON
 // request/response helpers, and query/body parsing. Bare node:http is deliberate (no
 // third-party HTTP framework anywhere in the Boardwalk stack) — these helpers are the entire

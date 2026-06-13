@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: sleep-through-ENGINE-restart (SPEC §3) — hold-and-pay + crash-safety.
 //
 // Kill the ENGINE while a run is held in `sleep`: the orphaned child exits, and a NEW engine

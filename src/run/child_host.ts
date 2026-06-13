@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The WorkflowHost installed in the run process.
 //
 // Split of responsibilities (SPEC §2.3): anything that only needs the local process happens

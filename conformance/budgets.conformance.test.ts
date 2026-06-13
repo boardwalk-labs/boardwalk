@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: budgets terminate (SPEC §3) — enforced, not advisory.
 //
 // Breaching budget.* FAILS the run with BUDGET_EXCEEDED and a message naming the breached

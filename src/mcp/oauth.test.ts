@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Unit coverage for the parent-side OAuth pieces: PKCE math, WWW-Authenticate parsing, and
 // discovery / registration / code-exchange / refresh against the in-test fake authorization
 // server (real HTTP, real S256 verification — the fake AS rejects a wrong verifier, so a PKCE

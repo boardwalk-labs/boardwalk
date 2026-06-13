@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // PARENT-side OAuth 2.1 for MCP servers (MCP authorization spec, 2025-06-18): discovery
 // (RFC 9728 protected-resource metadata → RFC 8414 AS metadata), RFC 7591 dynamic client
 // registration, the authorization-code + PKCE (S256) grant with a loopback redirect, RFC 8707

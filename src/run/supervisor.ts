@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The run supervisor — owns run-lifecycle state transitions and process supervision
 // (SPEC §2.2). Layering: knows nothing about HTTP or the CLI; persistence
 // goes through the Store; what workflows *do* lives in the child process.

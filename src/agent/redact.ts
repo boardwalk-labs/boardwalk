@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Secret redaction for the agent() leaf.
 //
 // The invariant: secret VALUES live only in deterministic program code; everything bound for a

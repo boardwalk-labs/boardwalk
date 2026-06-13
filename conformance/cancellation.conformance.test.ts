@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: cancellation (SPEC §3).
 //
 // Cancelling a RUNNING run walks cancelling → cancelled (the cooperative window is real, so

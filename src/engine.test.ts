@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Facade tests: deploy-from-source (manifest derived from the pure-literal meta), the two
 // consumption modes, and the dispatch path manual runs share with cron fires.
 

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Runtime narrowing for JsonValue. Values arriving over the run process's JSON-serialized IPC
 // channel are JSON by construction, but "by construction" is exactly what trust boundaries
 // don't get to assume — so narrow structurally instead of casting.

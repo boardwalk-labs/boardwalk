@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: workflows.call / workflows.run (SPEC §3).
 //
 // Durable composition: a parent holds for the child's output via workflows.call; the call is

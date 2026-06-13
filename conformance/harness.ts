@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The conformance harness — THE ENGINE-SPECIFIC HALF OF THE SUITE.
 //
 // The conformance suite (SPEC §3) is the arbiter of the parity promise: the

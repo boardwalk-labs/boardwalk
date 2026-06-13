@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // MCP stdio transport: spawn the server command and speak newline-delimited JSON over its
 // stdin/stdout (the MCP stdio framing). Runs in the RUN PROCESS — the program is the trusted
 // layer, so its inline `command`/`env` are honored as-is; the server's stderr is inherited so

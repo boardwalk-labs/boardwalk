@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The provider-neutral conversation model for the agent() loop. The leaf builds these;
 // each protocol adapter maps them to its wire format. Keeping the loop neutral is what lets
 // two adapters (Anthropic + OpenAI-compatible) cover every supported endpoint.

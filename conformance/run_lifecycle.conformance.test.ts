@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: run lifecycle (SPEC §3).
 //
 // The base contract every engine must honor for the simplest possible runs: a completing run

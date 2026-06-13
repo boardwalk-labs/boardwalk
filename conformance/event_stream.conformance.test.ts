@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: the run-event wire format (SPEC §3).
 //
 // One rich run (phases, stdout/stderr, an agent turn with a tool call, an output) exercises

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: per-agent capabilities (SPEC §3 + §2.3; SDK AgentOptions).
 //
 // Capabilities are PER-AGENT — each agent() call brings its own tools/skills/memory, the

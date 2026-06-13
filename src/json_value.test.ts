@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, expect, it } from "vitest";
 import { asJsonValue, isJsonValue } from "./json_value.js";
 import { EngineError } from "./errors.js";

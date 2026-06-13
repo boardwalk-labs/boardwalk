@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Tests for the server composition root: every config default, override, and rejection in
 // loadServerConfig (the trust boundary for operator input), the .env resolution rules, and
 // one boot-and-shutdown smoke of startServer on an ephemeral port + throwaway data dir.

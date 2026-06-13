@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // GET / — the local run-log page (SPEC §2.4): one self-contained HTML document, no build
 // step, no external assets. It is a log viewer, not a console: list workflows, list recent
 // runs, click a run to tail it over the SSE endpoint. All rendering uses textContent — no

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
 import { nextFire, parseCron } from "./cron.js";

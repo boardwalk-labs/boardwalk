@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // MCP streamable-HTTP transport (spec rev 2025-06-18 §Transports): every client message is a
 // POST to the server URL; the response is either a single JSON body or an SSE stream of
 // JSON-RPC messages (one shared parser with the provider adapters — src/agent/sse.ts). The

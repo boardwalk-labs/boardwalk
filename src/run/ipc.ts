@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The supervisor ⇄ run-process IPC protocol.
 //
 // One run = one spawned Node process (SPEC §2.2). The child executes the user's program and

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: restart-on-crash (SPEC §3).
 //
 // A run process that dies mid-program restarts FROM THE TOP — no checkpoint, no replay — with

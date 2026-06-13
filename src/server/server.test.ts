@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Real-HTTP tests for the engine server: a real Engine (spawning real child processes from
 // the prebuilt dist), a real socket on an ephemeral loopback port, and fetch as the client.
 // SSE frames are decoded by hand off the response body — no EventSource dependency.

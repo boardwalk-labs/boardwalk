@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Injectable time source. The scheduler and lifecycle take a Clock instead of calling
 // Date.now()/setTimeout directly so tests can drive time deterministically (scheduler clock
 // tests, DST cases, catch-up policy) without real waits.

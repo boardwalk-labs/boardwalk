@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // End-to-end agent() integration: real child process, real IPC, and a real (local, fake)
 // OpenAI-compatible provider — the full path a workflow's agent() call takes. This is where
 // the redaction invariant and the usage-budget kill are proven against actual processes,

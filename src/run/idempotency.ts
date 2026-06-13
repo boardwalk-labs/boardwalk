@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Default idempotency keys for workflows.call / workflows.run.
 //
 // Contract (SDK CallOptions): "a deterministic key over (parent_run_id, target, input)" — a

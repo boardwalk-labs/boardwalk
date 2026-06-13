@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Conformance: agent() MCP client (SPEC §2.3; SDK AgentOptions.mcp).
 //
 // The contract: an inline http McpServerRef connects, its tools join the loop under

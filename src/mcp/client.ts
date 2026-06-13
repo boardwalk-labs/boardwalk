@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The MCP connection: the protocol conversation (initialize handshake, tools/list pagination,
 // tools/call) over any transport. Lives in the RUN PROCESS — tool execution must happen where
 // the program runs — while OAuth token state stays parent-side (the transport's hook brokers

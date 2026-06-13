@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 import { describe, expect, it } from "vitest";
 import { McpConnection } from "./client.js";
 import type { JsonRpcOutbound, McpTransport } from "./jsonrpc.js";

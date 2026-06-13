@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Exercises the stdio transport against a real spawned process: the plain-JS fixture
 // (fixtures/echo_server.mjs) speaks initialize/tools-list/tools-call over newline-delimited
 // JSON, so these tests cover spawning, framing, env injection, kill-on-close, and spawn

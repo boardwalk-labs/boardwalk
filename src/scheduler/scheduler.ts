@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The cron scheduler (SPEC §2.1). Layering: it fires runs; it knows nothing about what a
 // workflow does. Execution is injected (`dispatch`) so this module never
 // touches processes, and time is injected (`Clock`) so tests drive it deterministically.

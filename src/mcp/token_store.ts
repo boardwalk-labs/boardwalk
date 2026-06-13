@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // PARENT-side MCP OAuth token persistence. Tokens live with the engine — never in the run
 // process beyond the single brokered value a request needs — in one JSON file under the data
 // dir, mode 0600 (they are credentials, treated like secrets: values

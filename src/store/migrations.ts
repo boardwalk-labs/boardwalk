@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Versioned, forward-only schema migrations for the engine database.
 //
 // The schema version lives in SQLite's `PRAGMA user_version` (an integer in the database

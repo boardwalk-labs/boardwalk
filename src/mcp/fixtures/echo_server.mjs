@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Test fixture: a minimal MCP server speaking newline-delimited JSON-RPC over stdio.
 // Plain .mjs so it runs straight off `process.execPath` with no compile step (tsc ignores
 // .mjs under src/, so `pnpm build` neither compiles nor ships it); tests reference it by

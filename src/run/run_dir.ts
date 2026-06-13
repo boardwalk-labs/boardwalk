@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Per-run on-disk layout + the SDK-sharing symlink.
 //
 //   <dataDir>/runs/<runId>/

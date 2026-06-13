@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The composition root for the `boardwalk-server` binary (SPEC §2.4 + §5): parse config,
 // construct the Engine, mount the HTTP surface, wire graceful shutdown. Everything here is
 // glue — run semantics live in the engine, routing in the server, so this file stays thin

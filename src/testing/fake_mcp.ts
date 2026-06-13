@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Test double: a scriptable MCP server speaking streamable HTTP (single-JSON or SSE replies,
 // session ids, pagination, optional Bearer auth with an RFC 9728 metadata hint). Lives in
 // src/testing/ — excluded from the build and coverage — because the unit suites, the leaf

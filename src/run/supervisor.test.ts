@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // Integration tests for the run lifecycle: they spawn the REAL compiled child entry
 // (dist/run/child.js) and execute real program bundles, because the semantics under test —
 // restart-from-the-top, idempotent re-attach, hold-and-pay sleep, cancellation, budgets —

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The approximate token-price table behind budget.max_usd (SPEC §2.2: "USD via a bundled
 // approximate rate table, documented as approximate").
 //

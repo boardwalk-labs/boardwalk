@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // The agent() leaf: a real agentic loop (SDK SPEC §2.1.1) — streamed model turns with tool
 // use (program-defined ToolDefs + memory file tools + MCP server tools), skills loaded into
 // context, schema output, secret redaction, and usage reporting. Runs IN THE PROGRAM PROCESS

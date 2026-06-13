@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: Apache-2.0
+
 // End-to-end MCP OAuth: a real Engine, a real spawned run process, a fake OAuth-protected MCP
 // server, and a fake authorization server. Proves the whole architecture: the one-time
 // interactive authorize (Engine.authorizeMcpServer + loopback redirect), runs using the stored
