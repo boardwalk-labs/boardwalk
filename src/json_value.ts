@@ -1,6 +1,6 @@
 // Runtime narrowing for JsonValue. Values arriving over the run process's JSON-serialized IPC
 // channel are JSON by construction, but "by construction" is exactly what trust boundaries
-// don't get to assume (CODE_QUALITY §2.1) — so narrow structurally instead of casting.
+// don't get to assume — so narrow structurally instead of casting.
 
 import type { JsonValue } from "@boardwalk-labs/workflow";
 import { EngineError } from "./errors.js";

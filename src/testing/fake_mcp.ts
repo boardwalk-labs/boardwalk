@@ -2,7 +2,7 @@
 // session ids, pagination, optional Bearer auth with an RFC 9728 metadata hint). Lives in
 // src/testing/ — excluded from the build and coverage — because the unit suites, the leaf
 // tests, the OAuth end-to-end, and the conformance harness all need the same server and test
-// helpers may be shared where production code may not (CODE_QUALITY §3.2 covers test BODIES,
+// helpers may be shared where production code may not (this latitude covers test BODIES,
 // not infrastructure this size).
 
 import http from "node:http";

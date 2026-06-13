@@ -1,4 +1,4 @@
-// GET /api/runs/:id/stream — the SSE live tail (SPEC §2.4, MASTER_SPEC §2.5): replay
+// GET /api/runs/:id/stream — the SSE live tail (SPEC §2.4): replay
 // persisted events after the resume cursor, then follow live ones. Every frame carries
 // `id: <cursor>`, so a dropped client reconnects with Last-Event-ID and misses nothing —
 // cursors are run-global and independent of channel filtering, which keeps filtered resumes

@@ -3,7 +3,7 @@
 // One run = one spawned Node process (SPEC §2.2). The child executes the user's program and
 // brokers its SDK hook calls back to the supervisor over Node's built-in IPC channel. Every
 // message is Zod-validated on receipt — the child runs user code, so everything it sends is a
-// trust boundary (CODE_QUALITY §2.1).
+// trust boundary.
 //
 // Envelope authority: the child sends event BODIES (no runId/turnId/seq/t); the supervisor is
 // the single place envelopes are stamped and cursors allocated, so cursor monotonicity holds

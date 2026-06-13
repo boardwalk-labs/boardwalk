@@ -1,5 +1,4 @@
-// Conformance: sleep-through-ENGINE-restart (SPEC §3; MASTER_SPEC §2.4 hold-and-pay +
-// CODE_QUALITY §4.2 crash-safety).
+// Conformance: sleep-through-ENGINE-restart (SPEC §3) — hold-and-pay + crash-safety.
 //
 // Kill the ENGINE while a run is held in `sleep`: the orphaned child exits, and a NEW engine
 // booted over the same data dir must sweep the run up and drive it to completion — restarted

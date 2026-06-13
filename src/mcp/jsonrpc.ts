@@ -2,7 +2,7 @@
 // @modelcontextprotocol/sdk dependency tree was rejected for the flagship — zero new deps).
 // The transport moves frames; this layer owns ids, correlation, timeouts, and the trust
 // boundary: every inbound frame is Zod-validated before anything dereferences it
-// (CODE_QUALITY §2.1 — an MCP server is as untrusted as any provider).
+// (an MCP server is as untrusted as any provider).
 
 import { z } from "zod";
 import { EngineError } from "../errors.js";

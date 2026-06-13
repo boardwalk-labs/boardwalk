@@ -1,4 +1,4 @@
-// Conformance: run lifecycle (SPEC §3; MASTER_SPEC §2.4).
+// Conformance: run lifecycle (SPEC §3).
 //
 // The base contract every engine must honor for the simplest possible runs: a completing run
 // walks queued → pending → running → (output) → completed with a monotonic cursor stream, the

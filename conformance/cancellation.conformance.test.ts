@@ -1,4 +1,4 @@
-// Conformance: cancellation (SPEC §3; MASTER_SPEC §2.4 "cooperative then forceful").
+// Conformance: cancellation (SPEC §3).
 //
 // Cancelling a RUNNING run walks cancelling → cancelled (the cooperative window is real, so
 // the transitional status is observable) and stamps endedAt. Cancelling a QUEUED run — one

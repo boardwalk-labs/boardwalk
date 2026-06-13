@@ -1,7 +1,7 @@
 // The run-process entry point. Spawned by the supervisor with an IPC channel; never run
 // directly. Protocol: wait for `init`, install the SDK host + run inputs, then IMPORT the
 // program bundle — the module body is the program, so importing the file IS running it
-// (MASTER_SPEC §2.1; no entrypoint convention). Report `done`/`failed`, exit. A thrown error
+// (no entrypoint convention). Report `done`/`failed`, exit. A thrown error
 // anywhere is reported over IPC when possible — the supervisor treats an exit without a
 // report as a crash (which triggers restart-from-the-top, the documented semantics).
 

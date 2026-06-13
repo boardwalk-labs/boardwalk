@@ -2,7 +2,7 @@
 
 > The open-source single-node runtime: scheduler, run engine, SQLite state, local run log. Published as `@boardwalk-labs/engine` (npm) and `ghcr.io/boardwalk-labs/boardwalk` (Docker). Apache-2.0. Public in **Phase 2** — this repo never opens as an empty shell.
 >
-> Governing context: root [`MASTER_SPEC.md`](../MASTER_SPEC.md) §2.4 (run semantics), §3–5 (engines, permitted divergence, parity). The conformance suite lives here and is the arbiter of the parity promise.
+> Scope: the run semantics (lifecycle, hold-and-pay, restart-on-crash), the permitted points of divergence between engines, and the parity promise. The conformance suite lives here and is the arbiter of that promise.
 
 ## 1. Purpose
 
@@ -19,7 +19,7 @@ triggers (cron | manual | webhook) → scheduler → run lifecycle → program h
                                           └── SQLite ────┘── run event log (append-only) → SSE/local UI
 ```
 
-Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what workflows do; run-lifecycle owns state transitions + persistence and knows nothing of HTTP; the program host executes the user's file and brokers its SDK calls; one persistence module owns all SQL.
+Layering (enforced): the scheduler knows nothing about what workflows do; run-lifecycle owns state transitions + persistence and knows nothing of HTTP; the program host executes the user's file and brokers its SDK calls; one persistence module owns all SQL.
 
 ### 2.1 Scheduler
 
@@ -30,13 +30,13 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 
 ### 2.2 Run lifecycle
 
-- Statuses exactly as MASTER_SPEC §2.4: `queued → pending → running → completed | failed | cancelled` (+ transitional `cancelling`).
+- Statuses: `queued → pending → running → completed | failed | cancelled` (+ transitional `cancelling`).
 - **One run = one spawned Node process** with an isolated working directory; the parent supervises. Liveness is the child's `exit` event (same machine — no heartbeat protocol needed; a hung program is caught by the duration budget); an engine-orphaned child exits on IPC disconnect and the boot sweep owns its restart.
 - **The program arrives pre-bundled** (one ESM file, `@boardwalk-labs/workflow` left external — the CLI bundles at deploy). The run dir carries a `node_modules/@boardwalk-labs/workflow` symlink to the engine's own SDK install, so the program and the engine's child entry load ONE module instance (the SDK host seam is a module-level singleton) with no bundler in the engine.
 - **Envelope authority is the supervisor's:** the child sends event _bodies_; the parent is the single place envelopes are stamped and cursors allocated, resuming past `maxCursor` across crash-restarts.
 - **Hold-and-pay:** `sleep`/child-waits hold the child process. No checkpointing.
 - **Restart-on-crash:** supervisor detects child death → run restarts from the top (bounded restarts, then `failed`). `workflows.call` children re-attach via idempotency key on the restarted pass.
-- **Crash-safe state:** kill the _engine_ at any moment; on boot, a recovery sweep marks orphaned `running` rows → `pending` → restart. All multi-row writes are transactional (CODE_QUALITY §2.2).
+- **Crash-safe state:** kill the _engine_ at any moment; on boot, a recovery sweep marks orphaned `running` rows → `pending` → restart. All multi-row writes are transactional.
 - **Budgets enforced:** `max_duration_seconds` by supervisor timer; `max_tokens`/`max_usd` from leaf usage reports (USD via a bundled approximate rate table, documented as approximate).
 - **Cancellation:** signal child (cooperative window) → kill after grace → `cancelled`.
 
@@ -58,13 +58,13 @@ Layering (enforced; CODE_QUALITY §7.2): the scheduler knows nothing about what 
 ### 2.4 Server surface
 
 - **Webhook trigger endpoint** (`POST /hooks/<workflow>/<trigger-id>`) with `token` or `signature` (HMAC) auth per the manifest. `<trigger-id>` is the trigger's zero-based index in `meta.triggers`.
-- **Webhook auth scheme (v0 — this engine's answer to MASTER_SPEC §10's open question):** credentials live in _server_ environment variables named after the workflow (`<NAME>` = workflow name upper-cased, `-` → `_`). `auth: "token"` compares `Authorization: Bearer <token>` (constant-time) against `BOARDWALK_WEBHOOK_TOKEN__<NAME>`; `auth: "signature"` verifies `X-Boardwalk-Signature: sha256=<hex>` as HMAC-SHA256 over the raw request body keyed by `BOARDWALK_WEBHOOK_SECRET__<NAME>`. An unset variable fails closed (503, hint names the exact variable); a bad credential is 401.
+- **Webhook auth scheme (v0 — this engine's answer to the open question):** credentials live in _server_ environment variables named after the workflow (`<NAME>` = workflow name upper-cased, `-` → `_`). `auth: "token"` compares `Authorization: Bearer <token>` (constant-time) against `BOARDWALK_WEBHOOK_TOKEN__<NAME>`; `auth: "signature"` verifies `X-Boardwalk-Signature: sha256=<hex>` as HMAC-SHA256 over the raw request body keyed by `BOARDWALK_WEBHOOK_SECRET__<NAME>`. An unset variable fails closed (503, hint names the exact variable); a bad credential is 401.
 - **Local run log UI + SSE tail** (resume by cursor) and a minimal JSON API (list workflows/runs, trigger manual run, cancel). The SSE endpoint implements **channel subscriptions** (SDK kind→channel mapping, filtered server-side): `?channels=phase,output` for a quiet tail, `?verbose=true` for everything; default `lifecycle + phase + output`. Bound to localhost by default; binding wider is an explicit flag with a warning (no auth story in v1 beyond webhook auth).
 - Config via **environment variables** in v0 (`BOARDWALK_` prefix; a `boardwalk.toml` file is deferred — Node has no TOML built-in and the zero-dependency rule wins): data dir (`BOARDWALK_DATA_DIR`), bind address (`BOARDWALK_HOST` / `BOARDWALK_PORT`), default model (`BOARDWALK_DEFAULT_MODEL`), provider table (`BOARDWALK_PROVIDERS`, a JSON object `{"<name>": {"base_url": "…", "api_key_env": "…", "protocol": "openai" | "anthropic", "headers": {"<h>": "static" | {"from_env": "VAR"}}}}` — e.g. `BOARDWALK_PROVIDERS='{"ollama":{"base_url":"http://localhost:11434/v1"}}'`), the Boardwalk managed-inference credential + gateway (`BOARDWALK_API_KEY`, `BOARDWALK_INFERENCE_URL`), and the secret/`.env` source (`BOARDWALK_ENV_FILE`, default `<data-dir>/.env` when present).
 
 ### 2.5 What is **not** in this engine
 
-No accounts/orgs/billing, no machine classes (`runs_on` is silently ignored), no inference **routing** in-engine (the `boardwalk` managed lane forwards to the hosted gateway, which routes server-side; the router never lives here — MASTER_SPEC §6.1), no egress policy enforcement, no Platform-extension manifest capabilities. Programs needing absent capabilities fail loudly at validation (capability-presence rule, §4). Note `tools`/`mcp`/`skills`/`memory` are **not** in this list — the full `agent()` capability set is core, implemented here.
+No accounts/orgs/billing, no machine classes (`runs_on` is silently ignored), no inference **routing** in-engine (the `boardwalk` managed lane forwards to the hosted gateway, which routes server-side; the router never lives here), no egress policy enforcement, no Platform-extension manifest capabilities. Programs needing absent capabilities fail loudly at validation (capability-presence rule, §4). Note `tools`/`mcp`/`skills`/`memory` are **not** in this list — the full `agent()` capability set is core, implemented here.
 
 ## 3. The conformance suite
 
@@ -82,14 +82,14 @@ Tables: `workflows` (manifest + program ref + config), `runs` (status, timestamp
 
 ## 6. Testing
 
-Beyond the conformance suite: kill-and-restart property tests on the lifecycle (CODE_QUALITY §4.2), scheduler clock tests (fires, timezones, DST, catch-up), host-bridge unit tests with fake providers, webhook auth cases, migration tests on seeded older DBs.
+Beyond the conformance suite: kill-and-restart property tests on the lifecycle, scheduler clock tests (fires, timezones, DST, catch-up), host-bridge unit tests with fake providers, webhook auth cases, migration tests on seeded older DBs.
 
 ## 7. Ready to go public when
 
-The Phase 2 gates (MASTER_SPEC §9), restated as this repo's checklist:
+The Phase 2 gates, restated as this repo's checklist:
 
 1. Docker quickstart on a clean host: cron workflow scheduled, fired, visible in run history + local log UI — no account.
 2. Survives: engine kill mid-run, child kill mid-run, multi-minute sleep, `workflows.call` chain — all per conformance.
 3. Full conformance suite green in CI; every `examples` template passes under this engine.
 4. `@boardwalk-labs/cli dev` runs on the published `@boardwalk-labs/engine`.
-5. Publication checklist (MASTER_SPEC §8) passes.
+5. Publication checklist passes.

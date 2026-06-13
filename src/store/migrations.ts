@@ -4,7 +4,7 @@
 // header): reading it costs nothing, needs no bookkeeping table, and — crucially — setting it
 // participates in the same transaction as the migration's DDL. A crash mid-migration therefore
 // leaves the database exactly at the previous version with none of the new schema applied
-// (CODE_QUALITY §2.2: multi-row writes are transactional; a half-migrated database is a state
+// (multi-row writes are transactional; a half-migrated database is a state
 // the engine could not recover from).
 //
 // Forward-only: an older engine refuses a newer database instead of guessing what future
@@ -25,7 +25,7 @@ export interface Migration {
 
 // v1 — the full SPEC §4 schema. STRICT tables so SQLite enforces the declared column types
 // (a TEXT primary key can never silently hold an integer; INTEGER columns reject REALs).
-// All timestamps are integer milliseconds since epoch; all ids are ULIDs (CODE_QUALITY §2.2).
+// All timestamps are integer milliseconds since epoch; all ids are ULIDs.
 const V1_SQL = `
 -- Workflows: the deployed unit. \`manifest\` is the validated JSON projection of the program's
 -- pure-literal meta; \`program\` is the bundled ESM source the run host executes; \`config\` is

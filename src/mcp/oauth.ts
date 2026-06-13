@@ -4,7 +4,7 @@
 // resource indicators, and the refresh grant. All of it runs in the ENGINE process: token
 // state never belongs to the run process, and the one interactive step is an explicit public
 // API (`Engine.authorizeMcpServer`) — a headless run that would need a human fails loudly
-// instead of prompting. Every external response is Zod-validated (CODE_QUALITY §2.1).
+// instead of prompting. Every external response is Zod-validated.
 
 import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";

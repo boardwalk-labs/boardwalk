@@ -1,6 +1,6 @@
 // PARENT-side MCP OAuth token persistence. Tokens live with the engine — never in the run
 // process beyond the single brokered value a request needs — in one JSON file under the data
-// dir, mode 0600 (they are credentials; CODE_QUALITY §7.4 treats them like secrets: values
+// dir, mode 0600 (they are credentials, treated like secrets: values
 // never logged). Zod-validated on every read because a disk file is a trust boundary even
 // when we wrote it.
 

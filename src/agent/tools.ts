@@ -134,7 +134,7 @@ function wrapProgramTool(def: ToolDef): ExecutableTool {
 const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
 // AgentOptions comes straight from user program code — the TS types are aspirational at
-// runtime, so each ref is Zod-checked before anything spawns or connects (CODE_QUALITY §2.1).
+// runtime, so each ref is Zod-checked before anything spawns or connects.
 const mcpServerRefSchema = z.discriminatedUnion("transport", [
   z.strictObject({
     name: z.string().regex(MCP_NAME_RE),

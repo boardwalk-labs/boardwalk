@@ -1,9 +1,9 @@
 // The engine's one persistence module — every SQL statement in the engine lives here
-// (CODE_QUALITY §7.2: "storage access goes through one persistence module"). The backend is
+// (storage access goes through one persistence module). The backend is
 // node:sqlite, synchronous on purpose: a single-node engine gains nothing from an async
 // driver, and synchronous statements make multi-row invariants trivially transactional.
 //
-// Conventions (CODE_QUALITY §2.2): ULID primary keys, integer-ms timestamps, and JSON columns
+// Conventions: ULID primary keys, integer-ms timestamps, and JSON columns
 // Zod-validated on READ — a row that fails validation throws EngineError("INTERNAL") naming
 // the table and column, so corrupt state surfaces as a loud error instead of flowing into the
 // scheduler as data.
@@ -88,7 +88,7 @@ export interface StoreOptions {
 }
 
 // ============================================================================
-// Column schemas — every JSON/enum column has exactly one validator (CODE_QUALITY §2.2)
+// Column schemas — every JSON/enum column has exactly one validator
 // ============================================================================
 
 /**

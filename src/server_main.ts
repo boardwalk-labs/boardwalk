@@ -4,7 +4,7 @@
 // enough that config parsing (tested below) plus the already-tested pieces carry the risk.
 //
 // Config is ENVIRONMENT VARIABLES ONLY in v0 (`BOARDWALK_` prefix). A `boardwalk.toml` file
-// is deferred: Node has no TOML built-in and the zero-dependency rule (CODE_QUALITY §10)
+// is deferred: Node has no TOML built-in and the zero-dependency rule
 // beats a hand-rolled parser. Env vars are also what Docker/systemd operators reach for
 // first, so the deferral costs nothing in practice.
 

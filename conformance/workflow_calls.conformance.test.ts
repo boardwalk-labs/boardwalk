@@ -1,4 +1,4 @@
-// Conformance: workflows.call / workflows.run (SPEC §3; MASTER_SPEC §2.3 + §2.4).
+// Conformance: workflows.call / workflows.run (SPEC §3).
 //
 // Durable composition: a parent holds for the child's output via workflows.call; the call is
 // idempotent, so a crashed-and-restarted parent RE-ATTACHES to the child it already spawned

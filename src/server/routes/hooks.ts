@@ -1,5 +1,5 @@
 // POST /hooks/:workflow/:triggerIndex — the webhook trigger endpoint, and this engine's v0
-// answer to MASTER_SPEC §10's open webhook-auth question (documented in SPEC §2.4):
+// answer to the open webhook-auth question (documented in SPEC §2.4):
 // per-workflow credentials live in *server* environment variables —
 //   token auth:     BOARDWALK_WEBHOOK_TOKEN__<NAME>   vs  `Authorization: Bearer <token>`
 //   signature auth: BOARDWALK_WEBHOOK_SECRET__<NAME>  vs  `X-Boardwalk-Signature: sha256=<hex>`

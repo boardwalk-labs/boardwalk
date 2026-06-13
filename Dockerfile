@@ -2,14 +2,8 @@
 #
 #   docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 #
-# ---------------------------------------------------------------------------
-# NOTE (pre-publish): this image does NOT build from today's checkout. The
-# repo currently overrides @boardwalk-labs/workflow to `link:../sdk`
-# (incubation-phase sibling checkout — see package.json "pnpm.overrides"),
-# and that sibling is not in the Docker build context. Once @boardwalk-labs/workflow
-# is published to the npm registry and the link: override is removed, this
-# Dockerfile builds as-is with a plain `pnpm install`.
-# ---------------------------------------------------------------------------
+# Builds from a clean checkout: `pnpm install --frozen-lockfile` pulls
+# @boardwalk-labs/workflow from the npm registry (no sibling checkout needed).
 
 # ---- build stage -----------------------------------------------------------
 FROM node:24-slim AS build

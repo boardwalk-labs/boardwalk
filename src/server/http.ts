@@ -192,7 +192,7 @@ function isChannel(value: string): value is Channel {
 /**
  * The channel subscription for an event read (`/events` and `/stream` share this so a tail and
  * its catch-up reads can never disagree): `?verbose=true` = everything, `?channels=a,b` = an
- * explicit set, neither = MASTER_SPEC §2.5's default of lifecycle + phase + output.
+ * explicit set, neither = the default of lifecycle + phase + output.
  */
 export function parseChannelSelection(url: URL): readonly Channel[] {
   const verbose = url.searchParams.get("verbose");

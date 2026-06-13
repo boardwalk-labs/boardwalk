@@ -26,7 +26,7 @@ import { dirname, join } from "node:path";
 import { z } from "zod";
 import { EngineError } from "../errors.js";
 
-// A file from disk is a trust boundary — parse, don't cast (CODE_QUALITY §2.1).
+// A file from disk is a trust boundary — parse, don't cast.
 const packageNameSchema = z.looseObject({ name: z.string().optional() });
 
 export interface RunDirs {

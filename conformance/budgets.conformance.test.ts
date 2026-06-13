@@ -1,5 +1,4 @@
-// Conformance: budgets terminate (SPEC §3; MASTER_SPEC §2.4 "budgets terminate",
-// CODE_QUALITY §4.3 "enforced, not advisory").
+// Conformance: budgets terminate (SPEC §3) — enforced, not advisory.
 //
 // Breaching budget.* FAILS the run with BUDGET_EXCEEDED and a message naming the breached
 // budget — never a silent truncation. Duration is wall-clock; tokens/USD come from the usage

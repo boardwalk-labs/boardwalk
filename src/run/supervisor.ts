@@ -1,8 +1,8 @@
 // The run supervisor — owns run-lifecycle state transitions and process supervision
-// (SPEC §2.2). Layering (CODE_QUALITY §7.2): knows nothing about HTTP or the CLI; persistence
+// (SPEC §2.2). Layering: knows nothing about HTTP or the CLI; persistence
 // goes through the Store; what workflows *do* lives in the child process.
 //
-// Semantics implemented here, identical in every engine (MASTER_SPEC §2.4):
+// Semantics implemented here, identical in every engine:
 //   - one run = one spawned process, isolated working directory
 //   - hold-and-pay: sleep holds the child; nothing here checkpoints
 //   - restart-on-crash: child death without a done/failed report restarts the run from the
@@ -402,7 +402,7 @@ export class RunSupervisor {
       if (deadline !== null) {
         budgetTimer = setTimeout(() => {
           entry.budgetReason ??= durationBudgetMessage(workflow.manifest);
-          // Budget breach terminates immediately — enforced, not advisory (CODE_QUALITY §4.3).
+          // Budget breach terminates immediately — enforced, not advisory.
           child.kill("SIGKILL");
         }, deadline - this.clock.now());
       }
@@ -477,7 +477,7 @@ export class RunSupervisor {
             break;
           case "memory_used":
             // The child validated the path, but the parent persists it — re-check the shape
-            // before it can ever reach a filesystem copy (CODE_QUALITY §2.1).
+            // before it can ever reach a filesystem copy.
             if (MEMORY_PATH_RE.test(msg.dir) && !msg.dir.includes("\\")) {
               entry.memoryDirs.add(msg.dir);
             } else {
@@ -636,7 +636,7 @@ export class RunSupervisor {
         `Deploy it first — the engine only runs workflows it knows by name.`,
       );
     }
-    // Crossed the JSON IPC channel, but narrow instead of assuming (CODE_QUALITY §2.1) — and
+    // Crossed the JSON IPC channel, but narrow instead of assuming — and
     // the canonical default key requires a JSON tree anyway.
     const jsonInput = input === undefined ? null : asJsonValue(input, "workflows.call input");
     const key = idempotencyKey ?? defaultIdempotencyKey(parentRunId, slug, jsonInput);

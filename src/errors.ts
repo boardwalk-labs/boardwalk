@@ -13,7 +13,7 @@ export const ENGINE_ERROR_CODES = [
   "PROGRAM_ERROR", // the workflow program threw
   "CRASHED", // run process died and restarts were exhausted
   "CANCELLED",
-  "UNSUPPORTED", // capability not present on this engine (MASTER_SPEC §4)
+  "UNSUPPORTED", // capability not present on this engine
   "INTERNAL",
 ] as const;
 

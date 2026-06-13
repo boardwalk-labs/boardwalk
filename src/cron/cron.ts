@@ -14,8 +14,8 @@
 // Plus the modern (cronie/Quartz/AWS) extension `N/step` = `N-max/step`, because it is what
 // authors coming from any contemporary cron expect and accepting it loses nothing.
 //
-// Timezones use Intl only — this package takes no runtime dependency for cron (CODE_QUALITY
-// §10: every dependency is supply-chain surface). DST policy: a wall time erased by
+// Timezones use Intl only — this package takes no runtime dependency for cron (every dependency is
+// supply-chain surface). DST policy: a wall time erased by
 // spring-forward is skipped (it never occurs, so it never fires); a wall time repeated by
 // fall-back fires once, at its first (earlier-UTC) occurrence.
 

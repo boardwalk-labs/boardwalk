@@ -155,7 +155,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
 // Supervisor responses are validated like any other boundary input — the channel being ours
-// doesn't exempt it (CODE_QUALITY §2.1).
+// doesn't exempt it.
 const secretValueSchema = z.string();
 const runIdSchema = z.string().min(1);
 const artifactRefSchema = z.strictObject({

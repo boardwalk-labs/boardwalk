@@ -29,7 +29,7 @@ export const BOARDWALK_PROVIDER = "boardwalk";
 const AUTO_MODEL = "auto";
 
 // The Boardwalk managed-inference gateway (OpenAI-compatible). `boardwalk.sh` is the placeholder
-// domain (MASTER_SPEC stack notes); override with BOARDWALK_INFERENCE_URL or config. The Auto
+// domain; override with BOARDWALK_INFERENCE_URL or config. The Auto
 // ROUTER itself lives in hosted Boardwalk — this engine only forwards to the gateway.
 const DEFAULT_BOARDWALK_INFERENCE_URL = "https://api.boardwalk.sh/v1";
 

@@ -2,7 +2,7 @@
 // tools/call) over any transport. Lives in the RUN PROCESS — tool execution must happen where
 // the program runs — while OAuth token state stays parent-side (the transport's hook brokers
 // it over IPC). Every server response is Zod-validated: an MCP server's output is untrusted
-// input like any provider's (CODE_QUALITY §2.1).
+// input like any provider's.
 
 import { z } from "zod";
 import { EngineError } from "../errors.js";

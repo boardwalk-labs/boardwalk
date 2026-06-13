@@ -1,6 +1,6 @@
 // The conformance harness — THE ENGINE-SPECIFIC HALF OF THE SUITE.
 //
-// The conformance suite (SPEC §3, MASTER_SPEC §5.2) is the arbiter of the parity promise: the
+// The conformance suite (SPEC §3) is the arbiter of the parity promise: the
 // *.conformance.test.ts files assert observable run behavior through the engine's PUBLIC
 // surface only (deploy, start, wait, cancel, events, store reads). Everything that knows HOW
 // to stand an engine up lives here: a different engine implementation swaps this factory (and

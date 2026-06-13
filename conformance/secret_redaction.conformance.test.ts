@@ -1,4 +1,4 @@
-// Conformance: the SECRET REDACTION CANARY (SPEC §3; MASTER_SPEC §6.2; CODE_QUALITY §7.4).
+// Conformance: the SECRET REDACTION CANARY (SPEC §3).
 //
 // The invariant that makes the trust model work: a secrets.get value may live in program
 // code, but it must NEVER reach a model or the persisted record. This case routes a canary

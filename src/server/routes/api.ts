@@ -114,7 +114,7 @@ export function handleGetRun(ctx: RouteContext, runId: string): void {
 /**
  * GET /api/runs/:id/events?after=&channels=|verbose= — persisted events after a cursor,
  * filtered server-side by channel. Cursors are run-global and untouched by filtering, so a
- * client can resume here (or on /stream) with any channel set (MASTER_SPEC §2.5).
+ * client can resume here (or on /stream) with any channel set.
  */
 export function handleListEvents(ctx: RouteContext, runId: string): void {
   if (ctx.engine.store.getRun(runId) === null) {

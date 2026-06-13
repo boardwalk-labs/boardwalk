@@ -270,7 +270,7 @@ async function executeToolCall(
 
   io.emit(turnId, { kind: "tool_call_executing", toolCallId: call.id });
   try {
-    // Tool results enter model context → redact (MASTER_SPEC §6.2 covers tool results too).
+    // Tool results enter model context → redact (redaction covers tool results too).
     const content = io.redactor.redact(await tool.execute(call.input));
     io.emit(turnId, {
       kind: "tool_call_result",

@@ -6,9 +6,8 @@
 # Like the CLI, the engine consumes @boardwalk-labs/workflow; the link: override must be removed
 # (cut over to the npm SDK) before a release. The guard step enforces it.
 #
-# The Docker image (ghcr.io/boardwalk-labs/boardwalk) is Phase 2: once a Dockerfile exists, add a
-# publish-docker job here mirroring runner-images/release.yml (docker/build-push-action +
-# provenance + GITHUB_TOKEN login to ghcr).
+# The Docker image (ghcr.io/boardwalk-labs/boardwalk) publishes from a separate workflow
+# (docker.yml) — GHCR auth is GITHUB_TOKEN-based, so it stays decoupled from this npm release.
 
 name: Release
 

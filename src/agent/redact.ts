@@ -1,4 +1,4 @@
-// Secret redaction for the agent() leaf (MASTER_SPEC §6.2, CODE_QUALITY §7.4).
+// Secret redaction for the agent() leaf.
 //
 // The invariant: secret VALUES live only in deterministic program code; everything bound for a
 // model — prompts now, tool args/results/MCP traffic/skills/memory later — is scrubbed of every

@@ -1,5 +1,5 @@
 // The cron scheduler (SPEC §2.1). Layering: it fires runs; it knows nothing about what a
-// workflow does (CODE_QUALITY §7.2). Execution is injected (`dispatch`) so this module never
+// workflow does. Execution is injected (`dispatch`) so this module never
 // touches processes, and time is injected (`Clock`) so tests drive it deterministically.
 //
 // Correctness rules implemented here:
@@ -30,7 +30,7 @@ export interface SchedulerOptions {
   log?: (line: string) => void;
   /** Tick cadence of the background loop. Default 1s. */
   tickIntervalMs?: number;
-  /** Ticks slower than this are logged (CODE_QUALITY §4.2). Default 250ms. */
+  /** Ticks slower than this are logged. Default 250ms. */
   tickBudgetMs?: number;
 }
 

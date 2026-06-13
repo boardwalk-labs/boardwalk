@@ -1,4 +1,4 @@
-// ULIDs — the engine's primary-key format (CODE_QUALITY §2.2): time-sortable, URL-safe,
+// ULIDs — the engine's primary-key format: time-sortable, URL-safe,
 // no auto-increment integers. Implemented in-house: 26 chars of Crockford base32 over
 // 48 bits of timestamp + 80 bits of crypto randomness. Zero dependencies on purpose —
 // every dependency in a public package is supply-chain surface.

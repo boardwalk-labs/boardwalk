@@ -5,7 +5,7 @@
 // model turn; the tool loop itself lives in leaf.ts.
 //
 // Zero SDK dependencies: plain fetch + Zod-validated responses (a provider's response is a
-// trust boundary like any other). Retry policy per CODE_QUALITY §4.3: exponential backoff with
+// trust boundary like any other). Retry policy: exponential backoff with
 // jitter on 429/5xx/network errors; a non-rate-limit 4xx never retries.
 
 import { z } from "zod";
@@ -336,7 +336,7 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
 // Shared plumbing
 // ----------------------------------------------------------------------------
 
-/** Model-produced tool input is untrusted (CODE_QUALITY §2.1): parse, demand a JSON object. */
+/** Model-produced tool input is untrusted: parse, demand a JSON object. */
 function parseToolInput(raw: string, toolName: string): Record<string, unknown> {
   const value = raw.trim().length === 0 ? {} : safeJson(raw);
   if (isPlainObject(value) && isJsonValue(value)) {

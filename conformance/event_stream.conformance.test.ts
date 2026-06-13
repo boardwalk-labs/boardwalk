@@ -1,4 +1,4 @@
-// Conformance: the run-event wire format (SPEC §3; MASTER_SPEC §2.5).
+// Conformance: the run-event wire format (SPEC §3).
 //
 // One rich run (phases, stdout/stderr, an agent turn with a tool call, an output) exercises
 // most of the wire format, then the contract is asserted with the SDK's own vocabulary:

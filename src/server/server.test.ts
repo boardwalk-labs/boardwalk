@@ -321,7 +321,7 @@ describe("engine HTTP server", () => {
       eventsResponseSchema,
     );
     expect(verbose.body.events.map((e) => e.event.kind)).toContain("program_output");
-    // Cursors are globally consistent across channel filters (MASTER_SPEC §2.5).
+    // Cursors are globally consistent across channel filters.
     expect(verbose.body.events.map((e) => e.cursor)).toEqual(
       engine.store.listEvents(row.id).map((e) => e.cursor),
     );

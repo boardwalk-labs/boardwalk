@@ -1,4 +1,4 @@
-// Conformance: restart-on-crash (SPEC §3; MASTER_SPEC §2.4 "restart-on-crash").
+// Conformance: restart-on-crash (SPEC §3).
 //
 // A run process that dies mid-program restarts FROM THE TOP — no checkpoint, no replay — with
 // the workspace left exactly as the crashed pass left it. Restarts are bounded: exhausting
