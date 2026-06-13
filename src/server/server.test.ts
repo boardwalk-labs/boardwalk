@@ -36,9 +36,9 @@ output({ echoed: input ?? null });
 `;
 
 const SLOW_PROGRAM = `
-import { output, sleep, Phase } from "@boardwalk-labs/workflow";
+import { output, sleep, phase } from "@boardwalk-labs/workflow";
 export const meta = { name: "slow", triggers: [{ kind: "manual" }] };
-Phase("working");
+phase("working");
 await sleep(400);
 output("slow-done");
 `;

@@ -57,9 +57,9 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
   provider.respondWith("final answer", { in: 2, out: 2 });
   engine.deployWorkflow({
     program: `
-      import { Phase, agent, output } from "@boardwalk-labs/workflow";
+      import { phase, agent, output } from "@boardwalk-labs/workflow";
       export const meta = { name: "rich", triggers: [{ kind: "manual" }] };
-      Phase("gather");
+      phase("gather");
       console.log("stdout line");
       console.error("stderr line");
       const reply = await agent("do the thing", {
@@ -73,7 +73,7 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
           },
         ],
       });
-      Phase("publish");
+      phase("publish");
       output({ reply });
     `,
   });

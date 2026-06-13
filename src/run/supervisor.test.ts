@@ -345,10 +345,10 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "artifacty",
-      `import { Phase, artifacts, output } from "@boardwalk-labs/workflow";
-                Phase("collect");
+      `import { phase, artifacts, output } from "@boardwalk-labs/workflow";
+                phase("collect");
          const ref = await artifacts.write("report.txt", "text/plain", "line one");
-         Phase("publish", { id: "publish-phase" });
+         phase("publish", { id: "publish-phase" });
          output({ url: ref.url, name: ref.name });`,
     );
     const runId = f.startRun("artifacty");
