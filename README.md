@@ -32,6 +32,22 @@ docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 Then open `http://localhost:8080` for the run log, or hit the JSON API
 (`/api/workflows`, `/api/runs`). Webhook triggers land on `/hooks/<workflow>/<trigger-id>`.
 
+### Deploying a workflow
+
+Build your workflow to a single file and drop it in the engine's **workflows directory** — it's
+deployed on boot (re-synced every boot; idempotent by manifest name):
+
+```sh
+npx @boardwalk-labs/cli build index.ts --out ./data/workflows/my-routine.mjs
+docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
+```
+
+The default workflows directory is `<data-dir>/workflows` (`/data/workflows` in Docker); override
+it with `BOARDWALK_WORKFLOWS_DIR`. Each `.mjs`/`.js` file is one workflow — single-file, with
+`@boardwalk-labs/workflow` left external (exactly what `boardwalk build` emits). From there the
+manifest's triggers take over: cron fires on schedule, `POST /api/workflows/<name>/runs` triggers
+a manual run, and webhooks land on `/hooks/<workflow>/<trigger-id>`.
+
 ### Configuration
 
 All configuration is environment variables (a `boardwalk.toml` file is deferred — see
@@ -40,6 +56,7 @@ All configuration is environment variables (a `boardwalk.toml` file is deferred 
 | Variable                  | Default                                    | What it does                                                                                 |
 | ------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | `BOARDWALK_DATA_DIR`      | `/data` in Docker, else `./boardwalk-data` | Where everything lives: SQLite DB, run dirs, artifacts                                       |
+| `BOARDWALK_WORKFLOWS_DIR` | `<data-dir>/workflows`                     | Directory of built workflows (`.mjs`/`.js`) deployed on boot                                 |
 | `BOARDWALK_HOST`          | `127.0.0.1` (`0.0.0.0` in Docker)          | Bind address — this surface has no auth beyond webhook auth, so binding wider logs a warning |
 | `BOARDWALK_PORT`          | `8080`                                     | Listen port (`0` picks a free port)                                                          |
 | `BOARDWALK_DEFAULT_MODEL` | —                                          | Model used when `agent()` omits one, e.g. `anthropic/claude-sonnet-4-5`                      |

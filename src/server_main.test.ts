@@ -41,6 +41,7 @@ describe("loadServerConfig", () => {
       port: 8080,
       inference: undefined,
       envFile: undefined,
+      workflowsDir: "boardwalk-data/workflows",
     });
   });
 
@@ -90,7 +91,17 @@ describe("loadServerConfig", () => {
       port: 8080,
       inference: undefined,
       envFile: undefined,
+      workflowsDir: "boardwalk-data/workflows",
     });
+  });
+
+  it("defaults the workflows dir under the data dir; explicit override wins", () => {
+    expect(loadServerConfig({ BOARDWALK_DATA_DIR: "/srv/bw" }).workflowsDir).toBe(
+      "/srv/bw/workflows",
+    );
+    expect(loadServerConfig({ BOARDWALK_WORKFLOWS_DIR: "/etc/boardwalk/flows" }).workflowsDir).toBe(
+      "/etc/boardwalk/flows",
+    );
   });
 
   it("maps BOARDWALK_DEFAULT_MODEL to inference.default_model", () => {
@@ -255,6 +266,7 @@ describe("startServer", () => {
         port: 0,
         inference: undefined,
         envFile: undefined,
+        workflowsDir: join(dataDir, "workflows"), // absent → nothing to deploy
       },
       (line) => lines.push(line),
     );
@@ -274,5 +286,41 @@ describe("startServer", () => {
     await running.shutdown();
     await running.shutdown();
     await expect(fetch(`http://127.0.0.1:${running.port}/api/workflows`)).rejects.toThrow();
+  });
+
+  it("deploys built workflows from the workflows dir on boot (self-host deploy)", async () => {
+    const dataDir = makeTempDir("bw-server-dir-");
+    const workflowsDir = makeTempDir("bw-flows-");
+    writeFileSync(
+      join(workflowsDir, "from-dir.mjs"),
+      `import { output } from "@boardwalk-labs/workflow";
+       export const meta = { name: "from-dir", triggers: [{ kind: "manual" }] };
+       output({ deployed: true });`,
+    );
+    // A non-workflow file in the dir must be skipped, not crash the boot.
+    writeFileSync(join(workflowsDir, "notes.txt"), "ignore me");
+
+    const lines: string[] = [];
+    const running = await startServer(
+      {
+        dataDir,
+        host: "127.0.0.1",
+        port: 0,
+        inference: undefined,
+        envFile: undefined,
+        workflowsDir,
+      },
+      (line) => lines.push(line),
+    );
+    cleanups.push(() => running.shutdown());
+
+    expect(lines.some((l) => l.includes('deployed "from-dir"'))).toBe(true);
+    expect(lines.some((l) => l.includes("workflows deployed: 1"))).toBe(true);
+
+    const res = await fetch(`http://127.0.0.1:${running.port}/api/workflows`);
+    const body: unknown = await res.json();
+    expect(body).toEqual({
+      workflows: [expect.objectContaining({ name: "from-dir" })],
+    });
   });
 });

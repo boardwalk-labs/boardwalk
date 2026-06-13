@@ -8,7 +8,7 @@
 // beats a hand-rolled parser. Env vars are also what Docker/systemd operators reach for
 // first, so the deferral costs nothing in practice.
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { z } from "zod";
@@ -32,6 +32,12 @@ export interface ServerConfig {
   inference: InferenceConfig | undefined;
   /** Explicit BOARDWALK_ENV_FILE path; undefined means "use <dataDir>/.env if it exists". */
   envFile: string | undefined;
+  /**
+   * Directory of built workflow programs deployed on boot (the self-host deploy mechanism):
+   * each `.mjs`/`.js` file is one workflow (single-file, `@boardwalk-labs/workflow` external —
+   * what `boardwalk build` emits). Defaults to `<dataDir>/workflows`.
+   */
+  workflowsDir: string;
 }
 
 // Why strictObject: a typo'd provider key ("apikey_env") silently doing nothing is exactly
@@ -156,7 +162,39 @@ export function loadServerConfig(env: Record<string, string | undefined>): Serve
     port: parsePort(get("BOARDWALK_PORT")),
     inference,
     envFile: get("BOARDWALK_ENV_FILE"),
+    workflowsDir: get("BOARDWALK_WORKFLOWS_DIR") ?? join(dataDir, "workflows"),
   };
+}
+
+/**
+ * Deploy every built workflow in `dir` on boot — the self-host deploy mechanism. Each `.mjs`/`.js`
+ * file is one workflow's program (single-file, `@boardwalk-labs/workflow` external — what
+ * `boardwalk build` emits). Idempotent by manifest name (re-boot re-syncs the dir into the store);
+ * a removed file leaves its last-deployed workflow in place (no un-deploy in v0). A missing dir is
+ * fine (an operator may deploy by other means); a bad file is logged and skipped, never fatal.
+ */
+function deployWorkflowsFromDir(engine: Engine, dir: string, log: (line: string) => void): void {
+  if (!existsSync(dir)) return;
+  let files: string[];
+  try {
+    files = readdirSync(dir)
+      .filter((name) => name.endsWith(".mjs") || name.endsWith(".js"))
+      .sort();
+  } catch (err) {
+    log(
+      `workflows dir ${dir} could not be read: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+  for (const file of files) {
+    try {
+      const program = readFileSync(join(dir, file), "utf8");
+      const workflow = engine.deployWorkflow({ program });
+      log(`deployed "${workflow.name}" from ${file}`);
+    } catch (err) {
+      log(`skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 }
 
 /**
@@ -217,6 +255,8 @@ export async function startServer(
       `recovery sweep: restarted ${String(swept.resumed.length)} run(s), ` +
         `cancelled ${String(swept.cancelled.length)}`,
     );
+    // Self-host deploy: sync the workflows dir into the store before serving (idempotent).
+    deployWorkflowsFromDir(engine, config.workflowsDir, log);
     const server = createEngineServer(engine, { host: config.host, log });
     const { port } = await server.listen(config.port);
     log(`data dir: ${resolve(config.dataDir)}`);
