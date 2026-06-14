@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+env:
+  # Run JS actions on Node 24 now (GitHub forces this 2026-06-16); a no-op once it is the default.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
 jobs:
   ci:
     runs-on: ubuntu-latest
