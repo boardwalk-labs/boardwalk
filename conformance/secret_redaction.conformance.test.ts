@@ -46,7 +46,7 @@ describe("conformance: secret redaction canary", () => {
         export const meta = {
           name: "leaky",
           triggers: [{ kind: "manual" }],
-          secrets: [{ name: "CANARY_TOKEN" }],
+          permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
         };
         const token = await secrets.get("CANARY_TOKEN");
         output(await agent("use the token " + token + " to fetch the data", {

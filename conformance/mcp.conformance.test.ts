@@ -51,7 +51,7 @@ function deployMcpUser(engine: ReturnType<typeof createEngine>["engine"], url: s
       export const meta = {
         name: "mcp-user",
         triggers: [{ kind: "manual" }],
-        secrets: [{ name: "CANARY_TOKEN" }],
+        permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
       };
       // Reading the secret teaches the run's redactor its value — the canary path.
       await secrets.get("CANARY_TOKEN");
