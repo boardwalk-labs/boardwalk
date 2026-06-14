@@ -702,12 +702,12 @@ export class RunSupervisor {
   }
 
   private resolveSecret(manifest: WorkflowManifest, name: string): string {
-    const declared = (manifest.secrets ?? []).some((s) => s.name === name);
+    const declared = (manifest.permissions?.secrets ?? []).some((s) => s.name === name);
     if (!declared) {
       throw new EngineError(
         "SECRET_UNDECLARED",
-        `Secret "${name}" is not declared in meta.secrets.`,
-        `Add { name: "${name}" } to meta.secrets — secret access is fail-closed everywhere.`,
+        `Secret "${name}" is not declared in permissions.secrets.`,
+        `Add { name: "${name}" } to permissions.secrets — secret access is fail-closed everywhere.`,
       );
     }
     const value = this.env.get(name) ?? process.env[name];
@@ -723,7 +723,7 @@ export class RunSupervisor {
 
   /**
    * The child's environment: the parent env plus manifest.env with whole-value
-   * `${{ secrets.NAME }}` interpolation resolved (fail-closed against meta.secrets).
+   * `${{ secrets.NAME }}` interpolation resolved (fail-closed against permissions.secrets).
    */
   private childEnv(manifest: WorkflowManifest): Record<string, string | undefined> {
     const out: Record<string, string | undefined> = { ...process.env };

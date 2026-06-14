@@ -211,7 +211,7 @@ describe("RunSupervisor", () => {
       "uses-secret",
       `import { secrets, output } from "@boardwalk-labs/workflow";
        output((await secrets.get("GH_TOKEN")).length);`,
-      { secrets: [{ name: "GH_TOKEN" }] },
+      { permissions: { secrets: [{ name: "GH_TOKEN" }] } },
     );
     const ok = await f.supervisor.supervise(f.startRun("uses-secret"));
     expect(ok.status).toBe("completed");
@@ -224,13 +224,13 @@ describe("RunSupervisor", () => {
     );
     const undeclared = await f.supervisor.supervise(f.startRun("undeclared-secret"));
     expect(undeclared.status).toBe("failed");
-    expect(undeclared.error?.message).toContain("not declared in meta.secrets");
+    expect(undeclared.error?.message).toContain("not declared in permissions.secrets");
 
     f.deploy(
       "missing-secret",
       `import { secrets } from "@boardwalk-labs/workflow";
        await secrets.get("ABSENT");`,
-      { secrets: [{ name: "ABSENT" }] },
+      { permissions: { secrets: [{ name: "ABSENT" }] } },
     );
     const missing = await f.supervisor.supervise(f.startRun("missing-secret"));
     expect(missing.status).toBe("failed");
@@ -244,7 +244,7 @@ describe("RunSupervisor", () => {
       `import { secrets } from "@boardwalk-labs/workflow";
        const token = await secrets.get("API_TOKEN");
        throw new Error("request to upstream failed with token=" + token);`,
-      { secrets: [{ name: "API_TOKEN" }] },
+      { permissions: { secrets: [{ name: "API_TOKEN" }] } },
     );
     const row = await f.supervisor.supervise(f.startRun("leaky-error"));
     expect(row.status).toBe("failed");
@@ -402,7 +402,7 @@ describe("RunSupervisor", () => {
       `import { output } from "@boardwalk-labs/workflow";
        output(process.env.MY_KEY ?? "unset");`,
       {
-        secrets: [{ name: "API_KEY" }],
+        permissions: { secrets: [{ name: "API_KEY" }] },
         env: { MY_KEY: "${{ secrets.API_KEY }}", PLAIN: "plain-value" },
       },
     );

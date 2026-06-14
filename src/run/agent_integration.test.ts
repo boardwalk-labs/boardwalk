@@ -222,7 +222,7 @@ describe("agent() through the full run path", () => {
       `import { agent, output, secrets } from "@boardwalk-labs/workflow";
                 const token = await secrets.get("API_TOKEN");
          output(await agent("please use token " + token + " to fetch the data"));`,
-      { secrets: [{ name: "API_TOKEN" }] },
+      { permissions: { secrets: [{ name: "API_TOKEN" }] } },
     );
 
     expect(f.store.getRun(runId)?.status).toBe("completed");

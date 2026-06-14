@@ -8,7 +8,7 @@ export const ENGINE_ERROR_CODES = [
   "NOT_FOUND", // unknown workflow/run
   "CONFLICT", // duplicate name, concurrent state conflict
   "SECRET_MISSING", // declared secret has no value in this environment
-  "SECRET_UNDECLARED", // program read a secret not in meta.secrets
+  "SECRET_UNDECLARED", // program read a secret not in permissions.secrets
   "MODEL_UNRESOLVED", // agent() with no model and no configured default
   "PROVIDER_ERROR", // upstream inference provider failure
   "BUDGET_EXCEEDED", // run terminated by budget.*
