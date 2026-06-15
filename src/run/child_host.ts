@@ -12,8 +12,12 @@ import { z } from "zod";
 import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
-import { runAgentLeaf, type AgentIdentity } from "../agent/leaf.js";
+import type { ChatMessage } from "../agent/conversation.js";
+import { runAgentLeaf, type AgentIdentity, type ModelTurnRequest } from "../agent/leaf.js";
+import { chatBedrock } from "../agent/bedrock.js";
+import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "../agent/providers.js";
 import { Redactor } from "../agent/redact.js";
+import type { ResolvedModel } from "../agent/resolve.js";
 import type { ToolSetContext } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
@@ -58,6 +62,79 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
   const redactor = new Redactor();
 
+  // Resolution is supervisor-side (keys never live in config here); the result is cached per
+  // (model, provider) so a tool loop's many turns resolve — and register their key/headers with
+  // the redactor — exactly once. The cache key is the agent() call's opaque pair, before defaults.
+  const resolvedCache = new Map<string, Promise<ResolvedModel>>();
+  async function resolveAndRegister(
+    model: string | undefined,
+    provider: string | undefined,
+  ): Promise<ResolvedModel> {
+    const cacheKey = `${provider ?? ""}\0${model ?? ""}`;
+    let pending = resolvedCache.get(cacheKey);
+    if (pending === undefined) {
+      pending = (async () => {
+        const resolved = resolvedModelSchema.parse(
+          await io.request("resolve_model", {
+            ...(model !== undefined ? { model } : {}),
+            ...(provider !== undefined ? { provider } : {}),
+          }),
+        );
+        // The provider key (and any env-sourced custom headers) become known to this process the
+        // instant they're resolved — register them with the redactor so they can never reach the
+        // model. This is the secrets invariant for the local seam: keys stay here, redacted before
+        // anything model-bound goes out.
+        if (resolved.apiKey !== null) {
+          redactor.add(`api-key:${resolved.provider}`, resolved.apiKey);
+        }
+        for (const name of resolved.secretHeaderNames) {
+          const value = resolved.headers[name];
+          if (value !== undefined) redactor.add(`header:${name}`, value);
+        }
+        // Bedrock's SigV4 credentials are secret values like any provider key — the secret access
+        // key and session token must never reach the model. (The access key id and region are not
+        // secret.) Register them so the seam's final scrub covers them too.
+        if (resolved.aws !== undefined) {
+          redactor.add(`aws-secret-key:${resolved.provider}`, resolved.aws.secretAccessKey);
+          if (resolved.aws.sessionToken !== undefined) {
+            redactor.add(`aws-session-token:${resolved.provider}`, resolved.aws.sessionToken);
+          }
+        }
+        return resolved;
+      })();
+      resolvedCache.set(cacheKey, pending);
+    }
+    return pending;
+  }
+
+  // The LOCAL streamModel seam: resolve supervisor-side, then call the provider HTTP directly
+  // (in-process). The hosted platform swaps this for a broker-routed call so its untrusted worker
+  // never holds the key — the leaf loop above is identical either way.
+  async function streamModel(req: ModelTurnRequest, providerIo: ProviderIo) {
+    const resolved = await resolveAndRegister(req.model, req.provider);
+    const args: ChatArgs = {
+      baseUrl: resolved.baseUrl,
+      apiKey: resolved.apiKey,
+      headers: resolved.headers,
+      model: resolved.model,
+      // The key/headers are known only NOW (resolution is lazy behind the seam), so the final
+      // scrub of model-bound text happens here, after registration — the first prompt could
+      // otherwise carry a key the resolver just learned. Idempotent: already-redacted text is
+      // untouched. Whoever holds the key (this seam locally; the broker on the platform) redacts.
+      messages: redactMessages(req.messages, redactor),
+      tools: req.tools,
+      // Bedrock SigV4 credentials (present only for protocol "bedrock"); the adapter signs with them.
+      ...(resolved.aws !== undefined ? { aws: resolved.aws } : {}),
+    };
+    const turn =
+      resolved.protocol === "anthropic"
+        ? await chatAnthropic(args, providerIo)
+        : resolved.protocol === "bedrock"
+          ? await chatBedrock(args, providerIo)
+          : await chatOpenAi(args, providerIo);
+    return { turn, modelRef: resolved.model };
+  }
+
   const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
@@ -72,13 +149,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       };
       return await runAgentLeaf(prompt, opts, {
         identity,
-        resolve: async (model, provider) =>
-          resolvedModelSchema.parse(
-            await io.request("resolve_model", {
-              ...(model !== undefined ? { model } : {}),
-              ...(provider !== undefined ? { provider } : {}),
-            }),
-          ),
+        streamModel,
         startTurn: (turnId) => io.startTurn(turnId, identity),
         emit: (turnId, body) => io.emit(body, turnId),
         reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
@@ -165,6 +236,34 @@ const artifactRefSchema = z.strictObject({
   name: z.string().min(1),
   url: z.string().min(1),
 });
+
+/** Scrub every known secret value out of model-bound message text — the seam's last word before
+ *  anything reaches the provider. Pure + idempotent: returns redacted copies, mutates nothing. */
+function redactMessages(
+  messages: readonly ChatMessage[],
+  redactor: Redactor,
+): readonly ChatMessage[] {
+  return messages.map((message) => {
+    switch (message.role) {
+      case "user":
+        return { role: "user", text: redactor.redact(message.text) };
+      case "assistant":
+        return {
+          role: "assistant",
+          text: redactor.redact(message.text),
+          toolCalls: message.toolCalls,
+        };
+      case "tool_results":
+        return {
+          role: "tool_results",
+          results: message.results.map((result) => ({
+            ...result,
+            content: redactor.redact(result.content),
+          })),
+        };
+    }
+  });
+}
 
 function sleepMs(arg: SleepArg): number {
   if (typeof arg === "number") return arg;

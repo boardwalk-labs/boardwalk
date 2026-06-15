@@ -19,8 +19,9 @@
 
 import { EngineError } from "../errors.js";
 
-/** Wire protocol an endpoint speaks. Anthropic has its own; everything else is OpenAI-shaped. */
-export type ProviderProtocol = "anthropic" | "openai";
+/** Wire protocol an endpoint speaks. Anthropic + OpenAI are HTTP-key-authed; bedrock is the
+ *  Anthropic Messages schema over AWS Bedrock Runtime, SigV4-authed (no API key). */
+export type ProviderProtocol = "anthropic" | "openai" | "bedrock";
 
 /** The default provider when an agent() call names none. */
 export const BOARDWALK_PROVIDER = "boardwalk";
@@ -39,11 +40,31 @@ const DEFAULT_BOARDWALK_INFERENCE_URL = "https://api.boardwalk.sh/v1";
  *  environment at call time (for secret-bearing headers — values never sit in config). */
 export type HeaderValue = string | { from_env: string };
 
+/**
+ * AWS Bedrock provider config (only meaningful with `protocol: "bedrock"`). The region is plain
+ * config; credentials follow the same `*_env` indirection as `api_key_env`/header `from_env` — the
+ * secret VALUES come from the engine environment, never inline config, and are redacted like a key.
+ */
+export interface AwsProviderConfig {
+  /** AWS region, e.g. "us-east-1" — picks the bedrock-runtime endpoint. */
+  region: string;
+  /** Env var holding the AWS access key id. */
+  access_key_id_env: string;
+  /** Env var holding the AWS secret access key (a secret value — redacted). */
+  secret_access_key_env: string;
+  /** Env var holding an STS session token, for temporary credentials (a secret value — redacted). */
+  session_token_env?: string;
+}
+
 /** One entry in the engine config's provider table. */
 export interface ProviderConfig {
-  /** OpenAI-compatible endpoint base URL (e.g. http://localhost:11434/v1 for a local Ollama). */
-  base_url: string;
-  /** Env var holding the API key. Omit for endpoints that need none (local servers). */
+  /**
+   * OpenAI-compatible endpoint base URL (e.g. http://localhost:11434/v1 for a local Ollama).
+   * Required for every protocol EXCEPT `protocol: "bedrock"`, whose endpoint is derived from
+   * `aws.region` (an explicit base_url then overrides it — for a VPC endpoint or regional proxy).
+   */
+  base_url?: string;
+  /** Env var holding the API key. Omit for endpoints that need none (local servers, bedrock). */
   api_key_env?: string;
   /** Defaults to "openai" — the lingua franca of self-hosted/compatible endpoints. */
   protocol?: ProviderProtocol;
@@ -54,6 +75,8 @@ export interface ProviderConfig {
    * redacted from all model-bound context, like the API key.
    */
   headers?: Record<string, HeaderValue>;
+  /** AWS config — required for (and only used by) `protocol: "bedrock"`. */
+  aws?: AwsProviderConfig;
 }
 
 export interface InferenceConfig {
@@ -78,6 +101,19 @@ export interface ResolvedModel {
   headers: Record<string, string>;
   /** Names of `headers` whose values came from the environment — redacted like the API key. */
   secretHeaderNames: readonly string[];
+  /**
+   * AWS region + SigV4 credentials, resolved from the environment — present ONLY for
+   * `protocol: "bedrock"` (apiKey is null then). `secretAccessKey`/`sessionToken` are secret
+   * values: the seam registers them with the redactor exactly like the API key.
+   */
+  aws?:
+    | {
+        region: string;
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken?: string | undefined;
+      }
+    | undefined;
 }
 
 interface BuiltinProvider {
@@ -192,6 +228,16 @@ function resolveConfigured(
   configured: ProviderConfig,
   getEnv: (name: string) => string | undefined,
 ): ResolvedModel {
+  if (configured.protocol === "bedrock") {
+    return resolveBedrock(provider, model, configured, getEnv);
+  }
+  if (configured.base_url === undefined) {
+    throw new EngineError(
+      "VALIDATION",
+      `Provider "${provider}" has no base_url.`,
+      "Set inference.providers." + provider + ".base_url (only bedrock derives its endpoint).",
+    );
+  }
   let apiKey: string | null = null;
   if (configured.api_key_env !== undefined) {
     const value = getEnv(configured.api_key_env);
@@ -214,6 +260,74 @@ function resolveConfigured(
     headers,
     secretHeaderNames,
   };
+}
+
+/**
+ * Resolve a BYO Bedrock provider: region drives the endpoint, credentials come from the env vars
+ * the config names (the `*_env` indirection — secret values never sit in config). apiKey is null;
+ * Bedrock authenticates per-request with SigV4 (bedrock.ts), not a bearer/x-api-key header.
+ */
+function resolveBedrock(
+  provider: string,
+  model: string,
+  configured: ProviderConfig,
+  getEnv: (name: string) => string | undefined,
+): ResolvedModel {
+  const aws = configured.aws;
+  if (aws === undefined) {
+    throw new EngineError(
+      "VALIDATION",
+      `Provider "${provider}" uses protocol "bedrock" but has no aws config.`,
+      `Set inference.providers.${provider}.aws = { region, access_key_id_env, secret_access_key_env }.`,
+    );
+  }
+  const accessKeyId = requireEnv(provider, aws.access_key_id_env, getEnv);
+  const secretAccessKey = requireEnv(provider, aws.secret_access_key_env, getEnv);
+  // Session token is optional (only STS temporary credentials carry one); absent is fine, but an
+  // env var named-but-empty is an operator mistake worth surfacing.
+  const sessionToken =
+    aws.session_token_env !== undefined
+      ? requireEnv(provider, aws.session_token_env, getEnv)
+      : undefined;
+  // Custom headers (org/proxy headers) still ride along; the adapter folds them into the
+  // SigV4-signed request before signing.
+  const { headers, secretHeaderNames } = resolveHeaders(provider, configured.headers, getEnv);
+
+  return {
+    provider,
+    model,
+    protocol: "bedrock",
+    // The endpoint is region-derived by default; an explicit base_url overrides it for VPC
+    // interface endpoints / regional proxies (and is what tests point at a local fake). The
+    // SigV4 signature still uses aws.region for its credential scope regardless.
+    baseUrl: configured.base_url ?? `https://bedrock-runtime.${aws.region}.amazonaws.com`,
+    apiKey: null,
+    headers,
+    secretHeaderNames,
+    aws: {
+      region: aws.region,
+      accessKeyId,
+      secretAccessKey,
+      ...(sessionToken !== undefined ? { sessionToken } : {}),
+    },
+  };
+}
+
+/** Read a required secret env var, failing closed with a pointer when unset/empty. */
+function requireEnv(
+  provider: string,
+  envName: string,
+  getEnv: (name: string) => string | undefined,
+): string {
+  const value = getEnv(envName);
+  if (value === undefined || value.length === 0) {
+    throw new EngineError(
+      "PROVIDER_ERROR",
+      `Provider "${provider}" needs ${envName}, which is not set.`,
+      `Set ${envName} in the engine's environment.`,
+    );
+  }
+  return value;
 }
 
 /** Resolve a provider's custom header map; `{ from_env }` values are looked up fail-closed. */

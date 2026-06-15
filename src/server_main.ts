@@ -51,19 +51,44 @@ const headerValueSchema = z.union([
   z.string().min(1),
 ]);
 
-const providerEntrySchema = z.strictObject({
-  base_url: z.url(),
-  api_key_env: z.string().min(1).optional(),
-  protocol: z.enum(["anthropic", "openai"]).optional(),
-  headers: z.record(z.string().min(1), headerValueSchema).optional(),
+// AWS Bedrock provider config: region is plain, credentials follow the `*_env` indirection (the
+// secret VALUES live in the environment, never inline config) — same shape as `api_key_env`.
+const awsConfigSchema = z.strictObject({
+  region: z.string().min(1),
+  access_key_id_env: z.string().min(1),
+  secret_access_key_env: z.string().min(1),
+  session_token_env: z.string().min(1).optional(),
 });
+
+const providerEntrySchema = z
+  .strictObject({
+    // Optional only for bedrock, whose endpoint is derived from aws.region (refined below).
+    base_url: z.url().optional(),
+    api_key_env: z.string().min(1).optional(),
+    protocol: z.enum(["anthropic", "openai", "bedrock"]).optional(),
+    headers: z.record(z.string().min(1), headerValueSchema).optional(),
+    aws: awsConfigSchema.optional(),
+  })
+  // bedrock derives its endpoint from aws.region, so it needs `aws` and no base_url; every other
+  // protocol needs a base_url. Fail loudly at boot rather than at first agent() call. Paths are
+  // set so formatIssues still prefixes the bad field (e.g. "groq.base_url").
+  .refine((entry) => (entry.protocol === "bedrock" ? entry.aws !== undefined : true), {
+    error: 'protocol "bedrock" requires an "aws" config ({ region, access_key_id_env, ... }).',
+    path: ["aws"],
+  })
+  .refine((entry) => (entry.protocol === "bedrock" ? true : entry.base_url !== undefined), {
+    error: '"base_url" is required (only protocol "bedrock" derives its endpoint from aws.region).',
+    path: ["base_url"],
+  });
 
 const providersSchema = z.record(z.string().min(1), providerEntrySchema);
 
 const PROVIDERS_HINT =
   "Expected a JSON object of named providers, e.g. " +
   '{"ollama":{"base_url":"http://localhost:11434/v1"},' +
-  '"groq":{"base_url":"https://api.groq.com/openai/v1","api_key_env":"GROQ_API_KEY"}}.';
+  '"groq":{"base_url":"https://api.groq.com/openai/v1","api_key_env":"GROQ_API_KEY"},' +
+  '"bedrock":{"protocol":"bedrock","aws":{"region":"us-east-1",' +
+  '"access_key_id_env":"AWS_ACCESS_KEY_ID","secret_access_key_env":"AWS_SECRET_ACCESS_KEY"}}}.';
 
 /** One line per Zod issue, path-prefixed, so the operator sees which provider field is wrong. */
 function formatIssues(error: z.ZodError): string {
@@ -119,10 +144,22 @@ function parseProviders(raw: string | undefined): Record<string, ProviderConfig>
   const providers: Record<string, ProviderConfig> = {};
   for (const [name, entry] of Object.entries(parsed.data)) {
     providers[name] = {
-      base_url: entry.base_url,
+      ...(entry.base_url !== undefined ? { base_url: entry.base_url } : {}),
       ...(entry.api_key_env !== undefined ? { api_key_env: entry.api_key_env } : {}),
       ...(entry.protocol !== undefined ? { protocol: entry.protocol } : {}),
       ...(entry.headers !== undefined ? { headers: entry.headers } : {}),
+      ...(entry.aws !== undefined
+        ? {
+            aws: {
+              region: entry.aws.region,
+              access_key_id_env: entry.aws.access_key_id_env,
+              secret_access_key_env: entry.aws.secret_access_key_env,
+              ...(entry.aws.session_token_env !== undefined
+                ? { session_token_env: entry.aws.session_token_env }
+                : {}),
+            },
+          }
+        : {}),
     };
   }
   return providers;

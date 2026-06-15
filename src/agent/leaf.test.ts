@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
 import { startFakeMcpServer } from "../testing/fake_mcp.js";
-import { runAgentLeaf, type LeafEventBody, type LeafIo } from "./leaf.js";
+import { runAgentLeaf, type LeafEventBody, type LeafIo, type ModelTurnRequest } from "./leaf.js";
+import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
 import { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
 import type { McpTokenResult } from "./tools.js";
@@ -69,6 +70,65 @@ function anthropicSse(...events: object[]): Response {
 }
 
 // ----------------------------------------------------------------------------
+// A local streamModel seam mirroring child_host's: resolve from a fixture, register the key +
+// env-sourced headers with the redactor, then call the REAL provider adapter through the stubbed
+// fetchImpl. This keeps the provider adapters (chatAnthropic/chatOpenAi) under test end-to-end —
+// the seam moved WHERE the call is invoked, not whether the adapters are exercised.
+// ----------------------------------------------------------------------------
+
+function localStreamModel(model: ResolvedModel, redactor: Redactor) {
+  let registered = false;
+  return async (
+    req: ModelTurnRequest,
+    providerIo: ProviderIo,
+  ): Promise<{ turn: Awaited<ReturnType<typeof chatOpenAi>>; modelRef: string }> => {
+    if (!registered) {
+      registered = true;
+      if (model.apiKey !== null) redactor.add(`api-key:${model.provider}`, model.apiKey);
+      for (const name of model.secretHeaderNames) {
+        const value = model.headers[name];
+        if (value !== undefined) redactor.add(`header:${name}`, value);
+      }
+    }
+    const args: ChatArgs = {
+      baseUrl: model.baseUrl,
+      apiKey: model.apiKey,
+      headers: model.headers,
+      model: model.model,
+      // Mirror the local child_host seam: scrub model-bound text after the key is registered.
+      messages: req.messages.map((message) => {
+        switch (message.role) {
+          case "user":
+            return { role: "user", text: redactor.redact(message.text) };
+          case "assistant":
+            return {
+              role: "assistant",
+              text: redactor.redact(message.text),
+              toolCalls: message.toolCalls,
+            };
+          case "tool_results":
+            return {
+              role: "tool_results",
+              results: message.results.map((result) => ({
+                ...result,
+                content: redactor.redact(result.content),
+              })),
+            };
+        }
+      }),
+      tools: req.tools,
+    };
+    // providerIo arrives with the loop's fetchImpl/sleepImpl (from io.provider) + onDelta — the
+    // adapters call through it exactly as the local child_host seam does in production.
+    const turn =
+      model.protocol === "anthropic"
+        ? await chatAnthropic(args, providerIo)
+        : await chatOpenAi(args, providerIo);
+    return { turn, modelRef: model.model };
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Recorded io
 // ----------------------------------------------------------------------------
 
@@ -119,12 +179,13 @@ function recordedIo(
     if (make === undefined) throw new Error("no response scripted");
     return Promise.resolve(make());
   };
+  const redactor = opts.redactor ?? new Redactor();
   const io: LeafIo = {
     identity: {
       agentId: "agent-1",
       ...(opts.agentName !== undefined ? { agentName: opts.agentName } : {}),
     },
-    resolve: () => Promise.resolve(model),
+    streamModel: localStreamModel(model, redactor),
     startTurn: (turnId) => {
       turns.push(turnId);
     },
@@ -138,7 +199,7 @@ function recordedIo(
       memoryUsed.push(dir);
     },
     mcpToken: opts.mcpToken ?? (() => Promise.resolve({ accessToken: null })),
-    redactor: opts.redactor ?? new Redactor(),
+    redactor,
     capabilities: {
       workspaceDir: opts.workspaceDir ?? tempDir("bw-leaf-ws-"),
       skillsDir: opts.skillsDir ?? null,
@@ -630,6 +691,95 @@ describe("runAgentLeaf — skills", () => {
       /not a valid skill name/,
     );
     expect(rec.requests).toHaveLength(0);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Context compaction (mid-conversation summarization)
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — context compaction", () => {
+  // A tool whose result is large enough that a few iterations blow the (generous) default budget.
+  const bigReader = {
+    name: "read_big",
+    description: "Reads a large document",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("PAYLOAD-".repeat(30_000)), // ~240k chars per call
+  };
+
+  it("summarizes the oldest middle once over budget, preserves head + recent turns, meters the summary", async () => {
+    // Four tool iterations grow the conversation to 9 messages (~960k chars) — past the default
+    // ~600k-char budget — then a fifth turn fires compaction before the final answer.
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c2", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c3", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c4", name: "read_big", args: {} }]),
+      () => openAiText("SUMMARY: read four big docs; key fact is 42.", { in: 900, out: 30 }),
+      () => openAiText("final answer", { in: 20, out: 5 }),
+    ]);
+
+    const result = await runAgentLeaf("THE-ORIGINAL-TASK", { tools: [bigReader] }, rec.io);
+    expect(result).toBe("final answer");
+
+    // Six model calls total: four tool turns + ONE summarization call + the final answer turn.
+    expect(rec.requests).toHaveLength(6);
+    // The summarization call (request index 4) was a fresh single-message prompt — the digest
+    // instruction over the compressed transcript, with NO tools advertised.
+    const summaryReq = rec.requests[4]?.body ?? "";
+    expect(summaryReq).toContain("compacting the middle of a longer agent transcript");
+    expect(summaryReq).not.toContain('"read_big"');
+    // The final turn's request carries: the ORIGINAL task (head preserved), the summary text
+    // (middle replaced), and the most-recent tool result (recent tail preserved).
+    const finalReq = rec.requests[5]?.body ?? "";
+    expect(finalReq).toContain("THE-ORIGINAL-TASK");
+    expect(finalReq).toContain("SUMMARY: read four big docs; key fact is 42.");
+    expect(finalReq).toContain("PAYLOAD-"); // the freshest tool_results survived verbatim
+
+    // The summarization call's usage was reported to the budget authority like any other turn.
+    expect(rec.usage).toContainEqual({
+      modelRef: "test-model",
+      usage: { inputTokens: 900, outputTokens: 30 },
+    });
+  });
+
+  it("does NOT compact a normal-length conversation (the budget is a safety valve, not routine)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "double", args: { n: 21 } }]),
+      () => openAiText("42"),
+    ]);
+    const doubler = {
+      name: "double",
+      description: "Doubles",
+      inputSchema: { type: "object" },
+      execute: () => Promise.resolve("42"),
+    };
+    await runAgentLeaf("double 21", { tools: [doubler] }, rec.io);
+    // Exactly two model calls: a short run never trips summarization.
+    expect(rec.requests).toHaveLength(2);
+    expect(rec.requests.some((r) => r.body.includes("compacting the middle"))).toBe(false);
+  });
+
+  it("redacts secret values out of the summary before it re-enters model context", async () => {
+    const redactor = new Redactor();
+    redactor.add("API_SECRET", "sk-leaky-secret-value");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () => openAiToolCalls([{ id: "c1", name: "read_big", args: {} }]),
+        () => openAiToolCalls([{ id: "c2", name: "read_big", args: {} }]),
+        () => openAiToolCalls([{ id: "c3", name: "read_big", args: {} }]),
+        () => openAiToolCalls([{ id: "c4", name: "read_big", args: {} }]),
+        // The summarizer (mis)echoes a secret into its output; the loop must scrub it on re-entry.
+        () => openAiText("digest mentioning sk-leaky-secret-value verbatim", { in: 5, out: 5 }),
+        () => openAiText("ok", { in: 1, out: 1 }),
+      ],
+      { redactor },
+    );
+    await runAgentLeaf("task", { tools: [bigReader] }, rec.io);
+    const finalReq = rec.requests[5]?.body ?? "";
+    expect(finalReq).not.toContain("sk-leaky-secret-value");
+    expect(finalReq).toContain("[redacted:API_SECRET]");
   });
 });
 

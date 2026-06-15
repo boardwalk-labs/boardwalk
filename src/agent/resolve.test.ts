@@ -283,4 +283,110 @@ describe("resolveModel", () => {
       resolveModel({ model: "", provider: "openai", config: none, getEnv: env({}) }),
     ).toThrow(/needs a model/);
   });
+
+  it("resolves a BYO Bedrock provider: region-derived endpoint, env-sourced creds, null apiKey", () => {
+    const config: InferenceConfig = {
+      providers: {
+        bedrock: {
+          protocol: "bedrock",
+          aws: {
+            region: "us-west-2",
+            access_key_id_env: "AWS_ACCESS_KEY_ID",
+            secret_access_key_env: "AWS_SECRET_ACCESS_KEY",
+            session_token_env: "AWS_SESSION_TOKEN",
+          },
+        },
+      },
+    };
+    const r = resolveModel({
+      model: "anthropic.claude-sonnet-4-5-v1:0",
+      provider: "bedrock",
+      config,
+      getEnv: env({
+        AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+        AWS_SECRET_ACCESS_KEY: "shhh-secret",
+        AWS_SESSION_TOKEN: "sess-tok",
+      }),
+    });
+    expect(r).toEqual({
+      provider: "bedrock",
+      model: "anthropic.claude-sonnet-4-5-v1:0", // verbatim — the URL-bound model id is not parsed
+      protocol: "bedrock",
+      baseUrl: "https://bedrock-runtime.us-west-2.amazonaws.com",
+      apiKey: null, // bedrock authenticates with SigV4, not a key
+      headers: {},
+      secretHeaderNames: [],
+      aws: {
+        region: "us-west-2",
+        accessKeyId: "AKIDEXAMPLE",
+        secretAccessKey: "shhh-secret",
+        sessionToken: "sess-tok",
+      },
+    });
+  });
+
+  it("Bedrock without a session_token_env omits the session token (long-lived creds)", () => {
+    const config: InferenceConfig = {
+      providers: {
+        bedrock: {
+          protocol: "bedrock",
+          aws: {
+            region: "eu-central-1",
+            access_key_id_env: "AK",
+            secret_access_key_env: "SK",
+          },
+        },
+      },
+    };
+    const r = resolveModel({
+      model: "anthropic.claude-haiku",
+      provider: "bedrock",
+      config,
+      getEnv: env({ AK: "id", SK: "secret-value" }),
+    });
+    expect(r.protocol).toBe("bedrock");
+    expect(r.aws).toEqual({
+      region: "eu-central-1",
+      accessKeyId: "id",
+      secretAccessKey: "secret-value",
+    });
+    expect(r.aws).not.toHaveProperty("sessionToken");
+  });
+
+  it("Bedrock fails closed when a credential env var is unset, naming it", () => {
+    const config: InferenceConfig = {
+      providers: {
+        bedrock: {
+          protocol: "bedrock",
+          aws: { region: "us-east-1", access_key_id_env: "AK", secret_access_key_env: "SK" },
+        },
+      },
+    };
+    try {
+      resolveModel({ model: "m", provider: "bedrock", config, getEnv: env({ AK: "id" }) });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError);
+      if (err instanceof EngineError) {
+        expect(err.code).toBe("PROVIDER_ERROR");
+        expect(err.message).toContain("SK"); // the missing secret-access-key env var
+      }
+    }
+  });
+
+  it("Bedrock with protocol but no aws config fails VALIDATION", () => {
+    const config: InferenceConfig = {
+      providers: { bedrock: { protocol: "bedrock" } },
+    };
+    try {
+      resolveModel({ model: "m", provider: "bedrock", config, getEnv: env({}) });
+      expect.unreachable();
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError);
+      if (err instanceof EngineError) {
+        expect(err.code).toBe("VALIDATION");
+        expect(err.message).toContain("aws config");
+      }
+    }
+  });
 });

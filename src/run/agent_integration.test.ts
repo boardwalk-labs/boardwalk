@@ -73,15 +73,57 @@ function startFakeProvider(): Promise<FakeProvider> {
 }
 
 // ----------------------------------------------------------------------------
+// A fake Bedrock Runtime endpoint: answers InvokeModel with the Anthropic JSON response shape.
+// We don't verify the SigV4 signature here (sigv4.test.ts proves the math against AWS vectors);
+// this server records the request body so the redaction canary can assert the AWS secret value
+// never appears in what the worker sent.
+// ----------------------------------------------------------------------------
+
+interface FakeBedrock {
+  port: number;
+  requests: { url: string; headers: http.IncomingHttpHeaders; body: string }[];
+  close: () => Promise<void>;
+}
+
+function startFakeBedrock(): Promise<FakeBedrock> {
+  const requests: FakeBedrock["requests"] = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+    req.on("end", () => {
+      requests.push({ url: req.url ?? "", headers: req.headers, body });
+      res.setHeader("content-type", "application/json");
+      res.end(
+        JSON.stringify({
+          content: [{ type: "text", text: "bedrock ok" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 7, output_tokens: 3 },
+        }),
+      );
+    });
+  });
+  return new Promise((resolvePort) => {
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address !== null ? address.port : 0;
+      resolvePort({ port, requests, close: () => new Promise((r) => server.close(() => r())) });
+    });
+  });
+}
+
+// ----------------------------------------------------------------------------
 
 let provider: FakeProvider;
+let bedrock: FakeBedrock;
 
 beforeAll(async () => {
   provider = await startFakeProvider();
+  bedrock = await startFakeBedrock();
 }, 120_000);
 
 afterAll(async () => {
   await provider.close();
+  await bedrock.close();
 });
 
 const cleanups: (() => void)[] = [];
@@ -114,6 +156,68 @@ function fixture(env: Record<string, string> = {}): {
       default_model: "default-test-model",
       boardwalk_base_url: `http://127.0.0.1:${String(provider.port)}/v1`,
       providers: { local: { base_url: `http://127.0.0.1:${String(provider.port)}/v1` } },
+    },
+  });
+  cleanups.push(() => {
+    supervisor.shutdown();
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+  const run = async (
+    name: string,
+    program: string,
+    meta?: Partial<WorkflowManifest>,
+    input?: unknown,
+  ): Promise<string> => {
+    const manifest = workflowManifestSchema.parse({
+      slug: name,
+      triggers: [{ kind: "manual" }],
+      ...meta,
+    });
+    const workflow = store.upsertWorkflow({ slug: manifest.slug, manifest, program });
+    const { run: row } = store.createRun({
+      workflowId: workflow.id,
+      triggerKind: "manual",
+      ...(input !== undefined ? { input } : {}),
+    });
+    supervisor.emitQueued(row.id);
+    await supervisor.supervise(row.id);
+    return row.id;
+  };
+  return { store, supervisor, run };
+}
+
+/** A fixture wired with a BYO bedrock provider whose endpoint is overridden to the fake server,
+ *  and AWS creds (incl. a secret access key) in the engine env. */
+function bedrockFixture(secretAccessKey: string): ReturnType<typeof fixture> {
+  const dataDir = mkdtempSync(join(tmpdir(), "bw-bedrock-test-"));
+  const store = new Store(join(dataDir, "engine.db"));
+  const supervisor = new RunSupervisor({
+    store,
+    dataDir,
+    childEntryPath,
+    env: new Map(
+      Object.entries({
+        BOARDWALK_API_KEY: "test-managed-key",
+        AWS_ACCESS_KEY_ID: "AKIDEXAMPLE",
+        AWS_SECRET_ACCESS_KEY: secretAccessKey,
+      }),
+    ),
+    envLabel: ".env (test fixture)",
+    cancelGraceMs: 250,
+    inference: {
+      providers: {
+        bedrock: {
+          protocol: "bedrock",
+          // base_url override points the region-derived endpoint at our fake Bedrock server.
+          base_url: `http://127.0.0.1:${String(bedrock.port)}`,
+          aws: {
+            region: "us-east-1",
+            access_key_id_env: "AWS_ACCESS_KEY_ID",
+            secret_access_key_env: "AWS_SECRET_ACCESS_KEY",
+          },
+        },
+      },
     },
   });
   cleanups.push(() => {
@@ -381,5 +485,55 @@ describe("agent() through the full run path", () => {
     expect(f.store.getRun(second)?.status).toBe("completed");
     const secondRequest = provider.requests.at(-1) ?? "";
     expect(secondRequest).toContain("learned.md");
+  }, 30_000);
+
+  it("BYO bedrock: signs InvokeModel and parses the Anthropic response through the real child", async () => {
+    const f = bedrockFixture("aws-secret-not-leaked-123");
+    const runId = await f.run(
+      "bedrock-agent",
+      `import { agent, output } from "@boardwalk-labs/workflow";
+       output(await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" }));`,
+    );
+
+    const row = f.store.getRun(runId);
+    expect(row?.status).toBe("completed");
+    expect(row?.output).toBe("bedrock ok");
+    expect(row?.tokensIn).toBe(7);
+    expect(row?.tokensOut).toBe(3);
+
+    const req = bedrock.requests.at(-1);
+    if (req === undefined) throw new Error("no bedrock request recorded");
+    // Model id rides in the path (percent-encoded); the body carries the bedrock anthropic_version.
+    expect(req.url).toBe("/model/anthropic.claude-sonnet-4-5-v1%3A0/invoke");
+    expect(req.body).toContain("bedrock-2023-05-31");
+    // The request was SigV4-signed: a bedrock-scoped Authorization + the timestamp header.
+    const auth = req.headers.authorization ?? "";
+    expect(auth).toContain("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/");
+    expect(auth).toContain("/us-east-1/bedrock/aws4_request");
+    expect(req.headers["x-amz-date"]).toMatch(/^\d{8}T\d{6}Z$/);
+  }, 30_000);
+
+  it("REDACTION CANARY (bedrock): the AWS secret access key never reaches the provider in cleartext", async () => {
+    // The seam registers the resolved AWS secret access key with the run's redactor (alongside the
+    // API key) so it is scrubbed from everything model-bound. It is the SigV4 SIGNING key — it
+    // derives the Authorization header but its plaintext must never appear in a request body or an
+    // event. A regression that put creds in the body, or skipped the AWS-cred registration while
+    // some path echoed them, would surface the canary here.
+    const canary = "aws-secret-canary-value-9z1q";
+    const f = bedrockFixture(canary);
+    const runId = await f.run(
+      "bedrock-redact",
+      `import { agent, output } from "@boardwalk-labs/workflow";
+       output(await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" }));`,
+    );
+
+    expect(f.store.getRun(runId)?.status).toBe("completed");
+    for (const req of bedrock.requests) {
+      expect(req.body).not.toContain(canary);
+      // The signing key never appears verbatim in the Authorization header either (it's HMAC'd).
+      expect(req.headers.authorization ?? "").not.toContain(canary);
+    }
+    const allEvents = JSON.stringify(f.store.listEvents(runId));
+    expect(allEvents).not.toContain(canary);
   }, 30_000);
 });

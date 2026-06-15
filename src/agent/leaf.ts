@@ -4,16 +4,21 @@
 // use (program-defined ToolDefs + memory file tools + MCP server tools), skills loaded into
 // context, schema output, secret redaction, and usage reporting. Runs IN THE PROGRAM PROCESS
 // (tool `execute` must run in the trusted layer, and MCP connections live where their tools
-// execute); model/provider/key resolution and MCP OAuth token state stay supervisor-side and
-// arrive through `io.resolve` / `io.mcpToken`.
+// execute); MCP OAuth token state stays supervisor-side and arrives through `io.mcpToken`.
+//
+// The model call ITSELF is behind the `io.streamModel` seam: the leaf hands over a neutral
+// turn request and gets back a turn — it never resolves a model or touches a provider key.
+// The local engine's seam impl resolves supervisor-side and calls the provider directly; the
+// hosted platform's swaps in a broker that routes the call without the untrusted worker ever
+// holding a credential. Same loop, same observable behavior, either way.
 
 import { randomUUID } from "node:crypto";
 import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk-labs/workflow";
+import { DEFAULT_COMPACTION_BUDGET_CHARS, planCompaction } from "./compaction.js";
 import { EngineError } from "../errors.js";
-import type { ChatMessage, ChatTurn, ToolCallRequest } from "./conversation.js";
-import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
+import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
+import type { ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
-import type { ResolvedModel } from "./resolve.js";
 import {
   assertUniqueToolNames,
   buildToolSet,
@@ -56,11 +61,32 @@ export type LeafEventBody =
   | { kind: "tool_call_result"; toolCallId: string; result: ToolReturn }
   | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } };
 
+/**
+ * One model turn the leaf asks for, in neutral terms — no endpoint, no key. `model`/`provider`
+ * are the agent() call's (both opaque, both optional); resolution to a concrete endpoint happens
+ * behind the `streamModel` seam, never here.
+ */
+export interface ModelTurnRequest {
+  model: string | undefined;
+  provider: string | undefined;
+  messages: readonly ChatMessage[];
+  tools: readonly ToolSpec[];
+}
+
+/** The result of one model turn: the turn itself, plus the resolved model id usage is keyed by. */
+export interface ModelTurnResult {
+  turn: ChatTurn;
+  /** The concrete model the call resolved to — `reportUsage` is keyed by it. */
+  modelRef: string;
+}
+
 export interface LeafIo {
   /** This leaf's identity — stamped onto its turn_started (via startTurn) and turn_ended frames. */
   identity: AgentIdentity;
-  /** Supervisor-side model resolution (config + key material never live in this process). */
-  resolve(model: string | undefined, provider: string | undefined): Promise<ResolvedModel>;
+  /** Run one model turn behind a seam: the local engine resolves + calls the provider directly;
+   *  the hosted platform routes through a broker so the untrusted worker never holds a key. The
+   *  leaf passes the streaming hooks (text deltas) in `providerIo`; resolution stays out of here. */
+  streamModel(req: ModelTurnRequest, providerIo: ProviderIo): Promise<ModelTurnResult>;
   /** Open a new turn block; subsequent leaf events carry this turnId. */
   startTurn(turnId: string): void;
   emit(turnId: string, body: LeafEventBody): void;
@@ -119,15 +145,6 @@ async function runLeafWithTools(
   // Re-check across the MERGED set: a namespaced MCP tool can collide with a program tool.
   assertUniqueToolNames(tools);
 
-  const resolved = await io.resolve(opts?.model, opts?.provider);
-  // The provider key (and any env-sourced custom headers) are now known to this process —
-  // make sure they can never reach the model.
-  if (resolved.apiKey !== null) io.redactor.add(`api-key:${resolved.provider}`, resolved.apiKey);
-  for (const name of resolved.secretHeaderNames) {
-    const value = resolved.headers[name];
-    if (value !== undefined) io.redactor.add(`header:${name}`, value);
-  }
-
   const schemaInstruction =
     opts?.schema === undefined
       ? []
@@ -147,7 +164,7 @@ async function runLeafWithTools(
 
   let finalText: string;
   try {
-    finalText = await runToolLoop(messages, tools, resolved, io, turnId, totals);
+    finalText = await runToolLoop(messages, tools, opts, io, turnId, totals);
   } catch (err) {
     // Redact like the tool path does: a misbehaving provider can echo request headers (the
     // API key) into an error body, and this message persists in run_events AND — via the
@@ -181,17 +198,22 @@ async function runLeafWithTools(
 async function runToolLoop(
   messages: ChatMessage[],
   tools: readonly ExecutableTool[],
-  resolved: ResolvedModel,
+  opts: AgentOptions | undefined,
   io: LeafIo,
   turnId: string,
   totals: { inputTokens: number; outputTokens: number },
 ): Promise<string> {
   for (let iteration = 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
-    const turn = await modelTurn(messages, tools, resolved, io, turnId, iteration);
+    // Bound the context BEFORE each model call: a long loop (or one fat tool result) grows
+    // `messages` until the provider rejects it. Compaction summarizes the oldest middle in place,
+    // keeping the task framing + the latest exchanges verbatim. Its own model call is metered.
+    await compactIfNeeded(messages, opts, io);
+
+    const { turn, modelRef } = await modelTurn(messages, tools, opts, io, turnId, iteration);
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
     totals.outputTokens += turn.usage.outputTokens ?? 0;
-    io.reportUsage(resolved.model, turn.usage);
+    io.reportUsage(modelRef, turn.usage);
 
     if (!turn.wantsTools || turn.toolCalls.length === 0) {
       return turn.text;
@@ -211,15 +233,105 @@ async function runToolLoop(
   );
 }
 
+/**
+ * If the conversation has outgrown the budget, replace its oldest compressible middle with one
+ * model-written summary message, IN PLACE. Pure boundary math (planCompaction) decides the range;
+ * a focused model call produces the summary; the result re-enters context as a `user` message
+ * clearly marked as a digest of earlier turns (subject to the seam's redaction like any other
+ * model-bound message). No-op when already within budget or when there is no compressible middle.
+ *
+ * Loop safety: this runs the conversation through `planCompaction` ONCE per iteration. If a single
+ * giant message still leaves the result over budget, we do not re-compress in a tight loop — we
+ * proceed with what we compressed and let the provider speak (a too-large request surfaces as a
+ * normal PROVIDER_ERROR). The next iteration gets a fresh shot once the loop adds new turns.
+ */
+async function compactIfNeeded(
+  messages: ChatMessage[],
+  opts: AgentOptions | undefined,
+  io: LeafIo,
+): Promise<void> {
+  const plan = planCompaction(messages, DEFAULT_COMPACTION_BUDGET_CHARS);
+  if (plan === null) return;
+
+  const compressed = messages.slice(plan.start, plan.end + 1);
+  const summary = await summarizeRange(compressed, opts, io);
+  // Splice the compressed range out, drop ONE summary message in its place. The first message and
+  // the recent tail (everything outside [start, end]) are untouched — preserved verbatim.
+  messages.splice(plan.start, compressed.length, {
+    role: "user",
+    text: io.redactor.redact(summary),
+  });
+}
+
+/** The instruction that turns a slice of transcript into a forward-useful digest. */
+const SUMMARIZATION_PROMPT =
+  "You are compacting the middle of a longer agent transcript to fit a context window. " +
+  "Write a faithful summary of the conversation below so the agent can continue without it. " +
+  "Preserve: decisions made, facts and values learned, tool outputs that still matter, and any " +
+  "open threads or next steps. Drop only redundancy. Output the summary text only, no preamble.";
+
+/**
+ * Summarize a slice of the transcript via the SAME model seam the loop uses, so the call routes
+ * and meters exactly like a normal turn (its usage is real spend — reported to the budget
+ * authority). Tools are advertised as none: this is a read-then-write turn, not an agentic step.
+ */
+async function summarizeRange(
+  compressed: readonly ChatMessage[],
+  opts: AgentOptions | undefined,
+  io: LeafIo,
+): Promise<string> {
+  const transcript = serializeForSummary(compressed);
+  const req: ModelTurnRequest = {
+    model: opts?.model,
+    provider: opts?.provider,
+    messages: [
+      { role: "user", text: io.redactor.redact(`${SUMMARIZATION_PROMPT}\n\n${transcript}`) },
+    ],
+    tools: [],
+  };
+  // No streaming hooks: summary deltas aren't this leaf's user-visible text. providerIo still
+  // carries the loop's fetch/sleep impls so the call goes out exactly as a real turn does.
+  const { turn, modelRef } = await io.streamModel(req, { ...io.provider });
+  io.reportUsage(modelRef, turn.usage);
+  return turn.text;
+}
+
+/** Flatten a transcript slice into plain text for the summarizer — roles labeled, tool I/O inline. */
+function serializeForSummary(messages: readonly ChatMessage[]): string {
+  const parts: string[] = [];
+  for (const message of messages) {
+    switch (message.role) {
+      case "user":
+        parts.push(`User: ${message.text}`);
+        break;
+      case "assistant": {
+        const calls = message.toolCalls
+          .map((call) => `${call.name}(${JSON.stringify(call.input)})`)
+          .join(", ");
+        parts.push(
+          `Assistant: ${message.text}${calls.length > 0 ? `\n[tool calls: ${calls}]` : ""}`,
+        );
+        break;
+      }
+      case "tool_results":
+        for (const result of message.results) {
+          parts.push(`Tool result (${result.isError ? "error" : "ok"}): ${result.content}`);
+        }
+        break;
+    }
+  }
+  return parts.join("\n\n");
+}
+
 /** One model call with streamed text events (block ids are unique per iteration). */
 async function modelTurn(
   messages: readonly ChatMessage[],
   tools: readonly ExecutableTool[],
-  resolved: ResolvedModel,
+  opts: AgentOptions | undefined,
   io: LeafIo,
   turnId: string,
   iteration: number,
-): Promise<ChatTurn> {
+): Promise<ModelTurnResult> {
   const blockId = `text-${String(iteration)}`;
   let blockOpen = false;
   const providerIo: ProviderIo = {
@@ -232,20 +344,21 @@ async function modelTurn(
       io.emit(turnId, { kind: "text_delta", blockId, text: io.redactor.redact(text) });
     },
   };
-  const args: ChatArgs = {
-    baseUrl: resolved.baseUrl,
-    apiKey: resolved.apiKey,
-    headers: resolved.headers,
-    model: resolved.model,
-    messages,
-    tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
-  };
-  const turn =
-    resolved.protocol === "anthropic"
-      ? await chatAnthropic(args, providerIo)
-      : await chatOpenAi(args, providerIo);
+  const result = await io.streamModel(
+    {
+      model: opts?.model,
+      provider: opts?.provider,
+      messages,
+      tools: tools.map(({ name, description, inputSchema }) => ({
+        name,
+        description,
+        inputSchema,
+      })),
+    },
+    providerIo,
+  );
   if (blockOpen) io.emit(turnId, { kind: "text_end", blockId });
-  return turn;
+  return result;
 }
 
 /** Run one tool call; failures return to the MODEL as error results, they don't fail the run. */

@@ -171,13 +171,23 @@ export const resolvedModelSchema = z.strictObject({
   provider: z.string().min(1),
   /** Opaque — passed verbatim to the provider; never parsed. */
   model: z.string().min(1),
-  protocol: z.enum(["anthropic", "openai"]),
+  protocol: z.enum(["anthropic", "openai", "bedrock"]),
   baseUrl: z.string().min(1),
   apiKey: z.string().nullable(),
   /** Extra request headers, resolved supervisor-side. */
   headers: z.record(z.string(), z.string()),
   /** Header names whose values are env-sourced — the leaf redacts them like the API key. */
   secretHeaderNames: z.array(z.string()),
+  /** AWS region + SigV4 credentials — present only for protocol "bedrock". The secret values
+   *  (secretAccessKey/sessionToken) are registered with the redactor child-side, like the key. */
+  aws: z
+    .strictObject({
+      region: z.string().min(1),
+      accessKeyId: z.string().min(1),
+      secretAccessKey: z.string().min(1),
+      sessionToken: z.string().min(1).optional(),
+    })
+    .optional(),
 });
 /**
  * mcp_token: the child asks the engine for an OAuth bearer token for an MCP server (token

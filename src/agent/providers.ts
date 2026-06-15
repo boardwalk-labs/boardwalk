@@ -28,6 +28,15 @@ export interface ChatArgs {
   tools: readonly ToolSpec[];
   /** Anthropic requires max_tokens; this default is deliberately generous. */
   maxTokens?: number;
+  /** AWS region + SigV4 credentials — present only for the bedrock protocol (chatBedrock). */
+  aws?:
+    | {
+        region: string;
+        accessKeyId: string;
+        secretAccessKey: string;
+        sessionToken?: string | undefined;
+      }
+    | undefined;
 }
 
 /** Injectable effects so adapter logic is unit-testable without a network or real waits. */
@@ -43,7 +52,7 @@ const RETRY_ATTEMPTS = 5;
 const RETRY_BASE_MS = 500;
 
 /** An HTTP failure that carries its status so the retry policy can classify it. */
-class ProviderHttpError extends Error {
+export class ProviderHttpError extends Error {
   readonly status: number;
   constructor(status: number, body: string) {
     super(`provider returned ${String(status)}: ${body.slice(0, 300)}`);
@@ -54,6 +63,32 @@ class ProviderHttpError extends Error {
 // ----------------------------------------------------------------------------
 // Anthropic Messages API (streaming)
 // ----------------------------------------------------------------------------
+
+/**
+ * The Anthropic Messages request body, MINUS the transport-specific fields (`model`, `stream`,
+ * and — for Bedrock — `anthropic_version`). Shared so the BYO Bedrock adapter (bedrock.ts) builds
+ * the exact same body: Bedrock speaks the Anthropic Messages schema but takes the model from the
+ * URL and stamps its own `anthropic_version`.
+ */
+export function anthropicMessagesBody(args: {
+  messages: readonly ChatMessage[];
+  tools: readonly ToolSpec[];
+  maxTokens?: number;
+}): Record<string, unknown> {
+  return {
+    max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
+    messages: anthropicMessages(args.messages),
+    ...(args.tools.length > 0
+      ? {
+          tools: args.tools.map((tool) => ({
+            name: tool.name,
+            description: tool.description,
+            input_schema: tool.inputSchema,
+          })),
+        }
+      : {}),
+  };
+}
 
 function anthropicMessages(messages: readonly ChatMessage[]): unknown[] {
   return messages.map((message) => {
@@ -122,18 +157,8 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
       },
       body: JSON.stringify({
         model: args.model,
-        max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
         stream: true,
-        messages: anthropicMessages(args.messages),
-        ...(args.tools.length > 0
-          ? {
-              tools: args.tools.map((tool) => ({
-                name: tool.name,
-                description: tool.description,
-                input_schema: tool.inputSchema,
-              })),
-            }
-          : {}),
+        ...anthropicMessagesBody(args),
       }),
     });
     if (!res.ok) throw new ProviderHttpError(res.status, await res.text());
@@ -338,8 +363,8 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
 // Shared plumbing
 // ----------------------------------------------------------------------------
 
-/** Model-produced tool input is untrusted: parse, demand a JSON object. */
-function parseToolInput(raw: string, toolName: string): Record<string, unknown> {
+/** Model-produced tool input is untrusted: parse, demand a JSON object. Shared with bedrock.ts. */
+export function parseToolInput(raw: string, toolName: string): Record<string, unknown> {
   const value = raw.trim().length === 0 ? {} : safeJson(raw);
   if (isPlainObject(value) && isJsonValue(value)) {
     return value;
@@ -350,8 +375,9 @@ function parseToolInput(raw: string, toolName: string): Record<string, unknown> 
   );
 }
 
-/** Retry transient failures (429/5xx/network) with exponential backoff + jitter. */
-async function withRetry<T>(io: ProviderIo, fn: () => Promise<T>): Promise<T> {
+/** Retry transient failures (429/5xx/network) with exponential backoff + jitter. Shared with
+ *  bedrock.ts so every adapter classifies + backs off identically. */
+export async function withRetry<T>(io: ProviderIo, fn: () => Promise<T>): Promise<T> {
   const sleep = io.sleepImpl ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   let lastError: unknown;
   for (let attempt = 0; attempt < RETRY_ATTEMPTS; attempt++) {
@@ -381,7 +407,7 @@ async function withRetry<T>(io: ProviderIo, fn: () => Promise<T>): Promise<T> {
   );
 }
 
-function safeJson(text: string): unknown {
+export function safeJson(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch {

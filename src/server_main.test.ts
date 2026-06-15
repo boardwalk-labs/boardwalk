@@ -147,6 +147,43 @@ describe("loadServerConfig", () => {
     });
   });
 
+  it("parses a BYO bedrock provider: protocol + aws, no base_url required", () => {
+    const config = loadServerConfig({
+      BOARDWALK_PROVIDERS: JSON.stringify({
+        bedrock: {
+          protocol: "bedrock",
+          aws: {
+            region: "us-east-1",
+            access_key_id_env: "AWS_ACCESS_KEY_ID",
+            secret_access_key_env: "AWS_SECRET_ACCESS_KEY",
+            session_token_env: "AWS_SESSION_TOKEN",
+          },
+        },
+      }),
+    });
+    expect(config.inference?.providers).toStrictEqual({
+      bedrock: {
+        protocol: "bedrock",
+        aws: {
+          region: "us-east-1",
+          access_key_id_env: "AWS_ACCESS_KEY_ID",
+          secret_access_key_env: "AWS_SECRET_ACCESS_KEY",
+          session_token_env: "AWS_SESSION_TOKEN",
+        },
+      },
+    });
+  });
+
+  it("rejects a bedrock provider with no aws config, naming the path", () => {
+    const err = captureEngineError(() =>
+      loadServerConfig({
+        BOARDWALK_PROVIDERS: JSON.stringify({ bedrock: { protocol: "bedrock" } }),
+      }),
+    );
+    expect(err.code).toBe("VALIDATION");
+    expect(err.message).toContain("bedrock.aws");
+  });
+
   it("parses provider headers: static strings and { from_env } refs", () => {
     const config = loadServerConfig({
       BOARDWALK_PROVIDERS: JSON.stringify({
