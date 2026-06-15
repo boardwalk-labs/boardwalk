@@ -40,7 +40,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "tool-user", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "tool-user", triggers: [{ kind: "manual" }] };
         const table = { answer: "tool-answer-9b1c" };
         output(await agent("look it up", {
           model: "test-model",
@@ -73,7 +73,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "memory-keeper", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "memory-keeper", triggers: [{ kind: "manual" }] };
         output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));
       `,
     });
@@ -105,7 +105,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "skilled", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "skilled", triggers: [{ kind: "manual" }] };
         output(await agent("inspect the boat", {
           model: "test-model",
           skills: ["review-checklist"],
@@ -124,7 +124,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { name: "memory-escape", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "memory-escape", triggers: [{ kind: "manual" }] };
         await agent("hi", { model: "test-model", memory: "../outside" });
       `,
     });
@@ -139,7 +139,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { name: "wants-builtin", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "wants-builtin", triggers: [{ kind: "manual" }] };
         await agent("search", { model: "test-model", tools: ["definitely_not_a_tool"] });
       `,
     });
@@ -154,7 +154,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { name: "wants-skill", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "wants-skill", triggers: [{ kind: "manual" }] };
         await agent("go", { model: "test-model", skills: ["nonexistent"] });
       `,
     });
@@ -169,7 +169,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { name: "wants-mcp", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "wants-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
           model: "test-model",
           // Nothing listens here — the named server must resolve, never silently degrade.
@@ -187,7 +187,7 @@ describe("conformance: agent() capabilities", () => {
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { name: "bad-mcp", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "bad-mcp", triggers: [{ kind: "manual" }] };
         await agent("search", {
           model: "test-model",
           mcp: [{ name: "gh", transport: "http", url: "not a url" }],

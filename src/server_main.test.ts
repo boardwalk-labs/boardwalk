@@ -296,7 +296,7 @@ describe("startServer", () => {
     writeFileSync(
       join(workflowsDir, "from-dir.mjs"),
       `import { output } from "@boardwalk-labs/workflow";
-       export const meta = { name: "from-dir", triggers: [{ kind: "manual" }] };
+       export const meta = { slug: "from-dir", triggers: [{ kind: "manual" }] };
        output({ deployed: true });`,
     );
     // A non-workflow file in the dir must be skipped, not crash the boot.

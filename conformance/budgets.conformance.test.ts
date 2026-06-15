@@ -31,7 +31,7 @@ describe("conformance: budgets terminate the run", () => {
       program: `
         import { sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "overruns",
+          slug: "overruns",
           triggers: [{ kind: "manual" }],
           budget: { max_duration_seconds: 1 },
         };
@@ -54,7 +54,7 @@ describe("conformance: budgets terminate the run", () => {
       program: `
         import { agent, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "overspender",
+          slug: "overspender",
           triggers: [{ kind: "manual" }],
           budget: { max_usd: 0.01 },
         };
@@ -76,7 +76,7 @@ describe("conformance: budgets terminate the run", () => {
       program: `
         import { agent, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "token-hog",
+          slug: "token-hog",
           triggers: [{ kind: "manual" }],
           budget: { max_tokens: 1000 },
         };

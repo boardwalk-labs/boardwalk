@@ -54,7 +54,7 @@ function fixture(opts?: { env?: Record<string, string>; maxRestarts?: number }):
 
   const deploy = (name: string, program: string, meta?: Partial<WorkflowManifest>): string => {
     const manifest = workflowManifestSchema.parse({
-      name,
+      slug: name,
       triggers: [{ kind: "manual" }],
       ...meta,
     });

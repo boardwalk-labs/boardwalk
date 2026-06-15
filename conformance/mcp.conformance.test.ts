@@ -49,7 +49,7 @@ function deployMcpUser(engine: ReturnType<typeof createEngine>["engine"], url: s
     program: `
       import { agent, output, secrets } from "@boardwalk-labs/workflow";
       export const meta = {
-        name: "mcp-user",
+        slug: "mcp-user",
         triggers: [{ kind: "manual" }],
         permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
       };

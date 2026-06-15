@@ -128,11 +128,11 @@ function fixture(env: Record<string, string> = {}): {
     input?: unknown,
   ): Promise<string> => {
     const manifest = workflowManifestSchema.parse({
-      name,
+      slug: name,
       triggers: [{ kind: "manual" }],
       ...meta,
     });
-    const workflow = store.upsertWorkflow({ name: manifest.name, manifest, program });
+    const workflow = store.upsertWorkflow({ name: manifest.slug, manifest, program });
     const { run: row } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",

@@ -44,7 +44,7 @@ describe("conformance: secret redaction canary", () => {
       program: `
         import { agent, output, secrets } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "leaky",
+          slug: "leaky",
           triggers: [{ kind: "manual" }],
           permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
         };

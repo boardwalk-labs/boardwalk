@@ -18,7 +18,7 @@ describe("conformance: cancellation", () => {
     engine.deployWorkflow({
       program: `
         import { sleep } from "@boardwalk-labs/workflow";
-        export const meta = { name: "long-sleeper", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "long-sleeper", triggers: [{ kind: "manual" }] };
         await sleep(60_000);
       `,
     });
@@ -49,7 +49,7 @@ describe("conformance: cancellation", () => {
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "serial-sleeper",
+          slug: "serial-sleeper",
           triggers: [{ kind: "manual" }],
           concurrency: { mode: "serial" },
         };

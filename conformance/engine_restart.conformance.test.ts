@@ -29,7 +29,7 @@ describe("conformance: engine restart while a run sleeps", () => {
     first.engine.deployWorkflow({
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { name: "long-sleeper", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "long-sleeper", triggers: [{ kind: "manual" }] };
         await sleep(3_000);
         output("slept");
       `,

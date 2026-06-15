@@ -55,7 +55,7 @@ function fixture(startMs = T0): Fixture {
     config?: Record<string, string>,
   ): string => {
     const manifest = workflowManifestSchema.parse({
-      name,
+      slug: name,
       triggers: [{ kind: "cron", expr: "* * * * *" }],
       ...meta,
     });

@@ -18,7 +18,7 @@ const HOURS = 3_600_000;
 
 const CRON_PROGRAM = `
 import { output } from "@boardwalk-labs/workflow";
-export const meta = { name: "tick-tock", triggers: [{ kind: "cron", expr: "* * * * *" }] };
+export const meta = { slug: "tick-tock", triggers: [{ kind: "cron", expr: "* * * * *" }] };
 output("fired");
 `;
 

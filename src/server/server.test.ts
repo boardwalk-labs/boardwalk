@@ -27,7 +27,7 @@ const childEntryPath = join(repoRoot, "dist", "run", "child.js");
 const ECHO_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
-  name: "echo",
+  slug: "echo",
   description: "echoes its input",
   triggers: [{ kind: "manual" }],
 };
@@ -37,7 +37,7 @@ output({ echoed: input ?? null });
 
 const SLOW_PROGRAM = `
 import { output, sleep, phase } from "@boardwalk-labs/workflow";
-export const meta = { name: "slow", triggers: [{ kind: "manual" }] };
+export const meta = { slug: "slow", triggers: [{ kind: "manual" }] };
 phase("working");
 await sleep(400);
 output("slow-done");
@@ -45,7 +45,7 @@ output("slow-done");
 
 const NAP_PROGRAM = `
 import { output, sleep } from "@boardwalk-labs/workflow";
-export const meta = { name: "nap", triggers: [{ kind: "manual" }] };
+export const meta = { slug: "nap", triggers: [{ kind: "manual" }] };
 await sleep(5000);
 output("never-finished");
 `;
@@ -53,7 +53,7 @@ output("never-finished");
 const TOKEN_HOOK_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
-  name: "token-hook",
+  slug: "token-hook",
   triggers: [{ kind: "webhook", auth: "token" }, { kind: "manual" }],
 };
 output(input ?? null);
@@ -61,7 +61,7 @@ output(input ?? null);
 
 const SIGNED_HOOK_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
-export const meta = { name: "signed-hook", triggers: [{ kind: "webhook", auth: "signature" }] };
+export const meta = { slug: "signed-hook", triggers: [{ kind: "webhook", auth: "signature" }] };
 output(input ?? null);
 `;
 

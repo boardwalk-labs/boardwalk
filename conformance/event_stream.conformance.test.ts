@@ -58,7 +58,7 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
   engine.deployWorkflow({
     program: `
       import { phase, agent, output } from "@boardwalk-labs/workflow";
-      export const meta = { name: "rich", triggers: [{ kind: "manual" }] };
+      export const meta = { slug: "rich", triggers: [{ kind: "manual" }] };
       phase("gather");
       console.log("stdout line");
       console.error("stderr line");

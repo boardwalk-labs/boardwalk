@@ -143,7 +143,7 @@ export class Engine {
     this.assertOpen();
     const manifest: WorkflowManifest = extractManifest(args.program, { fileName: "index.mjs" });
     const workflow = this.store.upsertWorkflow({
-      name: manifest.name,
+      name: manifest.slug,
       manifest,
       program: args.program,
       ...(args.config !== undefined ? { config: args.config } : {}),

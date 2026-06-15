@@ -19,7 +19,7 @@ describe("conformance: concurrency", () => {
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "one-by-one",
+          slug: "one-by-one",
           triggers: [{ kind: "manual" }],
           concurrency: { mode: "serial" },
         };
@@ -58,7 +58,7 @@ describe("conformance: concurrency", () => {
     engine.deployWorkflow({
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { name: "parallel-ok", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "parallel-ok", triggers: [{ kind: "manual" }] };
         await sleep(800);
         output("done");
       `,

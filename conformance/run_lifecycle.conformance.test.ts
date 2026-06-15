@@ -20,7 +20,7 @@ afterEach(disposeEngines);
 
 const ECHO_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
-export const meta = { name: "echo", triggers: [{ kind: "manual" }] };
+export const meta = { slug: "echo", triggers: [{ kind: "manual" }] };
 output({ echoed: input });
 `;
 
@@ -61,7 +61,7 @@ describe("conformance: run lifecycle", () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
-        export const meta = { name: "boom", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "boom", triggers: [{ kind: "manual" }] };
         throw new Error("conformance kaboom: the dataset is empty");
       `,
     });
@@ -87,7 +87,7 @@ describe("conformance: run lifecycle", () => {
     engine.deployWorkflow({
       program: `
         import { output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "verdict", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "verdict", triggers: [{ kind: "manual" }] };
         output({ healthy: false, reason: "deadline passed" });
         throw new Error("target was not healthy in time");
       `,

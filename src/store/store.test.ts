@@ -49,7 +49,7 @@ function corruptColumn(path: string, sql: string): void {
 }
 
 function makeManifest(name: string): WorkflowManifest {
-  return validateMeta({ name, triggers: [{ kind: "manual" }] });
+  return validateMeta({ slug: name, triggers: [{ kind: "manual" }] });
 }
 
 function seedWorkflow(store: Store, name = "merge-conflict-resolver"): { id: string } {

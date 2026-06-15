@@ -39,7 +39,7 @@ function makeEngine(env: Record<string, string> = {}): Engine {
 const ECHO_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
-  name: "echo",
+  slug: "echo",
   description: "echoes its input",
   triggers: [{ kind: "manual" }],
 };
@@ -57,7 +57,7 @@ describe("Engine facade", () => {
 
   it("rejects a program whose meta is not a pure literal", () => {
     const engine = makeEngine();
-    const bad = `const x = 1; export const meta = { name: "n" + x, triggers: [{ kind: "manual" }] };
+    const bad = `const x = 1; export const meta = { slug: "n" + x, triggers: [{ kind: "manual" }] };
        export default async function run() {}`;
     expect(() => engine.deployWorkflow({ program: bad })).toThrow();
   });
@@ -118,7 +118,7 @@ describe("Engine facade", () => {
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
         export const meta = {
-          name: "one-by-one",
+          slug: "one-by-one",
           triggers: [{ kind: "manual" }],
           concurrency: { mode: "serial" },
         };

@@ -20,7 +20,7 @@ describe("conformance: crash-restart", () => {
       program: `
         import { existsSync, writeFileSync } from "node:fs";
         import { output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "flaky", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "flaky", triggers: [{ kind: "manual" }] };
         if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
         output("recovered");
       `,
@@ -47,7 +47,7 @@ describe("conformance: crash-restart", () => {
     const { engine } = createEngine({ maxRestarts: 1 });
     engine.deployWorkflow({
       program: `
-        export const meta = { name: "always-crashes", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "always-crashes", triggers: [{ kind: "manual" }] };
         process.exit(3);
       `,
     });

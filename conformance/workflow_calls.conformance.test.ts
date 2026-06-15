@@ -22,14 +22,14 @@ describe("conformance: workflows.call / workflows.run", () => {
     engine.deployWorkflow({
       program: `
         import { input, output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "double", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "double", triggers: [{ kind: "manual" }] };
         output({ doubled: input.n * 2 });
       `,
     });
     engine.deployWorkflow({
       program: `
         import { output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { name: "caller", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "caller", triggers: [{ kind: "manual" }] };
         output(await workflows.call("double", { n: 21 }));
       `,
     });
@@ -49,7 +49,7 @@ describe("conformance: workflows.call / workflows.run", () => {
       program: `
         import { appendFileSync } from "node:fs";
         import { input, output } from "@boardwalk-labs/workflow";
-        export const meta = { name: "child-counter", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "child-counter", triggers: [{ kind: "manual" }] };
         appendFileSync(input.countFile, "x");
         output("child-result");
       `,
@@ -60,7 +60,7 @@ describe("conformance: workflows.call / workflows.run", () => {
       program: `
         import { existsSync, writeFileSync } from "node:fs";
         import { input, output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { name: "crashy-parent", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "crashy-parent", triggers: [{ kind: "manual" }] };
         const result = await workflows.call("child-counter", { countFile: input.countFile });
         if (!existsSync("crashed-once")) { writeFileSync("crashed-once", "1"); process.exit(9); }
         output({ childSaid: result });
@@ -85,7 +85,7 @@ describe("conformance: workflows.call / workflows.run", () => {
     engine.deployWorkflow({
       program: `
         import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { name: "slow-child", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "slow-child", triggers: [{ kind: "manual" }] };
         await sleep(1_200);
         output("late");
       `,
@@ -93,7 +93,7 @@ describe("conformance: workflows.call / workflows.run", () => {
     engine.deployWorkflow({
       program: `
         import { output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { name: "fire-and-forget", triggers: [{ kind: "manual" }] };
+        export const meta = { slug: "fire-and-forget", triggers: [{ kind: "manual" }] };
         output({ childRunId: await workflows.run("slow-child", {}) });
       `,
     });
