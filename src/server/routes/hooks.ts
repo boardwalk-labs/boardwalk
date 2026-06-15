@@ -6,7 +6,7 @@
 //   token auth:     BOARDWALK_WEBHOOK_TOKEN__<NAME>   vs  `Authorization: Bearer <token>`
 //   signature auth: BOARDWALK_WEBHOOK_SECRET__<NAME>  vs  `X-Boardwalk-Signature: sha256=<hex>`
 //                   (HMAC-SHA256 over the raw request body)
-// where <NAME> is the workflow name upper-cased with `-` → `_`. Missing variable = 503 (fail
+// where <NAME> is the workflow slug upper-cased with `-` → `_`. Missing variable = 503 (fail
 // closed, hint names the variable); bad credential = 401. These are server config, not
 // workflow secrets, so they resolve from process.env — never from the engine's env map.
 
@@ -24,7 +24,7 @@ import type { RouteContext } from "./router.js";
 
 export async function handleWebhook(
   ctx: RouteContext,
-  workflowName: string,
+  slug: string,
   triggerIndexRaw: string,
 ): Promise<void> {
   // The raw body is read up front: signature auth signs the exact bytes on the wire, before
@@ -36,26 +36,26 @@ export async function handleWebhook(
   const notFound = new HttpError(
     404,
     "NOT_FOUND",
-    `No webhook trigger at /hooks/${workflowName}/${triggerIndexRaw}.`,
+    `No webhook trigger at /hooks/${slug}/${triggerIndexRaw}.`,
   );
-  const workflow = ctx.engine.store.getWorkflow(workflowName);
+  const workflow = ctx.engine.store.getWorkflow(slug);
   if (workflow === null) throw notFound;
   if (!/^\d+$/.test(triggerIndexRaw)) throw notFound;
   const trigger = workflow.manifest.triggers[Number(triggerIndexRaw)];
   if (trigger === undefined || trigger.kind !== "webhook") throw notFound;
 
-  if (trigger.auth === "token") authorizeToken(ctx.req, workflowName);
-  else authorizeSignature(ctx.req, workflowName, rawBody);
+  if (trigger.auth === "token") authorizeToken(ctx.req, slug);
+  else authorizeSignature(ctx.req, slug, rawBody);
 
   const input =
     rawBody.length === 0 ? null : parseJsonBody(rawBody, jsonValueSchema, "webhook payload");
-  const run = ctx.engine.startRun(workflowName, { input, triggerKind: "webhook" });
+  const run = ctx.engine.startRun(slug, { input, triggerKind: "webhook" });
   sendJson(ctx.res, 201, { run: { id: run.id, status: run.status } });
 }
 
-/** `BOARDWALK_WEBHOOK_<kind>__<NAME>`: the workflow name upper-cased, hyphens → underscores. */
-function webhookEnvVarName(kind: "TOKEN" | "SECRET", workflowName: string): string {
-  return `BOARDWALK_WEBHOOK_${kind}__${workflowName.toUpperCase().replaceAll("-", "_")}`;
+/** `BOARDWALK_WEBHOOK_<kind>__<NAME>`: the workflow slug upper-cased, hyphens → underscores. */
+function webhookEnvVarName(kind: "TOKEN" | "SECRET", slug: string): string {
+  return `BOARDWALK_WEBHOOK_${kind}__${slug.toUpperCase().replaceAll("-", "_")}`;
 }
 
 /**
@@ -63,14 +63,14 @@ function webhookEnvVarName(kind: "TOKEN" | "SECRET", workflowName: string): stri
  * webhook that nobody configured must never become an open trigger. Read lazily per request
  * so an operator can fix the environment without redeploying workflows.
  */
-function requiredCredential(kind: "TOKEN" | "SECRET", workflowName: string): string {
-  const name = webhookEnvVarName(kind, workflowName);
+function requiredCredential(kind: "TOKEN" | "SECRET", slug: string): string {
+  const name = webhookEnvVarName(kind, slug);
   const value = process.env[name];
   if (value === undefined || value === "") {
     throw new HttpError(
       503,
       "WEBHOOK_UNCONFIGURED",
-      `Webhook auth for workflow "${workflowName}" is not configured on this server.`,
+      `Webhook auth for workflow "${slug}" is not configured on this server.`,
       `Set the environment variable ${name} and restart the server.`,
     );
   }
@@ -82,15 +82,15 @@ function unauthorized(): HttpError {
   return new HttpError(401, "UNAUTHORIZED", "Invalid webhook credentials.");
 }
 
-function authorizeToken(req: IncomingMessage, workflowName: string): void {
-  const expected = requiredCredential("TOKEN", workflowName);
+function authorizeToken(req: IncomingMessage, slug: string): void {
+  const expected = requiredCredential("TOKEN", slug);
   const header = req.headers.authorization;
   if (header === undefined || !header.startsWith("Bearer ")) throw unauthorized();
   if (!constantTimeEquals(header.slice("Bearer ".length), expected)) throw unauthorized();
 }
 
-function authorizeSignature(req: IncomingMessage, workflowName: string, rawBody: Buffer): void {
-  const secret = requiredCredential("SECRET", workflowName);
+function authorizeSignature(req: IncomingMessage, slug: string, rawBody: Buffer): void {
+  const secret = requiredCredential("SECRET", slug);
   const header = req.headers["x-boardwalk-signature"];
   if (typeof header !== "string") throw unauthorized();
   const match = /^sha256=([0-9a-f]{64})$/i.exec(header);

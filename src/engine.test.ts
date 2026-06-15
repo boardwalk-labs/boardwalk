@@ -62,7 +62,7 @@ describe("Engine facade", () => {
     expect(() => engine.deployWorkflow({ program: bad })).toThrow();
   });
 
-  it("redeploy by name keeps the workflow id and replaces the program", () => {
+  it("redeploy by slug keeps the workflow id and replaces the program", () => {
     const engine = makeEngine();
     const first = engine.deployWorkflow({ program: ECHO_PROGRAM });
     const second = engine.deployWorkflow({

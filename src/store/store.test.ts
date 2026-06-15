@@ -116,7 +116,7 @@ describe("Store: workflows", () => {
     expect(row.config).toEqual({});
   });
 
-  it("updates by name: id and created_at stable, updated_at bumps, content replaced", () => {
+  it("updates by slug: id and created_at stable, updated_at bumps, content replaced", () => {
     const store = openStore();
     const first = store.upsertWorkflow({
       slug: "wf",
@@ -147,7 +147,7 @@ describe("Store: workflows", () => {
     expect(store.getWorkflow("wf")).toBeNull();
   });
 
-  it("returns null for unknown workflows and lists by name", () => {
+  it("returns null for unknown workflows and lists by slug", () => {
     const store = openStore();
     expect(store.getWorkflow("nope")).toBeNull();
     expect(store.getWorkflowById("nope")).toBeNull();

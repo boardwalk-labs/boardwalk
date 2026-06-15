@@ -67,15 +67,11 @@ export function handleListRuns(ctx: RouteContext): void {
     limit: parseNonNegativeInt(ctx.url, "limit", DEFAULT_RUNS_LIMIT),
     offset: parseNonNegativeInt(ctx.url, "offset", 0),
   };
-  const workflowName = ctx.url.searchParams.get("workflow");
-  if (workflowName !== null) {
-    const workflow = ctx.engine.store.getWorkflow(workflowName);
+  const slug = ctx.url.searchParams.get("workflow");
+  if (slug !== null) {
+    const workflow = ctx.engine.store.getWorkflow(slug);
     if (workflow === null) {
-      throw new HttpError(
-        404,
-        "NOT_FOUND",
-        `Workflow "${workflowName}" is not deployed on this engine.`,
-      );
+      throw new HttpError(404, "NOT_FOUND", `Workflow "${slug}" is not deployed on this engine.`);
     }
     filter.workflowId = workflow.id;
   }
@@ -94,12 +90,12 @@ export function handleListRuns(ctx: RouteContext): void {
   sendJson(ctx.res, 200, { runs: ctx.engine.store.listRuns(filter) });
 }
 
-/** POST /api/workflows/:name/runs — start a manual run; 201 with the queued row. */
-export async function handleStartRun(ctx: RouteContext, workflowName: string): Promise<void> {
+/** POST /api/workflows/:slug/runs — start a manual run; 201 with the queued row. */
+export async function handleStartRun(ctx: RouteContext, slug: string): Promise<void> {
   const raw = await readBody(ctx.req, MAX_BODY_BYTES);
   // An empty body means "no input" — the curl-without-data ergonomics of a run-now button.
   const body = raw.length === 0 ? {} : parseJsonBody(raw, startRunBodySchema, "run-start body");
-  const run = ctx.engine.startRun(workflowName, {
+  const run = ctx.engine.startRun(slug, {
     triggerKind: "manual",
     ...(body.input !== undefined ? { input: body.input } : {}),
   });

@@ -171,7 +171,7 @@ export function loadServerConfig(env: Record<string, string | undefined>): Serve
 /**
  * Deploy every built workflow in `dir` on boot — the self-host deploy mechanism. Each `.mjs`/`.js`
  * file is one workflow's program (single-file, `@boardwalk-labs/workflow` external — what
- * `boardwalk build` emits). Idempotent by manifest name (re-boot re-syncs the dir into the store);
+ * `boardwalk build` emits). Idempotent by manifest slug (re-boot re-syncs the dir into the store);
  * a removed file leaves its last-deployed workflow in place (no un-deploy in v0). A missing dir is
  * fine (an operator may deploy by other means); a bad file is logged and skipped, never fatal.
  */

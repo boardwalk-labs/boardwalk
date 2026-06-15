@@ -635,7 +635,7 @@ export class RunSupervisor {
       throw new EngineError(
         "NOT_FOUND",
         `workflows.call target "${slug}" is not deployed on this engine.`,
-        `Deploy it first — the engine only runs workflows it knows by name.`,
+        `Deploy it first — the engine only runs workflows it knows by slug.`,
       );
     }
     // Crossed the JSON IPC channel, but narrow instead of assuming — and

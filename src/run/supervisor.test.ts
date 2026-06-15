@@ -24,7 +24,7 @@ interface Fixture {
   dataDir: string;
   events: EventRow[];
   deploy: (name: string, program: string, meta?: Partial<WorkflowManifest>) => string;
-  startRun: (workflowName: string, input?: unknown) => string;
+  startRun: (slug: string, input?: unknown) => string;
 }
 
 const cleanups: (() => void)[] = [];
@@ -60,9 +60,9 @@ function fixture(opts?: { env?: Record<string, string>; maxRestarts?: number }):
     });
     return store.upsertWorkflow({ slug: name, manifest, program }).id;
   };
-  const startRun = (workflowName: string, input?: unknown): string => {
-    const workflow = store.getWorkflow(workflowName);
-    if (workflow === null) throw new Error(`not deployed: ${workflowName}`);
+  const startRun = (slug: string, input?: unknown): string => {
+    const workflow = store.getWorkflow(slug);
+    if (workflow === null) throw new Error(`not deployed: ${slug}`);
     const { run } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",

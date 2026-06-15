@@ -135,7 +135,7 @@ export class Engine {
   }
 
   /**
-   * Deploy (or redeploy, by manifest name) a workflow from its bundled program source. The
+   * Deploy (or redeploy, by manifest slug) a workflow from its bundled program source. The
    * manifest is DERIVED from the program's pure-literal `meta` — the program file is the
    * author's source of truth, manifest drift is impossible by construction.
    */
@@ -167,17 +167,11 @@ export class Engine {
    * Queue a run and dispatch it through the concurrency gate. Returns the queued row
    * immediately; `waitForRun` for the terminal row.
    */
-  startRun(
-    workflowName: string,
-    opts: { input?: JsonValue; triggerKind?: TriggerKind } = {},
-  ): RunRow {
+  startRun(slug: string, opts: { input?: JsonValue; triggerKind?: TriggerKind } = {}): RunRow {
     this.assertOpen();
-    const workflow = this.store.getWorkflow(workflowName);
+    const workflow = this.store.getWorkflow(slug);
     if (workflow === null) {
-      throw new EngineError(
-        "NOT_FOUND",
-        `Workflow "${workflowName}" is not deployed on this engine.`,
-      );
+      throw new EngineError("NOT_FOUND", `Workflow "${slug}" is not deployed on this engine.`);
     }
     const { run } = this.store.createRun({
       workflowId: workflow.id,
