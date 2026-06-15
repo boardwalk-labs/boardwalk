@@ -132,7 +132,7 @@ function fixture(env: Record<string, string> = {}): {
       triggers: [{ kind: "manual" }],
       ...meta,
     });
-    const workflow = store.upsertWorkflow({ name: manifest.slug, manifest, program });
+    const workflow = store.upsertWorkflow({ slug: manifest.slug, manifest, program });
     const { run: row } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",

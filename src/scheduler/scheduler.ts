@@ -183,11 +183,11 @@ export class Scheduler {
       if (mode === "once") {
         this.fireOnce(workflow, triggerIndex, latestMissed);
         this.log(
-          `[scheduler] ${workflow.name}: ${counted} missed cron fire(s) while the engine was down; ran once (catch_up: "once").`,
+          `[scheduler] ${workflow.slug}: ${counted} missed cron fire(s) while the engine was down; ran once (catch_up: "once").`,
         );
       } else {
         this.log(
-          `[scheduler] ${workflow.name}: skipped ${counted} missed cron fire(s) while the engine was down (catch_up: "skip").`,
+          `[scheduler] ${workflow.slug}: skipped ${counted} missed cron fire(s) while the engine was down (catch_up: "skip").`,
         );
       }
     }

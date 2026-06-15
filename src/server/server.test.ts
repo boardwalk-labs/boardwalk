@@ -122,7 +122,7 @@ const runsResponseSchema = z.object({ runs: z.array(runSchema) });
 const workflowsResponseSchema = z.object({
   workflows: z.array(
     z.looseObject({
-      name: z.string(),
+      slug: z.string(),
       description: z.string().nullable(),
       triggers: z.array(z.looseObject({ kind: z.string() })),
       createdAt: z.number(),
@@ -240,7 +240,7 @@ describe("engine HTTP server", () => {
     engine.deployWorkflow({ program: TOKEN_HOOK_PROGRAM });
     const { status, body } = await fetchJson(`${base}/api/workflows`, workflowsResponseSchema);
     expect(status).toBe(200);
-    expect(body.workflows.map((w) => w.name)).toEqual(["echo", "token-hook"]);
+    expect(body.workflows.map((w) => w.slug)).toEqual(["echo", "token-hook"]);
     const echo = body.workflows[0];
     expect(echo?.description).toBe("echoes its input");
     expect(echo?.triggers).toEqual([{ kind: "manual" }]);

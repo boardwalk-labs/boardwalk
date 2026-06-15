@@ -53,7 +53,7 @@ function makeManifest(name: string): WorkflowManifest {
 }
 
 function seedWorkflow(store: Store, name = "merge-conflict-resolver"): { id: string } {
-  return store.upsertWorkflow({ name, manifest: makeManifest(name), program: "export {};" });
+  return store.upsertWorkflow({ slug: name, manifest: makeManifest(name), program: "export {};" });
 }
 
 function seedRun(store: Store, workflowId: string): { id: string } {
@@ -91,13 +91,13 @@ describe("Store: workflows", () => {
     const manifest = makeManifest("resolver");
     const config = { channel: "#oncall", retries: 3, flags: { dryRun: false } };
     const row = store.upsertWorkflow({
-      name: "resolver",
+      slug: "resolver",
       manifest,
       program: "export const x = 1;",
       config,
     });
     expect(isUlid(row.id)).toBe(true);
-    expect(row.name).toBe("resolver");
+    expect(row.slug).toBe("resolver");
     expect(row.manifest).toEqual(manifest);
     expect(row.config).toEqual(config);
     expect(row.program).toBe("export const x = 1;");
@@ -109,7 +109,7 @@ describe("Store: workflows", () => {
   it("defaults config to an empty object", () => {
     const store = openStore();
     const row = store.upsertWorkflow({
-      name: "wf",
+      slug: "wf",
       manifest: makeManifest("wf"),
       program: "export {};",
     });
@@ -119,12 +119,12 @@ describe("Store: workflows", () => {
   it("updates by name: id and created_at stable, updated_at bumps, content replaced", () => {
     const store = openStore();
     const first = store.upsertWorkflow({
-      name: "wf",
+      slug: "wf",
       manifest: makeManifest("wf"),
       program: "// v1",
     });
     const second = store.upsertWorkflow({
-      name: "wf",
+      slug: "wf",
       manifest: makeManifest("wf"),
       program: "// v2",
       config: { version: 2 },
@@ -141,7 +141,7 @@ describe("Store: workflows", () => {
     const store = openStore();
     const invalid = { ...makeManifest("wf"), name: "" };
     expectEngineError(
-      () => store.upsertWorkflow({ name: "wf", manifest: invalid, program: "" }),
+      () => store.upsertWorkflow({ slug: "wf", manifest: invalid, program: "" }),
       "VALIDATION",
     );
     expect(store.getWorkflow("wf")).toBeNull();
@@ -153,7 +153,7 @@ describe("Store: workflows", () => {
     expect(store.getWorkflowById("nope")).toBeNull();
     seedWorkflow(store, "zeta");
     seedWorkflow(store, "alpha");
-    expect(store.listWorkflows().map((w) => w.name)).toEqual(["alpha", "zeta"]);
+    expect(store.listWorkflows().map((w) => w.slug)).toEqual(["alpha", "zeta"]);
   });
 });
 

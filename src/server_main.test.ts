@@ -322,7 +322,7 @@ describe("startServer", () => {
     const res = await fetch(`http://127.0.0.1:${running.port}/api/workflows`);
     const body: unknown = await res.json();
     expect(body).toEqual({
-      workflows: [expect.objectContaining({ name: "from-dir" })],
+      workflows: [expect.objectContaining({ slug: "from-dir" })],
     });
   });
 });

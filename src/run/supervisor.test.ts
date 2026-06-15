@@ -58,7 +58,7 @@ function fixture(opts?: { env?: Record<string, string>; maxRestarts?: number }):
       triggers: [{ kind: "manual" }],
       ...meta,
     });
-    return store.upsertWorkflow({ name, manifest, program }).id;
+    return store.upsertWorkflow({ slug: name, manifest, program }).id;
   };
   const startRun = (workflowName: string, input?: unknown): string => {
     const workflow = store.getWorkflow(workflowName);

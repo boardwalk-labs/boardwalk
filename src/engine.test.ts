@@ -50,7 +50,7 @@ describe("Engine facade", () => {
   it("deployWorkflow derives the manifest from the program's pure-literal meta", () => {
     const engine = makeEngine();
     const workflow = engine.deployWorkflow({ program: ECHO_PROGRAM });
-    expect(workflow.name).toBe("echo");
+    expect(workflow.slug).toBe("echo");
     expect(workflow.manifest.description).toBe("echoes its input");
     expect(workflow.manifest.triggers).toEqual([{ kind: "manual" }]);
   });

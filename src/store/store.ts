@@ -29,7 +29,7 @@ export type { RunStatus };
 /** A deployed workflow: validated manifest + bundled program source + per-deploy config. */
 export interface WorkflowRow {
   id: string;
-  name: string;
+  slug: string;
   manifest: WorkflowManifest;
   program: string;
   config: Record<string, JsonValue>;
@@ -216,7 +216,7 @@ function readEnum<T extends string>(
 function mapWorkflow(row: SqlRow): WorkflowRow {
   return {
     id: readText(row, "workflows", "id"),
-    name: readText(row, "workflows", "name"),
+    slug: readText(row, "workflows", "slug"),
     manifest: readJson(row, "workflows", "manifest", workflowManifestSchema),
     program: readText(row, "workflows", "program"),
     config: readJson(row, "workflows", "config", configSchema),
@@ -384,12 +384,12 @@ export class Store {
   // --------------------------------------------------------------------------
 
   /**
-   * Insert a workflow or update it by name (deploying again is always an update — the name is
+   * Insert a workflow or update it by slug (deploying again is always an update — the slug is
    * the user-facing identity, so the id stays stable across redeploys and existing runs keep
    * their foreign keys). `updated_at` bumps on update; `created_at` and `id` never change.
    */
   upsertWorkflow(args: {
-    name: string;
+    slug: string;
     manifest: WorkflowManifest;
     program: string;
     config?: Record<string, JsonValue>;
@@ -400,34 +400,34 @@ export class Store {
     if (!manifest.success) {
       throw new EngineError(
         "VALIDATION",
-        `manifest for workflow "${args.name}" failed validation: ${manifest.error.message}`,
+        `manifest for workflow "${args.slug}" failed validation: ${manifest.error.message}`,
       );
     }
     const manifestJson = JSON.stringify(manifest.data);
     const configJson = JSON.stringify(args.config ?? {});
     return this.transaction(() => {
       const t = this.now();
-      const existing = this.prepare("SELECT id FROM workflows WHERE name = ?").get(args.name);
+      const existing = this.prepare("SELECT id FROM workflows WHERE slug = ?").get(args.slug);
       if (existing === undefined) {
         this.prepare(
-          `INSERT INTO workflows (id, name, manifest, program, config, created_at, updated_at)
+          `INSERT INTO workflows (id, slug, manifest, program, config, created_at, updated_at)
            VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        ).run(ulid(t), args.name, manifestJson, args.program, configJson, t, t);
+        ).run(ulid(t), args.slug, manifestJson, args.program, configJson, t, t);
       } else {
         this.prepare(
-          "UPDATE workflows SET manifest = ?, program = ?, config = ?, updated_at = ? WHERE name = ?",
-        ).run(manifestJson, args.program, configJson, t, args.name);
+          "UPDATE workflows SET manifest = ?, program = ?, config = ?, updated_at = ? WHERE slug = ?",
+        ).run(manifestJson, args.program, configJson, t, args.slug);
       }
-      const row = this.getWorkflow(args.name);
+      const row = this.getWorkflow(args.slug);
       if (row === null) {
-        throw new EngineError("INTERNAL", `workflow "${args.name}" vanished mid-upsert`);
+        throw new EngineError("INTERNAL", `workflow "${args.slug}" vanished mid-upsert`);
       }
       return row;
     });
   }
 
-  getWorkflow(name: string): WorkflowRow | null {
-    const row = this.prepare("SELECT * FROM workflows WHERE name = ?").get(name);
+  getWorkflow(slug: string): WorkflowRow | null {
+    const row = this.prepare("SELECT * FROM workflows WHERE slug = ?").get(slug);
     return row === undefined ? null : mapWorkflow(row);
   }
 
@@ -437,7 +437,7 @@ export class Store {
   }
 
   listWorkflows(): WorkflowRow[] {
-    return this.prepare("SELECT * FROM workflows ORDER BY name ASC").all().map(mapWorkflow);
+    return this.prepare("SELECT * FROM workflows ORDER BY slug ASC").all().map(mapWorkflow);
   }
 
   // --------------------------------------------------------------------------

@@ -192,7 +192,7 @@ function deployWorkflowsFromDir(engine: Engine, dir: string, log: (line: string)
     try {
       const program = readFileSync(join(dir, file), "utf8");
       const workflow = engine.deployWorkflow({ program });
-      log(`deployed "${workflow.name}" from ${file}`);
+      log(`deployed "${workflow.slug}" from ${file}`);
     } catch (err) {
       log(`skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
     }

@@ -34,7 +34,7 @@ const V1_SQL = `
 -- the per-deploy JSON config object.
 CREATE TABLE workflows (
   id          TEXT PRIMARY KEY,
-  name        TEXT NOT NULL UNIQUE,
+  slug        TEXT NOT NULL UNIQUE,
   manifest    TEXT NOT NULL,
   program     TEXT NOT NULL,
   config      TEXT NOT NULL,

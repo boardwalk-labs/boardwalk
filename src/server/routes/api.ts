@@ -47,7 +47,7 @@ function isRunStatus(value: string): value is RunStatus {
 /** GET /api/workflows — names + manifest-derived fields, enough to render a picker. */
 export function handleListWorkflows(ctx: RouteContext): void {
   const workflows = ctx.engine.store.listWorkflows().map((row) => ({
-    name: row.name,
+    slug: row.slug,
     description: row.manifest.description ?? null,
     triggers: row.manifest.triggers,
     createdAt: row.createdAt,

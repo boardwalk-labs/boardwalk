@@ -79,7 +79,7 @@ async function loadWorkflows() {
   }
   box.append(rowButton("all workflows", () => { selectedWorkflow = null; loadRuns(); }));
   for (const workflow of workflows) {
-    box.append(rowButton(workflow.name, () => { selectedWorkflow = workflow.name; loadRuns(); }));
+    box.append(rowButton(workflow.slug, () => { selectedWorkflow = workflow.slug; loadRuns(); }));
   }
 }
 

@@ -143,7 +143,7 @@ export class Engine {
     this.assertOpen();
     const manifest: WorkflowManifest = extractManifest(args.program, { fileName: "index.mjs" });
     const workflow = this.store.upsertWorkflow({
-      name: manifest.slug,
+      slug: manifest.slug,
       manifest,
       program: args.program,
       ...(args.config !== undefined ? { config: args.config } : {}),
@@ -238,7 +238,7 @@ export class Engine {
    */
   async runOnce(args: DeployArgs & { input?: JsonValue }): Promise<RunRow> {
     const workflow = this.deployWorkflow(args);
-    const run = this.startRun(workflow.name, {
+    const run = this.startRun(workflow.slug, {
       ...(args.input !== undefined ? { input: args.input } : {}),
     });
     return await this.waitForRun(run.id);

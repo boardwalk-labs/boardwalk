@@ -60,7 +60,7 @@ function fixture(startMs = T0): Fixture {
       ...meta,
     });
     return store.upsertWorkflow({
-      name,
+      slug: name,
       manifest,
       program: "export default async () => {};",
       ...(config !== undefined ? { config } : {}),
