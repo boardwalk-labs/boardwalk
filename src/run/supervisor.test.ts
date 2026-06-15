@@ -23,7 +23,7 @@ interface Fixture {
   supervisor: RunSupervisor;
   dataDir: string;
   events: EventRow[];
-  deploy: (name: string, program: string, meta?: Partial<WorkflowManifest>) => string;
+  deploy: (slug: string, program: string, meta?: Partial<WorkflowManifest>) => string;
   startRun: (slug: string, input?: unknown) => string;
 }
 
@@ -52,13 +52,13 @@ function fixture(opts?: { env?: Record<string, string>; maxRestarts?: number }):
     rmSync(dataDir, { recursive: true, force: true });
   });
 
-  const deploy = (name: string, program: string, meta?: Partial<WorkflowManifest>): string => {
+  const deploy = (slug: string, program: string, meta?: Partial<WorkflowManifest>): string => {
     const manifest = workflowManifestSchema.parse({
-      slug: name,
+      slug,
       triggers: [{ kind: "manual" }],
       ...meta,
     });
-    return store.upsertWorkflow({ slug: name, manifest, program }).id;
+    return store.upsertWorkflow({ slug, manifest, program }).id;
   };
   const startRun = (slug: string, input?: unknown): string => {
     const workflow = store.getWorkflow(slug);
