@@ -18,6 +18,13 @@ describe("createUnifiedDiff", () => {
     expect(out).toMatchObject({ additions: 1, deletions: 1 });
   });
 
+  it("gives a hunk that starts with a deletion the correct new-side start (not 0)", () => {
+    // A replacement with no leading context: both sides start at line 1.
+    const out = createUnifiedDiff('const x = "hi";', 'const x = "hello";');
+    expect(out.diff.split("\n")[0]).toBe("@@ -1,1 +1,1 @@");
+    expect(out).toMatchObject({ additions: 1, deletions: 1 });
+  });
+
   it("renders adding to an empty file as all-additions (old side 0,0)", () => {
     const out = createUnifiedDiff("", "x\ny");
     expect(out.diff).toBe(["@@ -0,0 +1,2 @@", "+x", "+y"].join("\n"));

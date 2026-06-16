@@ -160,8 +160,25 @@ function formatHunks(ops: Op[]): string {
       if (op.tag !== "+") oldCount++;
       if (op.tag !== "-") newCount++;
     }
-    const oldStart = oldNo[s] ?? 0;
-    const newStart = newNo[s] ?? 0;
+    // The hunk header's start is the first line shown on each SIDE: the first op that consumes an
+    // old line (" "/"-") fixes oldStart; the first that consumes a new line (" "/"+") fixes newStart.
+    // A pure-add/pure-delete side keeps the line-before (count 0), matching unified-diff convention.
+    let oldStart = oldNo[s] ?? 0;
+    let newStart = newNo[s] ?? 0;
+    for (let i = s; i <= e; i++) {
+      const op = ops[i];
+      if (op !== undefined && op.tag !== "+") {
+        oldStart = oldNo[i] ?? oldStart;
+        break;
+      }
+    }
+    for (let i = s; i <= e; i++) {
+      const op = ops[i];
+      if (op !== undefined && op.tag !== "-") {
+        newStart = newNo[i] ?? newStart;
+        break;
+      }
+    }
     lines.push(
       `@@ -${String(oldStart)},${String(oldCount)} +${String(newStart)},${String(newCount)} @@`,
     );
