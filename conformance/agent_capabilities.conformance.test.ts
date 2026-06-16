@@ -141,7 +141,70 @@ describe("conformance: agent() capabilities", () => {
     // The project context reached the FIRST model request, tagged as a labeled AGENTS.md block.
     const firstRequest = provider.requests.slice(requestsBefore)[0] ?? "";
     expect(firstRequest).toContain("PROJECT-CONVENTION-83fa: prefer tabs over spaces.");
-    expect(firstRequest).toContain("AGENTS.md path=");
+    // Tagged as the workspace tier (the request is JSON, so quotes are backslash-escaped on the wire).
+    expect(firstRequest).toContain('AGENTS.md source=\\"workspace\\"');
+  }, 30_000);
+
+  it("auto-loads a BUNDLED AGENTS.md (shipped in the workflow package) into the agent's context", async () => {
+    // The author ships standing instructions IN THE PACKAGE (alongside the program + skills/), via
+    // deployWorkflow's `agentsMd`. Every agent() in the workflow reads it — independent of what the
+    // run cloned into /workspace. This is the tier that must work on the hosted platform too, where
+    // the package dir and the (empty) workspace are SEPARATE directories.
+    const { engine } = createEngine({ inference: localInference(provider) });
+    provider.respondWith("read the bundled rules", { in: 1, out: 1 });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "bundled-agents-md", triggers: [{ kind: "manual" }] };
+        // A plain agent() with an EMPTY workspace must still pick up the bundled AGENTS.md.
+        output(await agent("do the task"));
+      `,
+      agentsMd: "BUNDLED-CONVENTION-1f7a: always run the linter before committing.",
+    });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("bundled-agents-md").id);
+    expect(done.status).toBe("completed");
+    const firstRequest = provider.requests.slice(requestsBefore)[0] ?? "";
+    expect(firstRequest).toContain(
+      "BUNDLED-CONVENTION-1f7a: always run the linter before committing.",
+    );
+    // Tagged as the bundled (workflow) tier — distinct from a workspace AGENTS.md. (The request is
+    // JSON, so the rendered quotes are backslash-escaped on the wire.)
+    expect(firstRequest).toContain('AGENTS.md source=\\"workflow\\"');
+  }, 30_000);
+
+  it("loads BUNDLED and WORKSPACE AGENTS.md together — both tiers coexist in one context", async () => {
+    // The parity case: a bundled AGENTS.md (in the package) AND a workspace AGENTS.md (cloned/written
+    // by the run) must BOTH reach the agent, tagged by their tier, in one model request.
+    const { engine } = createEngine({ inference: localInference(provider) });
+    provider.respondWith("read both", { in: 1, out: 1 });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        import { writeFileSync } from "node:fs";
+        export const meta = { slug: "both-agents-md", triggers: [{ kind: "manual" }] };
+        // The run writes a WORKSPACE AGENTS.md (e.g. simulating a freshly-cloned codebase).
+        writeFileSync("AGENTS.md", "WORKSPACE-RULE-c4d2: this repo uses 4-space indent.");
+        output(await agent("do the task"));
+      `,
+      agentsMd: "BUNDLED-RULE-9e0b: standing instruction for every run.",
+    });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("both-agents-md").id);
+    expect(done.status).toBe("completed");
+    const firstRequest = provider.requests.slice(requestsBefore)[0] ?? "";
+    // Both tiers present in the SAME request, each labeled by its source.
+    expect(firstRequest).toContain("BUNDLED-RULE-9e0b: standing instruction for every run.");
+    expect(firstRequest).toContain("WORKSPACE-RULE-c4d2: this repo uses 4-space indent.");
+    // The request is JSON, so the rendered quotes are backslash-escaped on the wire.
+    expect(firstRequest).toContain('AGENTS.md source=\\"workflow\\"');
+    expect(firstRequest).toContain('AGENTS.md source=\\"workspace\\"');
+    // General → specific: the bundled tier precedes the workspace tier in the rendered context.
+    expect(firstRequest.indexOf("BUNDLED-RULE-9e0b")).toBeLessThan(
+      firstRequest.indexOf("WORKSPACE-RULE-c4d2"),
+    );
   }, 30_000);
 
   it("a run with NO AGENTS.md is unaffected (the convention adds nothing)", async () => {

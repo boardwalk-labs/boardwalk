@@ -67,6 +67,67 @@ export function removeRunDir(dataDir: string, runId: string): void {
 }
 
 // ----------------------------------------------------------------------------
+// The deployed workflow PACKAGE (deploy artifacts that ride alongside the program)
+//
+// A per-workflow directory under <dataDir>/packages/<workflowId> holding the deploy artifacts the
+// CLI ships beside the program: skills/<name>.md and a bundled AGENTS.md (the author's standing
+// instructions, read by every agent() in the workflow). It is the program PACKAGE root the run's
+// ToolSetContext.programDir points at; skillsDir is <packageRoot>/skills (so programDir is literally
+// the parent of skillsDir). Replaced wholesale on redeploy: a redeploy that dropped a skill — or the
+// AGENTS.md — must not leave the stale file behind.
+// ----------------------------------------------------------------------------
+
+/** The deployed workflow's package root (skills + bundled AGENTS.md live under here). */
+export function packageRoot(dataDir: string, workflowId: string): string {
+  return join(dataDir, "packages", workflowId);
+}
+
+/** Where deployed skill markdown lives: <packageRoot>/skills/<name>.md. */
+export function skillsDirOf(packageDir: string): string {
+  return join(packageDir, "skills");
+}
+
+/** The bundled AGENTS.md path inside a package root. */
+export function bundledAgentsMdPath(packageDir: string): string {
+  return join(packageDir, "AGENTS.md");
+}
+
+export interface PackageArtifacts {
+  /** Skill markdown keyed by skill name (written to skills/<name>.md). */
+  skills?: Record<string, string> | undefined;
+  /** The bundled AGENTS.md content (the author's standing instructions), or undefined for none. */
+  agentsMd?: string | undefined;
+}
+
+/**
+ * Lay out (replacing any prior deploy) a workflow's package: skills/<name>.md plus a bundled
+ * AGENTS.md. Replaced WHOLESALE — the old package dir is removed first so a redeploy that dropped an
+ * artifact doesn't leave the stale file behind. Returns the package root.
+ */
+export function writePackage(
+  dataDir: string,
+  workflowId: string,
+  artifacts: PackageArtifacts,
+): string {
+  const root = packageRoot(dataDir, workflowId);
+  rmSync(root, { recursive: true, force: true });
+
+  const skills = Object.entries(artifacts.skills ?? {});
+  if (skills.length > 0) {
+    const dir = skillsDirOf(root);
+    mkdirSync(dir, { recursive: true });
+    for (const [name, markdown] of skills) {
+      writeFileSync(join(dir, `${name}.md`), markdown, "utf8");
+    }
+  }
+  if (artifacts.agentsMd !== undefined) {
+    mkdirSync(root, { recursive: true });
+    writeFileSync(bundledAgentsMdPath(root), artifacts.agentsMd, "utf8");
+  }
+  return root;
+}
+
+// ----------------------------------------------------------------------------
 // Workspace persistence (manifest workspace.persist + per-agent memory dirs — SPEC §2.3)
 //
 // The durable store is a per-WORKFLOW directory tree under <dataDir>/persist/<workflowId>:

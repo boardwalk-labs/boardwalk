@@ -41,6 +41,11 @@ export type {
 export interface ToolSetContext {
   /** The run's working directory (built-in coding tools + memory dirs are workspace-relative). */
   workspaceDir: string;
+  /** The deployed workflow PACKAGE root — the dir holding the program + `skills/` + a bundled
+   *  AGENTS.md (the author's standing instructions). Omitted when the engine deploys no separate
+   *  package dir; on engines that do, it is the parent of `skillsDir`. AGENTS.md discovery reads
+   *  this tier (bundled, general) before the workspace tier (specific). */
+  programDir?: string;
   /** Where this workflow's deployed skills live, or null when none were deployed. */
   skillsDir: string | null;
   /** The infrastructure backend for host-backed built-ins (webfetch/web_search/artifacts).
@@ -85,10 +90,12 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     tools.push(wrapProgramTool(def));
   }
 
-  // Project context (AGENTS.md) is auto-discovered from the workspace and prepended BEFORE skills:
-  // project rules frame the task; skills are the procedure. Default-on per the convention — no
-  // AgentOptions field, nothing to declare. "" when the workspace has no AGENTS.md (adds nothing).
-  const agentsMd = loadAgentsMd(ctx.workspaceDir);
+  // Project context (AGENTS.md) is auto-discovered and prepended BEFORE skills: project rules frame
+  // the task; skills are the procedure. Default-on per the convention — no AgentOptions field,
+  // nothing to declare. TWO tiers: the BUNDLED package (programDir — the author's standing
+  // instructions) then the run WORKSPACE (specific), concatenated general→specific, deduped when
+  // the two roots are the same dir. "" when neither has an AGENTS.md (adds nothing).
+  const agentsMd = loadAgentsMd(ctx.workspaceDir, ctx.programDir);
   if (agentsMd !== "") preamble.push(agentsMd);
 
   for (const name of opts?.skills ?? []) {

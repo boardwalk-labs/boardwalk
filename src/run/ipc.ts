@@ -39,6 +39,9 @@ export interface InitMessage {
   programPath: string;
   /** The run's isolated working directory (the child chdirs here before importing the program). */
   workspaceDir: string;
+  /** The deployed workflow PACKAGE root (program + skills/ + a bundled AGENTS.md), or null when this
+   *  workflow has no package. AGENTS.md discovery reads its bundled tier before the workspace tier. */
+  programDir: string | null;
   /** Where this workflow's deployed skills live, or null when none were deployed. */
   skillsDir: string | null;
   input: unknown;
@@ -62,6 +65,7 @@ export const parentToChildSchema = z.union([
     runId: z.string().min(1),
     programPath: z.string().min(1),
     workspaceDir: z.string().min(1),
+    programDir: z.string().min(1).nullable(),
     skillsDir: z.string().min(1).nullable(),
     input: z.unknown(),
     config: z.record(z.string(), z.unknown()),

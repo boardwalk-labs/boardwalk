@@ -59,9 +59,11 @@ import {
 import { runWebSearch } from "./web_search.js";
 import {
   hydrateWorkspace,
+  packageRoot,
   persistRoot,
   persistWorkspace,
   prepareRunDir,
+  skillsDirOf,
   type RunDirs,
 } from "./run_dir.js";
 
@@ -516,6 +518,9 @@ export class RunSupervisor {
         runId: run.id,
         programPath: dirs.programPath,
         workspaceDir: dirs.workspaceDir,
+        // The deployed PACKAGE root (program + skills/ + a bundled AGENTS.md): AGENTS.md discovery
+        // reads its bundled tier before the workspace tier. null ⇒ this workflow has no package.
+        programDir: this.packageDirFor(workflow.id),
         skillsDir: this.skillsDirFor(workflow.id),
         input: run.input,
         config: workflow.config,
@@ -851,9 +856,15 @@ export class RunSupervisor {
     return run;
   }
 
-  /** Deployed skills live at <dataDir>/skills/<workflowId>/<name>.md (written at deploy). */
+  /** The workflow's deployed package root (skills + bundled AGENTS.md), or null when none exists. */
+  private packageDirFor(workflowId: string): string | null {
+    const dir = packageRoot(this.dataDir, workflowId);
+    return existsSync(dir) ? dir : null;
+  }
+
+  /** Deployed skills live at <packageRoot>/skills/<name>.md (written at deploy). */
   private skillsDirFor(workflowId: string): string | null {
-    const dir = join(this.dataDir, "skills", workflowId);
+    const dir = skillsDirOf(packageRoot(this.dataDir, workflowId));
     return existsSync(dir) ? dir : null;
   }
 }

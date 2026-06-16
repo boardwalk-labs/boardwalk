@@ -3,6 +3,29 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.10
+
+### Added
+
+- **`AGENTS.md` now loads from two tiers — bundled package + workspace.** Every `agent()` leaf
+  discovers `AGENTS.md` from both the deployed workflow **package** (the author's standing
+  instructions, shipped alongside the program + `skills/`) and the run **workspace** (e.g. a codebase
+  the run cloned). This mirrors the convention's general→specific hierarchy (Codex/opencode layer a
+  standing config file over a walked repo): the **bundled tier is the single package-root file**
+  (a bundled workflow has no meaningful runtime subtree — the program is one inlined module — so a
+  nested `AGENTS.md` in the package would describe source that's bundled away; nested discovery is a
+  workspace concern), and the **workspace tier is root plus nested** subtree files. This makes the
+  bundled tier identical on every engine: one file written at the package root under `boardwalk dev`,
+  one file extracted at the artifact root on the hosted platform. Blocks are concatenated
+  bundled-first, then workspace (general→specific), each tagged
+  `<AGENTS.md source="workflow|workspace" path="…">`. The existing caps (file count, per-file size,
+  total size, truncation note) apply across the **combined** set, the bundled file claiming the
+  budget first; a file reachable from both roots is **deduplicated by absolute realpath** (defensive
+  — the engine always wires distinct dirs). New `ToolSetContext.programDir` (the workflow package
+  root, parent of `skillsDir`) carries the bundled tier; `DeployArgs.agentsMd` ships the bundled file
+  (deploy artifacts now live under a per-workflow package root, `<dataDir>/packages/<workflowId>/`,
+  with `skills/` beside the bundled `AGENTS.md`). Zero new dependencies.
+
 ## 0.1.9
 
 ### Added

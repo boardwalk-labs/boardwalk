@@ -60,12 +60,20 @@ process.on("message", (raw: unknown) => {
 
   if (initialized) return; // A second init is a protocol violation; ignore.
   initialized = true;
-  void runProgram(msg.programPath, msg.workspaceDir, msg.skillsDir, msg.input, msg.config);
+  void runProgram(
+    msg.programPath,
+    msg.workspaceDir,
+    msg.programDir,
+    msg.skillsDir,
+    msg.input,
+    msg.config,
+  );
 });
 
 async function runProgram(
   programPath: string,
   workspaceDir: string,
+  programDir: string | null,
   skillsDir: string | null,
   input: unknown,
   config: Record<string, unknown>,
@@ -98,7 +106,7 @@ async function runProgram(
           send({ type: "memory_used", dir });
         },
       },
-      { workspaceDir, skillsDir, lspService },
+      { workspaceDir, skillsDir, lspService, ...(programDir !== null ? { programDir } : {}) },
     );
     redactor = childHost.redactor;
     installHost(childHost.host);

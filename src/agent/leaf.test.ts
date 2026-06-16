@@ -809,7 +809,8 @@ describe("runAgentLeaf — AGENTS.md auto-load", () => {
 
     const sent = rec.requests[0]?.body ?? "";
     expect(sent).toContain("Always run the linter before finishing.");
-    expect(sent).toContain('<AGENTS.md path=\\"AGENTS.md\\">');
+    // Tagged with its tier (workspace) and path (JSON-escaped quotes on the wire).
+    expect(sent).toContain('<AGENTS.md source=\\"workspace\\" path=\\"AGENTS.md\\">');
   });
 
   it("adds nothing when the workspace has no AGENTS.md", async () => {

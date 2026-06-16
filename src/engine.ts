@@ -9,7 +9,7 @@
 // Layering: this file only wires store + supervisor + scheduler together and translates
 // program source → manifest at the deploy boundary. No business logic lives here.
 
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JsonValue, WorkflowManifest } from "@boardwalk-labs/workflow";
@@ -28,6 +28,7 @@ import {
   type WorkflowRow,
 } from "./store/store.js";
 import { isTerminal, RunSupervisor } from "./run/supervisor.js";
+import { writePackage } from "./run/run_dir.js";
 
 export interface EngineOptions {
   /** Everything lives under here: `engine.db`, `runs/<id>/`. Created if missing. */
@@ -72,6 +73,13 @@ export interface DeployArgs {
    * replaced wholesale on redeploy.
    */
   skills?: Record<string, string>;
+  /**
+   * The workflow's BUNDLED AGENTS.md — the author's standing project instructions, shipped in the
+   * package alongside the program (the CLI ships the project's root AGENTS.md this way). Read by
+   * EVERY agent() in the workflow, before any AGENTS.md the run cloned into its workspace. Replaced
+   * wholesale on redeploy; omitted ⇒ the workflow ships no bundled instructions.
+   */
+  agentsMd?: string;
 }
 
 export class Engine {
@@ -148,18 +156,14 @@ export class Engine {
       program: args.program,
       ...(args.config !== undefined ? { config: args.config } : {}),
     });
-    // Skills are deploy artifacts, replaced wholesale: stale files from a previous deploy must
-    // not survive a redeploy that dropped them. (Skills are per-agent — no manifest field —
-    // so an agent() selecting an undeployed skill fails at call time, not here.)
-    const skills = Object.entries(args.skills ?? {});
-    const skillsDir = join(this.dataDir, "skills", workflow.id);
-    rmSync(skillsDir, { recursive: true, force: true });
-    if (skills.length > 0) {
-      mkdirSync(skillsDir, { recursive: true });
-      for (const [name, markdown] of skills) {
-        writeFileSync(join(skillsDir, `${name}.md`), markdown, "utf8");
-      }
-    }
+    // Skills + the bundled AGENTS.md are deploy artifacts in the workflow PACKAGE, replaced
+    // wholesale: stale files from a previous deploy must not survive a redeploy that dropped them.
+    // (Skills are per-agent — no manifest field — so an agent() selecting an undeployed skill fails
+    // at call time, not here. The bundled AGENTS.md is default-on, read by every agent().)
+    writePackage(this.dataDir, workflow.id, {
+      ...(args.skills !== undefined ? { skills: args.skills } : {}),
+      ...(args.agentsMd !== undefined ? { agentsMd: args.agentsMd } : {}),
+    });
     return workflow;
   }
 
