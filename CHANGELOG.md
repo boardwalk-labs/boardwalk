@@ -3,6 +3,13 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.13
+
+### Fixed
+
+- A unified-diff hunk that begins with a removed line now stamps the correct new-side start in its
+  `@@` header (was `+0,…` for a deletion-led hunk). The start is the first line shown on each side.
+
 ## 0.1.12
 
 ### Added
