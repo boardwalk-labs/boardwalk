@@ -23,7 +23,7 @@
 import { spawn } from "node:child_process";
 import { sep } from "node:path";
 import { EngineError } from "../../errors.js";
-import type { ExecutableTool, RichToolResult } from "../tools.js";
+import type { ExecutableTool, RichToolResult, ToolOutputSink } from "../tools.js";
 import { capEventText } from "./result.js";
 import { containedPath } from "./sandbox.js";
 
@@ -216,7 +216,7 @@ export function bashTool(options: BashToolOptions): ExecutableTool {
       required: ["command"],
       additionalProperties: false,
     },
-    execute: (input) => runBash(input, options.workspaceDir, allowlist),
+    execute: (input, onOutput) => runBash(input, options.workspaceDir, allowlist, onOutput),
   };
 }
 
@@ -224,6 +224,7 @@ async function runBash(
   input: Record<string, unknown>,
   workspaceDir: string,
   allowlist: ReadonlySet<string>,
+  onOutput?: ToolOutputSink,
 ): Promise<RichToolResult> {
   const command = input["command"];
   if (typeof command !== "string" || command.trim().length === 0) {
@@ -245,14 +246,29 @@ async function runBash(
     });
     const stdout = new BoundedBuffer(MAX_OUTPUT_BYTES);
     const stderr = new BoundedBuffer(MAX_OUTPUT_BYTES);
+    // Stream chunks live (bounded to the same per-stream cap as the final result, so a runaway
+    // command can't flood the event stream). The final result still carries the full bounded output.
+    let outStreamed = 0;
+    let errStreamed = 0;
+    const stream = (which: "stdout" | "stderr", chunk: Buffer, sent: number): number => {
+      if (onOutput === undefined || sent >= MAX_OUTPUT_BYTES) return sent;
+      onOutput(which, chunk.toString("utf8"));
+      return sent + chunk.length;
+    };
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       child.kill("SIGKILL");
     }, timeoutMs);
 
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout.push(chunk);
+      outStreamed = stream("stdout", chunk, outStreamed);
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr.push(chunk);
+      errStreamed = stream("stderr", chunk, errStreamed);
+    });
     child.on("error", (err) => {
       clearTimeout(timer);
       reject(new EngineError("PROGRAM_ERROR", `bash failed to start: ${err.message}`));

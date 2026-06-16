@@ -46,6 +46,7 @@ const EXPECTED_CHANNEL: Record<string, Channel> = {
   tool_call_input_delta: "agent",
   tool_call_input_complete: "agent",
   tool_call_executing: "agent",
+  tool_output_delta: "agent",
   tool_call_result: "agent",
   tool_call_error: "agent",
   reasoning_delta: "agent",

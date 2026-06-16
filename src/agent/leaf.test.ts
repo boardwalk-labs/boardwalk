@@ -769,6 +769,32 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
     expect(rec.requests[1]?.body).not.toContain(secret);
   });
 
+  it("streams a built-in tool's output as redacted tool_output_delta events", async () => {
+    const redactor = new Redactor();
+    redactor.add("STREAM_SECRET", "streamsecret-xyz9");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiToolCalls([
+            { id: "b1", name: "bash", args: { command: "echo streamsecret-xyz9" } },
+          ]),
+        () => openAiText("done"),
+      ],
+      { redactor },
+    );
+    await runAgentLeaf("run it", undefined, rec.io);
+
+    const deltas = rec.events.filter((e) => e.body.kind === "tool_output_delta");
+    expect(deltas.length).toBeGreaterThan(0);
+    const streamed = deltas
+      .map((e) => (e.body.kind === "tool_output_delta" ? e.body.text : ""))
+      .join("");
+    // The live deltas are redacted, just like the final result.
+    expect(streamed).toContain("[redacted:STREAM_SECRET]");
+    expect(streamed).not.toContain("streamsecret-xyz9");
+  });
+
   it("the host-backed tools are absent without a ToolHost backend, present with one", async () => {
     const withoutHost = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
     await runAgentLeaf("p", undefined, withoutHost.io);

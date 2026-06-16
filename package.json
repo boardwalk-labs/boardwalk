@@ -44,7 +44,7 @@
     "coverage": "vitest run --coverage"
   },
   "dependencies": {
-    "@boardwalk-labs/workflow": "^0.1.6",
+    "@boardwalk-labs/workflow": "^0.1.8",
     "zod": "^4.0.0"
   },
   "devDependencies": {

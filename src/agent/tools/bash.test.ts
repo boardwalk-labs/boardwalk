@@ -154,6 +154,15 @@ describe("bash tool — execution + traversal", () => {
     expect(typeof result.event.data?.["durationMs"]).toBe("number");
   });
 
+  it("streams stdout chunks to the onOutput sink as they arrive", async () => {
+    const tool = bashTool({ workspaceDir: ws() });
+    const chunks: [string, string][] = [];
+    await tool.execute({ command: "echo streaming-chunk" }, (stream, text) => {
+      chunks.push([stream, text]);
+    });
+    expect(chunks.some(([s, t]) => s === "stdout" && t.includes("streaming-chunk"))).toBe(true);
+  });
+
   it("rejects a cwd that escapes the workspace", async () => {
     const tool = bashTool({ workspaceDir: ws() });
     await expect(tool.execute({ command: "ls", cwd: "../.." })).rejects.toThrow(

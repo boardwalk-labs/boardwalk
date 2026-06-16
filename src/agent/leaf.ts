@@ -25,6 +25,7 @@ import {
   connectMcpServers,
   type ExecutableTool,
   type McpTokenResult,
+  type ToolOutputSink,
   type ToolSetContext,
 } from "./tools.js";
 import { subagentSelected } from "./tools/registry.js";
@@ -71,6 +72,7 @@ export type LeafEventBody =
   | { kind: "tool_call_start"; toolCallId: string; toolName: string }
   | { kind: "tool_call_input_complete"; toolCallId: string; input: Record<string, unknown> }
   | { kind: "tool_call_executing"; toolCallId: string }
+  | { kind: "tool_output_delta"; toolCallId: string; stream: "stdout" | "stderr"; text: string }
   | { kind: "tool_call_result"; toolCallId: string; result: ToolReturn }
   | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } };
 
@@ -419,7 +421,16 @@ async function executeToolCall(
 
   io.emit(turnId, { kind: "tool_call_executing", toolCallId: call.id });
   try {
-    const raw = await tool.execute(call.input);
+    // Stream a tool's live output as redacted tool_output_delta frames (chunk-level redaction; the
+    // final result is redacted as a whole, so a secret split across chunks is still scrubbed there).
+    const onOutput: ToolOutputSink = (stream, text) =>
+      io.emit(turnId, {
+        kind: "tool_output_delta",
+        toolCallId: call.id,
+        stream,
+        text: io.redactor.redact(text),
+      });
+    const raw = await tool.execute(call.input, onOutput);
     // The model sees `llmText` (a plain-string return IS that text); observers get the structured
     // event. BOTH are redacted — model-bound content AND the observer payload (defense-in-depth: a
     // tool result that inadvertently carries a known secret must reach neither).

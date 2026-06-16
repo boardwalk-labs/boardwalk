@@ -38,10 +38,16 @@ export interface RichToolResult {
  *  event), or a RichToolResult (built-ins that also publish structured data for observers). */
 export type ToolExecuteResult = string | RichToolResult;
 
+/** A sink a tool may call to stream its output as it is produced (e.g. a long `bash` command). The
+ *  leaf redacts each chunk and emits a `tool_output_delta` for the live view; the final result still
+ *  carries the complete bounded output. Optional — tools that don't stream simply ignore it. */
+export type ToolOutputSink = (stream: "stdout" | "stderr", text: string) => void;
+
 /** A tool the loop can actually run. `execute` resolves to model-bound text (pre-redaction), or a
- *  RichToolResult carrying that text plus a structured observer event. */
+ *  RichToolResult carrying that text plus a structured observer event. `onOutput`, when provided,
+ *  lets the tool stream incremental output. */
 export interface ExecutableTool extends ToolSpec {
-  execute(input: Record<string, unknown>): Promise<ToolExecuteResult>;
+  execute(input: Record<string, unknown>, onOutput?: ToolOutputSink): Promise<ToolExecuteResult>;
 }
 
 // Re-export the host-backed-tool seam so a host (the engine, or the platform's broker) can
