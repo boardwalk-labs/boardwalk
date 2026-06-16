@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Diagnostic, FileDiagnostics, LspService } from "../lsp/index.js";
+import type { RichToolResult } from "../tools.js";
 import {
   editTool,
   globToRegExp,
@@ -20,6 +21,12 @@ afterEach(() => {
   for (const fn of cleanups.splice(0)) fn();
 });
 
+/** read/ls/grep/glob return a structured result; narrow it for assertions (cast-free). */
+function rich(result: string | RichToolResult): RichToolResult {
+  if (typeof result === "string") throw new Error("expected a structured tool result");
+  return result;
+}
+
 function ws(): string {
   const dir = mkdtempSync(join(tmpdir(), "bw-fs-"));
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
@@ -31,8 +38,12 @@ describe("read", () => {
     const dir = ws();
     writeFileSync(join(dir, "f.txt"), "l1\nl2\nl3\nl4");
     const tool = readTool(dir);
-    expect(await tool.execute({ path: "f.txt" })).toBe("l1\nl2\nl3\nl4");
-    expect(await tool.execute({ path: "f.txt", offset: 2, limit: 2 })).toBe("l2\nl3");
+    const whole = rich(await tool.execute({ path: "f.txt" }));
+    expect(whole.llmText).toBe("l1\nl2\nl3\nl4");
+    // Structured event for observers: kind, path, and the (capped) content.
+    expect(whole.event.kind).toBe("file_read");
+    expect(whole.event.data).toMatchObject({ path: "f.txt", output: "l1\nl2\nl3\nl4" });
+    expect(rich(await tool.execute({ path: "f.txt", offset: 2, limit: 2 })).llmText).toBe("l2\nl3");
   });
 
   it("rejects a path escaping the workspace and a missing file", async () => {
@@ -70,6 +81,24 @@ describe("edit", () => {
     expect(readFileSync(join(dir, "f"), "utf8")).toBe("alpha delta gamma");
   });
 
+  it("emits a structured file_edit event with a unified diff and +/- counts", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "a\nb\nc\n");
+    const result = rich(await editTool(dir).execute({ path: "f.ts", old: "b", new: "B" }));
+    expect(result.event.kind).toBe("file_edit");
+    expect(result.event.humanSummary).toBe("edited f.ts (+1 -1)");
+    expect(result.event.data).toMatchObject({ path: "f.ts", additions: 1, deletions: 1 });
+    expect(result.event.data?.["diff"]).toContain("-b");
+    expect(result.event.data?.["diff"]).toContain("+B");
+  });
+
+  it("write marks a brand-new file as created in its file_edit event", async () => {
+    const dir = ws();
+    const result = rich(await writeTool(dir).execute({ path: "new.ts", content: "x\ny" }));
+    expect(result.event.kind).toBe("file_edit");
+    expect(result.event.data).toMatchObject({ path: "new.ts", created: true, additions: 2 });
+  });
+
   it("fails on an absent or ambiguous match unless replaceAll", async () => {
     const dir = ws();
     writeFileSync(join(dir, "f"), "x x x");
@@ -88,7 +117,7 @@ describe("ls", () => {
     const dir = ws();
     writeFileSync(join(dir, "file.txt"), "abc");
     mkdirSync(join(dir, "sub"));
-    const out = await lsTool(dir).execute({});
+    const out = rich(await lsTool(dir).execute({})).llmText;
     expect(out).toContain("file.txt  (3 bytes)");
     expect(out).toContain("sub/  (dir)");
   });
@@ -107,10 +136,11 @@ describe("grep", () => {
     writeFileSync(join(dir, "src/a.ts"), "const x = 1;\nconst FINDME = 2;\n");
     writeFileSync(join(dir, "src/b.ts"), "nothing here\n");
     const tool = grepTool(dir);
-    const out = await tool.execute({ pattern: "FINDME" });
-    expect(out).toContain("src/a.ts:2:const FINDME = 2;");
-    expect(out).not.toContain(dir); // the absolute workspace path never leaks — only relative paths
-    expect(await tool.execute({ pattern: "ZZZNOPE" })).toBe("(no matches)");
+    const found = rich(await tool.execute({ pattern: "FINDME" }));
+    expect(found.llmText).toContain("src/a.ts:2:const FINDME = 2;");
+    expect(found.llmText).not.toContain(dir); // the absolute workspace path never leaks — only relative paths
+    expect(found.event).toMatchObject({ kind: "search", data: { pattern: "FINDME" } });
+    expect(rich(await tool.execute({ pattern: "ZZZNOPE" })).llmText).toBe("(no matches)");
   });
 
   it("skips node_modules/.git", async () => {
@@ -118,7 +148,7 @@ describe("grep", () => {
     mkdirSync(join(dir, "node_modules"));
     writeFileSync(join(dir, "node_modules/dep.js"), "TARGETWORD");
     writeFileSync(join(dir, "real.js"), "TARGETWORD");
-    const out = await grepTool(dir).execute({ pattern: "TARGETWORD" });
+    const out = rich(await grepTool(dir).execute({ pattern: "TARGETWORD" })).llmText;
     expect(out).toContain("real.js");
     expect(out).not.toContain("node_modules");
   });
@@ -140,14 +170,16 @@ describe("glob", () => {
     writeFileSync(join(dir, "src/a.ts"), "");
     writeFileSync(join(dir, "src/inner/b.ts"), "");
     writeFileSync(join(dir, "src/c.js"), "");
-    const out = await globTool(dir).execute({ pattern: "src/**/*.ts" });
+    const out = rich(await globTool(dir).execute({ pattern: "src/**/*.ts" })).llmText;
     expect(out).toContain("src/a.ts");
     expect(out).toContain("src/inner/b.ts");
     expect(out).not.toContain("c.js");
   });
 
   it("reports when nothing matches", async () => {
-    expect(await globTool(ws()).execute({ pattern: "**/*.zzz" })).toBe("(no files matched)");
+    expect(rich(await globTool(ws()).execute({ pattern: "**/*.zzz" })).llmText).toBe(
+      "(no files matched)",
+    );
   });
 });
 
@@ -155,7 +187,7 @@ it("write then read round-trips through the workspace", async () => {
   const dir = ws();
   await writeTool(dir).execute({ path: "round.txt", content: "trip" });
   expect(existsSync(join(dir, "round.txt"))).toBe(true);
-  expect(await readTool(dir).execute({ path: "round.txt" })).toBe("trip");
+  expect(rich(await readTool(dir).execute({ path: "round.txt" })).llmText).toBe("trip");
 });
 
 // ----------------------------------------------------------------------------
@@ -184,7 +216,9 @@ function fakeLsp(opts: {
 describe("diagnostics-after-edit", () => {
   it("write appends the file's diagnostics after a successful write", async () => {
     const dir = ws();
-    const out = await writeTool(dir, fakeLsp({})).execute({ path: "a.ts", content: "x\noops;\n" });
+    const out = rich(
+      await writeTool(dir, fakeLsp({})).execute({ path: "a.ts", content: "x\noops;\n" }),
+    ).llmText;
     expect(out).toContain("wrote a.ts");
     expect(out).toContain("error a.ts:2 boom [ts 2304]");
   });
@@ -192,7 +226,9 @@ describe("diagnostics-after-edit", () => {
   it("edit appends the file's diagnostics after a successful edit", async () => {
     const dir = ws();
     writeFileSync(join(dir, "a.ts"), "const ok = 1;\nbad;\n");
-    const out = await editTool(dir, fakeLsp({})).execute({ path: "a.ts", old: "bad", new: "oops" });
+    const out = rich(
+      await editTool(dir, fakeLsp({})).execute({ path: "a.ts", old: "bad", new: "oops" }),
+    ).llmText;
     expect(out).toContain("edited a.ts");
     expect(out).toContain("error a.ts:2 boom");
   });
@@ -200,32 +236,36 @@ describe("diagnostics-after-edit", () => {
   it("appends nothing when the file has no diagnostics (clean write result)", async () => {
     const dir = ws();
     const lsp = fakeLsp({ result: { available: true, diagnostics: [] } });
-    const out = await writeTool(dir, lsp).execute({ path: "a.ts", content: "ok\n" });
+    const out = rich(await writeTool(dir, lsp).execute({ path: "a.ts", content: "ok\n" })).llmText;
     expect(out).toBe("wrote a.ts (3 chars)");
   });
 
   it("with LSP unavailable for the file, the result is the plain write (no error, no append)", async () => {
     const dir = ws();
     const lsp = fakeLsp({ supports: false });
-    const out = await writeTool(dir, lsp).execute({ path: "notes.md", content: "hi" });
+    const out = rich(
+      await writeTool(dir, lsp).execute({ path: "notes.md", content: "hi" }),
+    ).llmText;
     expect(out).toBe("wrote notes.md (2 chars)");
   });
 
   it("with NO LspService at all, write/edit behave exactly as before", async () => {
     const dir = ws();
-    expect(await writeTool(dir).execute({ path: "a.ts", content: "x" })).toBe(
+    expect(rich(await writeTool(dir).execute({ path: "a.ts", content: "x" })).llmText).toBe(
       "wrote a.ts (1 chars)",
     );
-    const out = await editTool(dir).execute({ path: "a.ts", old: "x", new: "y" });
+    const out = rich(await editTool(dir).execute({ path: "a.ts", old: "x", new: "y" })).llmText;
     expect(out).toBe("edited a.ts (1 replacement)");
   });
 
   it("a language-server hiccup never fails the write (best-effort)", async () => {
     const dir = ws();
-    const out = await writeTool(dir, fakeLsp({ throwOnDiagnostics: true })).execute({
-      path: "a.ts",
-      content: "x\n",
-    });
+    const out = rich(
+      await writeTool(dir, fakeLsp({ throwOnDiagnostics: true })).execute({
+        path: "a.ts",
+        content: "x\n",
+      }),
+    ).llmText;
     expect(out).toBe("wrote a.ts (2 chars)");
   });
 

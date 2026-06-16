@@ -30,4 +30,28 @@ describe("Redactor", () => {
   it("is a no-op with no registered values", () => {
     expect(new Redactor().redact("untouched")).toBe("untouched");
   });
+
+  describe("redactData (structured observer payloads)", () => {
+    it("deep-scrubs strings in nested objects and arrays, leaving non-strings intact", () => {
+      const r = new Redactor();
+      r.add("SECRET", "sk-deep-secret-1");
+      const out = r.redactData({
+        stdout: "key=sk-deep-secret-1",
+        exitCode: 0,
+        nested: { lines: ["clean", "leak sk-deep-secret-1"], flag: true },
+        nothing: null,
+      });
+      expect(out).toEqual({
+        stdout: "key=[redacted:SECRET]",
+        exitCode: 0,
+        nested: { lines: ["clean", "leak [redacted:SECRET]"], flag: true },
+        nothing: null,
+      });
+    });
+
+    it("returns the input unchanged when no secrets are registered", () => {
+      const data = { a: "b", c: [1, 2] };
+      expect(new Redactor().redactData(data)).toBe(data); // same reference: no needless clone
+    });
+  });
 });

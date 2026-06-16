@@ -12,7 +12,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { AgentOptions, McpServerRef, ToolDef } from "@boardwalk-labs/workflow";
+import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
 import { EngineError } from "../errors.js";
 import { McpConnection } from "../mcp/client.js";
@@ -24,9 +24,24 @@ import type { Redactor } from "./redact.js";
 import { selectBuiltins } from "./tools/registry.js";
 import type { ToolHost } from "./tools/host_tools.js";
 
-/** A tool the loop can actually run. `execute` resolves to model-bound text (pre-redaction). */
+/**
+ * A structured tool result: the text the MODEL sees (`llmText`, identical to the legacy plain-string
+ * return), plus the rich `event` published to run OBSERVERS (the web UI). The two consumers are
+ * separated so a built-in can show full output / a diff without changing what the model reads.
+ */
+export interface RichToolResult {
+  llmText: string;
+  event: ToolReturn;
+}
+
+/** What a tool's `execute` resolves to: a plain string (the model text — the loop derives a summary
+ *  event), or a RichToolResult (built-ins that also publish structured data for observers). */
+export type ToolExecuteResult = string | RichToolResult;
+
+/** A tool the loop can actually run. `execute` resolves to model-bound text (pre-redaction), or a
+ *  RichToolResult carrying that text plus a structured observer event. */
 export interface ExecutableTool extends ToolSpec {
-  execute(input: Record<string, unknown>): Promise<string>;
+  execute(input: Record<string, unknown>): Promise<ToolExecuteResult>;
 }
 
 // Re-export the host-backed-tool seam so a host (the engine, or the platform's broker) can

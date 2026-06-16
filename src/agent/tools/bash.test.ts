@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../../errors.js";
+import type { RichToolResult } from "../tools.js";
 import {
   assertEverySegmentAllowed,
   assertNoForbiddenConstructs,
@@ -18,6 +19,12 @@ const cleanups: (() => void)[] = [];
 afterEach(() => {
   for (const fn of cleanups.splice(0)) fn();
 });
+
+/** bash returns a structured result; narrow it for assertions (cast-free). */
+function rich(result: string | RichToolResult): RichToolResult {
+  if (typeof result === "string") throw new Error("expected a structured tool result");
+  return result;
+}
 
 function ws(): string {
   const dir = mkdtempSync(join(tmpdir(), "bw-bash-"));
@@ -134,10 +141,17 @@ describe("bash — forbidden constructs (the bypass vectors)", () => {
 describe("bash tool — execution + traversal", () => {
   it("runs an allowed command and captures stdout separately from stderr", async () => {
     const tool = bashTool({ workspaceDir: ws() });
-    const out = await tool.execute({ command: "echo hello-world" });
-    expect(out).toContain("stdout:");
-    expect(out).toContain("hello-world");
-    expect(out).toContain("[exit code 0]");
+    const result = rich(await tool.execute({ command: "echo hello-world" }));
+    // The model sees the same formatted string as before.
+    expect(result.llmText).toContain("stdout:");
+    expect(result.llmText).toContain("hello-world");
+    expect(result.llmText).toContain("[exit code 0]");
+    // Observers get a structured shell event with the command + separated streams.
+    expect(result.event.kind).toBe("shell");
+    expect(result.event.humanSummary).toContain("echo hello-world");
+    expect(result.event.data).toMatchObject({ command: "echo hello-world", exitCode: 0 });
+    expect(result.event.data?.["stdout"]).toContain("hello-world");
+    expect(typeof result.event.data?.["durationMs"]).toBe("number");
   });
 
   it("rejects a cwd that escapes the workspace", async () => {
@@ -152,8 +166,8 @@ describe("bash tool — execution + traversal", () => {
     mkdirSync(join(dir, "sub"), { recursive: true });
     writeFileSync(join(dir, "sub", "f.txt"), "in-sub");
     const tool = bashTool({ workspaceDir: dir });
-    const out = await tool.execute({ command: "cat f.txt", cwd: "sub" });
-    expect(out).toContain("in-sub");
+    const result = rich(await tool.execute({ command: "cat f.txt", cwd: "sub" }));
+    expect(result.llmText).toContain("in-sub");
   });
 
   it("a denylisted command fails before spawning anything", async () => {

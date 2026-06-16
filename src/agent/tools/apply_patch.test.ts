@@ -4,12 +4,19 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { RichToolResult } from "../tools.js";
 import { applyPatchTool, parsePatch } from "./apply_patch.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
   for (const fn of cleanups.splice(0)) fn();
 });
+
+/** apply_patch returns a structured result; narrow it for assertions (cast-free). */
+function rich(result: string | RichToolResult): RichToolResult {
+  if (typeof result === "string") throw new Error("expected a structured tool result");
+  return result;
+}
 
 function ws(): string {
   const dir = mkdtempSync(join(tmpdir(), "bw-patch-"));
@@ -100,6 +107,32 @@ describe("apply_patch — apply", () => {
     });
     expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("1\n22\n");
     expect(readFileSync(join(dir, "b.ts"), "utf8")).toBe("new file");
+  });
+
+  it("emits a structured file_edit event with a per-file unified diff", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "a.ts"), "1\n2\n");
+    const result = rich(
+      await applyPatchTool(dir).execute({
+        patch: patch(
+          "*** Add File: b.ts",
+          "+new file",
+          "*** Update File: a.ts",
+          "@@",
+          " 1",
+          "-2",
+          "+22",
+        ),
+      }),
+    );
+    expect(result.event.kind).toBe("file_edit");
+    // The per-file diffs ride in data.files (asserted on the serialized payload — no casts).
+    const serialized = JSON.stringify(result.event.data);
+    expect(serialized).toContain('"path":"b.ts"');
+    expect(serialized).toContain('"created":true');
+    expect(serialized).toContain('"path":"a.ts"');
+    expect(serialized).toContain("-2");
+    expect(serialized).toContain("+22");
   });
 });
 

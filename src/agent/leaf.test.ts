@@ -738,6 +738,37 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
     expect(rec.requests[1]?.body).toContain("the secret is in here");
   });
 
+  it("deep-redacts a built-in tool's STRUCTURED event data, not just the model-bound text", async () => {
+    // A built-in now publishes a structured tool_call_result (kind + data) to observers. If a known
+    // secret rides in that data (here, a file `read` returns it), it must be scrubbed there too —
+    // the secrets invariant covers the persisted event stream, not only model context.
+    const workspaceDir = tempDir("bw-redact-ws-");
+    const secret = "sk-file-secret-abcdef99";
+    writeFileSync(join(workspaceDir, "creds.txt"), `token=${secret}\n`, "utf8");
+    const redactor = new Redactor();
+    redactor.add("FILE_SECRET", secret);
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () => openAiToolCalls([{ id: "r1", name: "read", args: { path: "creds.txt" } }]),
+        () => openAiText("done"),
+      ],
+      { redactor, workspaceDir },
+    );
+    await runAgentLeaf("read the creds", undefined, rec.io);
+
+    const resultEvent = rec.events.find((e) => e.body.kind === "tool_call_result");
+    expect(resultEvent).toBeDefined();
+    const serialized = JSON.stringify(resultEvent?.body);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("[redacted:FILE_SECRET]");
+    // The structured shape is intact (kind + data survive redaction).
+    const body = resultEvent?.body;
+    expect(body?.kind === "tool_call_result" ? body.result.kind : "").toBe("file_read");
+    // The model's copy stays redacted too (existing invariant).
+    expect(rec.requests[1]?.body).not.toContain(secret);
+  });
+
   it("the host-backed tools are absent without a ToolHost backend, present with one", async () => {
     const withoutHost = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
     await runAgentLeaf("p", undefined, withoutHost.io);

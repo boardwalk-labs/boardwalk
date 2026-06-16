@@ -12,7 +12,9 @@ import { dirname, join, relative } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { LspService } from "../lsp/index.js";
 import { renderDiagnostics } from "../lsp/index.js";
-import type { ExecutableTool } from "../tools.js";
+import type { ExecutableTool, RichToolResult } from "../tools.js";
+import { createUnifiedDiff } from "./diff.js";
+import { capEventText, lineCount } from "./result.js";
 import { containedPath, workspaceRelative } from "./sandbox.js";
 
 /**
@@ -21,12 +23,64 @@ import { containedPath, workspaceRelative } from "./sandbox.js";
  * this keeps them honest (a thrown error is awaited as a rejection) without an `async` body that
  * never awaits.
  */
-function sync(fn: () => string): Promise<string> {
+function sync<T>(fn: () => T): Promise<T> {
   try {
     return Promise.resolve(fn());
   } catch (err) {
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
+}
+
+/**
+ * Wrap a text-producing built-in (read/ls/grep/glob) as a structured result: the model sees the
+ * full `output` (unchanged), observers get a capped copy plus `kind` + tool-specific `extra` fields.
+ */
+function outputResult(
+  kind: string,
+  humanSummary: string,
+  output: string,
+  extra: Record<string, unknown> = {},
+): RichToolResult {
+  const capped = capEventText(output);
+  return {
+    llmText: output,
+    event: {
+      kind,
+      humanSummary,
+      data: { ...extra, output: capped.text, truncated: capped.truncated },
+    },
+  };
+}
+
+/**
+ * Wrap a write/edit as a structured `file_edit` result: the model sees `llmText` (the same summary +
+ * diagnostics string as before), observers get a unified diff of the change plus +/- counts.
+ */
+function fileEditResult(
+  path: string,
+  before: string,
+  after: string,
+  llmText: string,
+  opts: { created?: boolean } = {},
+): RichToolResult {
+  const { diff, additions, deletions } = createUnifiedDiff(before, after);
+  const capped = capEventText(diff);
+  const verb = opts.created === true ? "created" : "edited";
+  return {
+    llmText,
+    event: {
+      kind: "file_edit",
+      humanSummary: `${verb} ${path} (+${String(additions)} -${String(deletions)})`,
+      data: {
+        path,
+        diff: capped.text,
+        diffTruncated: capped.truncated,
+        additions,
+        deletions,
+        ...(opts.created === true ? { created: true } : {}),
+      },
+    },
+  };
 }
 
 /** A long read/listing/search result is capped so one tool call can't flood model context. */
@@ -53,20 +107,30 @@ export function readTool(workspaceDir: string): ExecutableTool {
       additionalProperties: false,
     },
     execute: (input) =>
-      sync(() => {
+      sync((): RichToolResult => {
         const path = requireString(input, "path");
         const file = containedPath(workspaceDir, path);
         if (!existsSync(file) || statSync(file).isDirectory()) {
           throw new EngineError("VALIDATION", `read: no such file "${path}".`);
         }
-        const content = readFileSync(file, "utf8");
+        const whole = readFileSync(file, "utf8");
         const offset = optionalPositiveInt(input["offset"], "offset");
         const limit = optionalPositiveInt(input["limit"], "limit");
-        if (offset === undefined && limit === undefined) return content;
-        const lines = content.split("\n");
-        const start = (offset ?? 1) - 1;
-        const end = limit === undefined ? lines.length : start + limit;
-        return lines.slice(start, end).join("\n");
+        let content = whole;
+        if (offset !== undefined || limit !== undefined) {
+          const lines = whole.split("\n");
+          const start = (offset ?? 1) - 1;
+          const end = limit === undefined ? lines.length : start + limit;
+          content = lines.slice(start, end).join("\n");
+        }
+        return outputResult(
+          "file_read",
+          `read ${path} (${String(lineCount(content))} lines)`,
+          content,
+          {
+            path,
+          },
+        );
       }),
   };
 }
@@ -86,17 +150,20 @@ export function writeTool(workspaceDir: string, lsp?: LspService): ExecutableToo
       required: ["path", "content"],
       additionalProperties: false,
     },
-    execute: async (input) => {
+    execute: async (input): Promise<RichToolResult> => {
       const path = requireString(input, "path");
       const content = requireString(input, "content");
       const file = containedPath(workspaceDir, path);
       if (existsSync(file) && statSync(file).isDirectory()) {
         throw new EngineError("VALIDATION", `write: "${path}" is a directory.`);
       }
+      const existed = existsSync(file);
+      const before = existed ? readFileSync(file, "utf8") : "";
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, content, "utf8");
       const summary = `wrote ${path} (${String(content.length)} chars)`;
-      return summary + (await diagnosticsAfterWrite(lsp, file, path));
+      const llmText = summary + (await diagnosticsAfterWrite(lsp, file, path));
+      return fileEditResult(path, before, content, llmText, { created: !existed });
     },
   };
 }
@@ -149,7 +216,8 @@ export function editTool(workspaceDir: string, lsp?: LspService): ExecutableTool
         : content.replace(oldText, newText);
       writeFileSync(file, updated, "utf8");
       const summary = `edited ${path} (${String(replaceAll ? count : 1)} replacement${count === 1 ? "" : replaceAll ? "s" : ""})`;
-      return summary + (await diagnosticsAfterWrite(lsp, file, path));
+      const llmText = summary + (await diagnosticsAfterWrite(lsp, file, path));
+      return fileEditResult(path, content, updated, llmText);
     },
   };
 }
@@ -192,7 +260,7 @@ export function lsTool(workspaceDir: string): ExecutableTool {
       additionalProperties: false,
     },
     execute: (input) =>
-      sync(() => {
+      sync((): RichToolResult => {
         const rel = typeof input["path"] === "string" ? input["path"] : "";
         const dir = containedPath(workspaceDir, rel);
         if (!existsSync(dir) || !statSync(dir).isDirectory()) {
@@ -204,7 +272,15 @@ export function lsTool(workspaceDir: string): ExecutableTool {
           const st = statSync(full);
           return st.isDirectory() ? `${name}/  (dir)` : `${name}  (${String(st.size)} bytes)`;
         });
-        return lines.length > 0 ? lines.join("\n") : "(empty directory)";
+        const output = lines.length > 0 ? lines.join("\n") : "(empty directory)";
+        return outputResult(
+          "file_list",
+          `ls ${rel || "."} (${String(lines.length)} entries)`,
+          output,
+          {
+            path: rel || ".",
+          },
+        );
       }),
   };
 }
@@ -228,7 +304,7 @@ export function grepTool(workspaceDir: string): ExecutableTool {
       required: ["pattern"],
       additionalProperties: false,
     },
-    execute: async (input) => {
+    execute: async (input): Promise<RichToolResult> => {
       const pattern = requireString(input, "pattern");
       const rel = typeof input["path"] === "string" ? input["path"] : "";
       const searchRoot = containedPath(workspaceDir, rel);
@@ -237,13 +313,21 @@ export function grepTool(workspaceDir: string): ExecutableTool {
       }
       const rgResult = await tryRipgrep(pattern, searchRoot, workspaceDir);
       const matches = rgResult ?? nodeGrep(pattern, searchRoot, workspaceDir);
-      if (matches.length === 0) return "(no matches)";
+      const extra: Record<string, unknown> = { pattern, ...(rel !== "" ? { path: rel } : {}) };
+      if (matches.length === 0) {
+        return outputResult("search", `grep "${pattern}" (no matches)`, "(no matches)", extra);
+      }
       const shown = matches.slice(0, MAX_GREP_MATCHES);
       const note =
         matches.length > MAX_GREP_MATCHES
           ? `\n…[${String(matches.length - MAX_GREP_MATCHES)} more matches truncated]`
           : "";
-      return shown.join("\n") + note;
+      return outputResult(
+        "search",
+        `grep "${pattern}" (${String(matches.length)} matches)`,
+        shown.join("\n") + note,
+        extra,
+      );
     },
   };
 }
@@ -263,7 +347,7 @@ export function globTool(workspaceDir: string): ExecutableTool {
       additionalProperties: false,
     },
     execute: (input) =>
-      sync(() => {
+      sync((): RichToolResult => {
         const pattern = requireString(input, "pattern");
         const re = globToRegExp(pattern);
         const results: string[] = [];
@@ -273,12 +357,21 @@ export function globTool(workspaceDir: string): ExecutableTool {
           return results.length < MAX_GLOB_RESULTS;
         });
         results.sort();
-        if (results.length === 0) return "(no files matched)";
+        if (results.length === 0) {
+          return outputResult("search", `glob "${pattern}" (no files)`, "(no files matched)", {
+            pattern,
+          });
+        }
         const note =
           results.length >= MAX_GLOB_RESULTS
             ? `\n…[results capped at ${String(MAX_GLOB_RESULTS)}]`
             : "";
-        return results.join("\n") + note;
+        return outputResult(
+          "search",
+          `glob "${pattern}" (${String(results.length)} files)`,
+          results.join("\n") + note,
+          { pattern },
+        );
       }),
   };
 }

@@ -31,7 +31,9 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { EngineError } from "../../errors.js";
-import type { ExecutableTool } from "../tools.js";
+import type { ExecutableTool, RichToolResult } from "../tools.js";
+import { createUnifiedDiff } from "./diff.js";
+import { capEventText } from "./result.js";
 import { containedPath } from "./sandbox.js";
 
 type FileAction =
@@ -67,20 +69,67 @@ export function applyPatchTool(workspaceDir: string): ExecutableTool {
     },
     // The body is synchronous (parse → validate-all → commit); the wrapper turns any throw into a
     // rejected promise so the loop awaits failure as a rejection (and partial application is impossible).
-    execute: (input) => {
+    execute: (input): Promise<RichToolResult> => {
       try {
         const patch = input["patch"];
         if (typeof patch !== "string") {
           throw new EngineError("VALIDATION", "apply_patch requires a `patch` string.");
         }
         const actions = parsePatch(patch);
-        const writes = planWrites(actions, workspaceDir); // validates everything; throws on any problem
+        // validates everything (throws on any problem) AND captures per-file before/after for diffs
+        const { writes, edits } = planWrites(actions, workspaceDir);
         commitWrites(writes); // only reached when the whole patch validated
-        return Promise.resolve(summarize(actions));
+        return Promise.resolve(patchResult(actions, edits));
       } catch (err) {
         return Promise.reject(err instanceof Error ? err : new Error(String(err)));
       }
     },
+  };
+}
+
+/** One file's change in an apply_patch result — a unified diff plus counts, for observers. */
+interface FileEdit {
+  path: string;
+  diff: string;
+  diffTruncated: boolean;
+  additions: number;
+  deletions: number;
+  created?: boolean;
+  deleted?: boolean;
+  movedTo?: string;
+}
+
+/** Assemble the structured result: the model sees the same summary string; observers get a
+ *  per-file unified diff. The `data.files` array is deep-redacted by the leaf before it persists. */
+function patchResult(actions: readonly FileAction[], edits: readonly FileEdit[]): RichToolResult {
+  return {
+    llmText: summarize(actions),
+    event: {
+      kind: "file_edit",
+      humanSummary: `apply_patch: ${String(actions.length)} change${actions.length === 1 ? "" : "s"}`,
+      data: { files: [...edits] },
+    },
+  };
+}
+
+/** Build a FileEdit from a before/after pair, capping the diff for the event stream. */
+function fileEdit(
+  path: string,
+  before: string,
+  after: string,
+  extra: { created?: boolean; deleted?: boolean; movedTo?: string } = {},
+): FileEdit {
+  const { diff, additions, deletions } = createUnifiedDiff(before, after);
+  const capped = capEventText(diff);
+  return {
+    path,
+    diff: capped.text,
+    diffTruncated: capped.truncated,
+    additions,
+    deletions,
+    ...(extra.created === true ? { created: true } : {}),
+    ...(extra.deleted === true ? { deleted: true } : {}),
+    ...(extra.movedTo !== undefined ? { movedTo: extra.movedTo } : {}),
   };
 }
 
@@ -204,13 +253,18 @@ function isActionHeader(line: string): boolean {
 type Write = { kind: "write"; path: string; content: string } | { kind: "delete"; path: string };
 
 /**
- * Turn validated actions into a flat write plan. EVERYTHING is checked here against the live
- * workspace; any failure throws and no write has happened yet. Two actions touching the same path
- * (e.g. update-then-delete) are rejected — the patch should be unambiguous.
+ * Turn validated actions into a flat write plan, AND capture each file's before/after so a unified
+ * diff can be shown to observers. EVERYTHING is checked here against the live workspace; any failure
+ * throws and no write has happened yet. Two actions touching the same path (e.g. update-then-delete)
+ * are rejected — the patch should be unambiguous.
  */
-function planWrites(actions: readonly FileAction[], workspaceDir: string): Write[] {
+function planWrites(
+  actions: readonly FileAction[],
+  workspaceDir: string,
+): { writes: Write[]; edits: FileEdit[] } {
   const touched = new Set<string>();
   const writes: Write[] = [];
+  const edits: FileEdit[] = [];
   const claim = (rel: string): void => {
     if (touched.has(rel)) {
       throw new EngineError(
@@ -232,6 +286,7 @@ function planWrites(actions: readonly FileAction[], workspaceDir: string): Write
         );
       }
       writes.push({ kind: "write", path: abs, content: action.content });
+      edits.push(fileEdit(action.path, "", action.content, { created: true }));
     } else if (action.kind === "delete") {
       claim(action.path);
       if (!existsSync(abs) || statSync(abs).isDirectory()) {
@@ -241,6 +296,7 @@ function planWrites(actions: readonly FileAction[], workspaceDir: string): Write
         );
       }
       writes.push({ kind: "delete", path: abs });
+      edits.push(fileEdit(action.path, readFileSync(abs, "utf8"), "", { deleted: true }));
     } else {
       claim(action.path);
       if (!existsSync(abs) || statSync(abs).isDirectory()) {
@@ -262,12 +318,14 @@ function planWrites(actions: readonly FileAction[], workspaceDir: string): Write
         }
         writes.push({ kind: "delete", path: abs });
         writes.push({ kind: "write", path: moveAbs, content: updated });
+        edits.push(fileEdit(action.path, original, updated, { movedTo: action.movePath }));
       } else {
         writes.push({ kind: "write", path: abs, content: updated });
+        edits.push(fileEdit(action.path, original, updated));
       }
     }
   }
-  return writes;
+  return { writes, edits };
 }
 
 /** Apply each hunk by locating its `before` block exactly once in the (progressively updated) text. */

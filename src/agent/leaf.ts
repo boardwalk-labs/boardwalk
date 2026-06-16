@@ -419,13 +419,17 @@ async function executeToolCall(
 
   io.emit(turnId, { kind: "tool_call_executing", toolCallId: call.id });
   try {
-    // Tool results enter model context → redact (redaction covers tool results too).
-    const content = io.redactor.redact(await tool.execute(call.input));
-    io.emit(turnId, {
-      kind: "tool_call_result",
-      toolCallId: call.id,
-      result: { humanSummary: summarize(content) },
-    });
+    const raw = await tool.execute(call.input);
+    // The model sees `llmText` (a plain-string return IS that text); observers get the structured
+    // event. BOTH are redacted — model-bound content AND the observer payload (defense-in-depth: a
+    // tool result that inadvertently carries a known secret must reach neither).
+    const llmText = typeof raw === "string" ? raw : raw.llmText;
+    const content = io.redactor.redact(llmText);
+    const result: ToolReturn =
+      typeof raw === "string"
+        ? { humanSummary: summarize(content) }
+        : redactToolReturn(io.redactor, raw.event);
+    io.emit(turnId, { kind: "tool_call_result", toolCallId: call.id, result });
     return { id: call.id, content, isError: false };
   } catch (err) {
     const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
@@ -441,6 +445,16 @@ async function executeToolCall(
 function summarize(content: string): string {
   const flat = content.replaceAll("\n", " ");
   return flat.length <= 120 ? flat : `${flat.slice(0, 117)}…`;
+}
+
+/** Redact a structured tool result before it reaches observers: scrub the human summary and
+ *  deep-scrub the tool-specific `data`. `kind` is a fixed discriminator literal, never user text. */
+function redactToolReturn(redactor: Redactor, event: ToolReturn): ToolReturn {
+  const out: ToolReturn = {};
+  if (event.kind !== undefined) out.kind = event.kind;
+  if (event.humanSummary !== undefined) out.humanSummary = redactor.redact(event.humanSummary);
+  if (event.data !== undefined) out.data = redactor.redactData(event.data);
+  return out;
 }
 
 /**

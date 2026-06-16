@@ -23,7 +23,8 @@
 import { spawn } from "node:child_process";
 import { sep } from "node:path";
 import { EngineError } from "../../errors.js";
-import type { ExecutableTool } from "../tools.js";
+import type { ExecutableTool, RichToolResult } from "../tools.js";
+import { capEventText } from "./result.js";
 import { containedPath } from "./sandbox.js";
 
 /** Default per-call timeout; the model can lower it, never raise it past {@link MAX_TIMEOUT_MS}. */
@@ -223,7 +224,7 @@ async function runBash(
   input: Record<string, unknown>,
   workspaceDir: string,
   allowlist: ReadonlySet<string>,
-): Promise<string> {
+): Promise<RichToolResult> {
   const command = input["command"];
   if (typeof command !== "string" || command.trim().length === 0) {
     throw new EngineError("VALIDATION", "bash requires a non-empty `command` string.");
@@ -233,8 +234,9 @@ async function runBash(
 
   const cwd = resolveCwd(input["cwd"], workspaceDir);
   const timeoutMs = resolveTimeout(input["timeoutMs"]);
+  const startedAt = Date.now();
 
-  return await new Promise<string>((resolvePromise, reject) => {
+  return await new Promise<RichToolResult>((resolvePromise, reject) => {
     const child = spawn("/bin/sh", ["-c", command], {
       cwd,
       // No stdin: a command that blocks on input must not hang the run (the timeout would catch it,
@@ -266,9 +268,48 @@ async function runBash(
         );
         return;
       }
-      resolvePromise(formatResult(code, signal, stdout, stderr));
+      resolvePromise(
+        buildBashResult(command, code, signal, stdout, stderr, Date.now() - startedAt),
+      );
     });
   });
+}
+
+/** Assemble the structured result: the model sees the same formatted string as before; observers
+ *  get stdout/stderr/exit/duration as data (each text field capped for the event stream). */
+function buildBashResult(
+  command: string,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  stdout: BoundedBuffer,
+  stderr: BoundedBuffer,
+  durationMs: number,
+): RichToolResult {
+  const out = capEventText(stdout.text());
+  const err = capEventText(stderr.text());
+  const exit = signal !== null ? `signal ${signal}` : `exit ${String(code ?? 0)}`;
+  return {
+    llmText: formatResult(code, signal, stdout, stderr),
+    event: {
+      kind: "shell",
+      humanSummary: `$ ${commandSummary(command)} → ${exit}`,
+      data: {
+        command,
+        exitCode: code,
+        signal,
+        stdout: out.text,
+        stderr: err.text,
+        truncated: stdout.wasTruncated() || stderr.wasTruncated() || out.truncated || err.truncated,
+        durationMs,
+      },
+    },
+  };
+}
+
+/** First line of the command, shortened — for the one-line humanSummary. */
+function commandSummary(command: string): string {
+  const firstLine = command.split("\n")[0] ?? command;
+  return firstLine.length <= 80 ? firstLine : `${firstLine.slice(0, 79)}…`;
 }
 
 function resolveCwd(raw: unknown, workspaceDir: string): string {
@@ -526,6 +567,10 @@ class BoundedBuffer {
 
   text(): string {
     return Buffer.concat(this.chunks).toString("utf8");
+  }
+
+  wasTruncated(): boolean {
+    return this.truncated;
   }
 
   truncatedNote(): string {
