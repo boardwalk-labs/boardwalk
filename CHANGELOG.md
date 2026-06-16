@@ -3,6 +3,24 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.12
+
+### Added
+
+- Structured tool results for run observers. Built-in tools now publish a structured
+  `tool_call_result` (`kind` + `data`) alongside the unchanged model-facing text: `bash` reports
+  command/exitCode/stdout/stderr/duration, `read`/`ls`/`grep`/`glob` their captured output, and
+  `write`/`edit`/`apply_patch` a unified diff with `+`/`-` counts (per file for `apply_patch`).
+- Live tool output streaming via the `tool_output_delta` run-event kind: `bash` streams
+  stdout/stderr chunks as they arrive, bounded per stream so a runaway command can't flood the
+  event stream. Requires `@boardwalk-labs/workflow@^0.1.8`.
+
+### Security
+
+- The redactor deep-scrubs structured observer payloads (`Redactor.redactData`) and each streamed
+  output chunk, so a tool result that inadvertently carries a known secret reaches neither the model
+  nor the persisted event stream.
+
 ## 0.1.10
 
 ### Added
