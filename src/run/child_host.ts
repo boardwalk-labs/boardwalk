@@ -146,11 +146,12 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     return { turn, modelRef: resolved.model };
   }
 
-  // The DEFAULT local backend for the host-backed built-ins (webfetch/web_search/artifacts/lsp).
+  // The DEFAULT local backend for the host-backed built-ins (webfetch/web_search/artifacts).
   // webfetch uses this process's fetch (honoring NODE_USE_ENV_PROXY when set); artifacts + search
   // broker to the supervisor (artifacts integrate with the store; search uses the engine's
-  // configured provider, fail-closed if none). No `lsp` hook locally — the OSS engine runs no
-  // language server, so the tool is simply absent (naming it explicitly fails loudly upstream).
+  // configured provider, fail-closed if none). The `diagnostics` built-in is NOT here: LSP is
+  // engine-native (the per-run LspService spawns a language server in the workspace), carried on
+  // `capabilities.lspService`, not this host seam.
   const toolHost: ToolHost = {
     fetchUrl: (url, fetchOpts): Promise<FetchResult> => localFetch(url, fetchOpts?.maxBytes),
     webSearch: async (query, searchOpts): Promise<WebSearchResult[]> => {

@@ -13,11 +13,13 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { AgentOptions, McpServerRef, ToolDef } from "@boardwalk-labs/workflow";
+import { loadAgentsMd } from "./agents_md.js";
 import { EngineError } from "../errors.js";
 import { McpConnection } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";
 import { StdioTransport } from "../mcp/transport_stdio.js";
 import type { ToolSpec } from "./conversation.js";
+import type { LspService } from "./lsp/index.js";
 import type { Redactor } from "./redact.js";
 import { selectBuiltins } from "./tools/registry.js";
 import type { ToolHost } from "./tools/host_tools.js";
@@ -41,9 +43,12 @@ export interface ToolSetContext {
   workspaceDir: string;
   /** Where this workflow's deployed skills live, or null when none were deployed. */
   skillsDir: string | null;
-  /** The infrastructure backend for host-backed built-ins (webfetch/web_search/artifacts/lsp).
+  /** The infrastructure backend for host-backed built-ins (webfetch/web_search/artifacts).
    *  Omitted ⇒ those tools are simply not present on this engine. */
   host?: ToolHost;
+  /** The per-run, engine-native LSP service (diagnostics-after-edit + the `diagnostics` tool).
+   *  Engine-native, so it is NOT a host hook; omitted ⇒ diagnostics are best-effort-skipped. */
+  lspService?: LspService;
 }
 
 export interface ToolSet {
@@ -62,9 +67,9 @@ export interface ToolSet {
  * spawns a process or opens a connection; the async MCP step is `connectMcpServers`.
  *
  * The engine's built-in coding tools are ON BY DEFAULT (read/write/edit/ls/grep/glob/bash/
- * apply_patch + the host-backed webfetch/web_search/artifacts/lsp), scoped by `opts.builtins`
- * (default "all"). The call's inline ToolDefs are added ON TOP — an inline tool may not shadow a
- * built-in (assertUniqueToolNames catches the collision with a clear error).
+ * apply_patch + the engine-native `diagnostics` + the host-backed webfetch/web_search/artifacts),
+ * scoped by `opts.builtins` (default "all"). The call's inline ToolDefs are added ON TOP — an inline
+ * tool may not shadow a built-in (assertUniqueToolNames catches the collision with a clear error).
  */
 export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext): ToolSet {
   const mcp = validateMcpRefs(opts?.mcp);
@@ -74,10 +79,17 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   const tools: ExecutableTool[] = selectBuiltins(opts?.builtins, {
     workspaceDir: ctx.workspaceDir,
     host: ctx.host,
+    lspService: ctx.lspService,
   });
   for (const def of opts?.tools ?? []) {
     tools.push(wrapProgramTool(def));
   }
+
+  // Project context (AGENTS.md) is auto-discovered from the workspace and prepended BEFORE skills:
+  // project rules frame the task; skills are the procedure. Default-on per the convention — no
+  // AgentOptions field, nothing to declare. "" when the workspace has no AGENTS.md (adds nothing).
+  const agentsMd = loadAgentsMd(ctx.workspaceDir);
+  if (agentsMd !== "") preamble.push(agentsMd);
 
   for (const name of opts?.skills ?? []) {
     preamble.push(loadSkill(name, ctx));

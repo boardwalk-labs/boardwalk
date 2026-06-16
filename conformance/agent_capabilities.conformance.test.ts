@@ -119,6 +119,48 @@ describe("conformance: agent() capabilities", () => {
     expect(provider.requests.at(-1)).toContain("Always check the bilge pump first.");
   }, 30_000);
 
+  it("auto-loads an AGENTS.md in the workspace into the agent's context — no option named", async () => {
+    // The widely-adopted convention: a coding agent auto-discovers AGENTS.md in its working
+    // directory and reads it into context. Default-on — the program names no capability for it.
+    const { engine } = createEngine({ inference: localInference(provider) });
+    provider.respondWith("read the rules", { in: 1, out: 1 });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        import { writeFileSync } from "node:fs";
+        export const meta = { slug: "agents-md-auto", triggers: [{ kind: "manual" }] };
+        // Plant AGENTS.md in the workspace (the run's cwd); a plain agent() must pick it up.
+        writeFileSync("AGENTS.md", "PROJECT-CONVENTION-83fa: prefer tabs over spaces.");
+        output(await agent("do the task"));
+      `,
+    });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("agents-md-auto").id);
+    expect(done.status).toBe("completed");
+    // The project context reached the FIRST model request, tagged as a labeled AGENTS.md block.
+    const firstRequest = provider.requests.slice(requestsBefore)[0] ?? "";
+    expect(firstRequest).toContain("PROJECT-CONVENTION-83fa: prefer tabs over spaces.");
+    expect(firstRequest).toContain("AGENTS.md path=");
+  }, 30_000);
+
+  it("a run with NO AGENTS.md is unaffected (the convention adds nothing)", async () => {
+    const { engine } = createEngine({ inference: localInference(provider) });
+    provider.respondWith("ok", { in: 1, out: 1 });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "no-agents-md", triggers: [{ kind: "manual" }] };
+        output(await agent("do the task"));
+      `,
+    });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("no-agents-md").id);
+    expect(done.status).toBe("completed");
+    expect(provider.requests.slice(requestsBefore)[0] ?? "").not.toContain("AGENTS.md");
+  }, 30_000);
+
   it("a malformed memory path fails the run loudly", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
@@ -175,6 +217,41 @@ describe("conformance: agent() capabilities", () => {
     expect(kinds).toContain("tool_call_result");
     // The read built-in's content reached model context on the follow-up turn.
     expect(provider.requests.slice(requestsBefore).at(-1)).toContain("workspace-content-7c2e");
+  }, 30_000);
+
+  it("write-then-edit of a TS file works WITHOUT a language server (LSP diagnostics are best-effort)", async () => {
+    // LSP diagnostics are engine-native + BEST-EFFORT: with no `typescript-language-server` on PATH
+    // (CI has none), the write/edit built-ins must behave exactly as they always have — the run
+    // completes, the file lands on disk, the tool result is the plain write summary. This keeps the
+    // parity promise intact: behavior never depends on a real language server being installed.
+    const { engine } = createEngine({ inference: localInference(provider) });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        import { readFileSync } from "node:fs";
+        export const meta = { slug: "lsp-best-effort", triggers: [{ kind: "manual" }] };
+        // The model writes a .ts file via the default-on \`write\` built-in, then the program
+        // confirms the file is on disk (the write must not fail or hang on absent diagnostics).
+        await agent("create the module");
+        output(readFileSync("mod.ts", "utf8"));
+      `,
+    });
+    provider.queueResponses(
+      toolCallResponse([
+        {
+          id: "w1",
+          name: "write",
+          argsJson: JSON.stringify({ path: "mod.ts", content: "export const answer = 42;\n" }),
+        },
+      ]),
+    );
+    provider.respondWith("done", { in: 1, out: 1 });
+
+    const done = await engine.waitForRun(engine.startRun("lsp-best-effort").id);
+    expect(done.status).toBe("completed");
+    expect(done.output).toBe("export const answer = 42;\n");
+    const kinds = engine.store.listEvents(done.id).map((row) => row.event.kind);
+    expect(kinds).toContain("tool_call_result");
   }, 30_000);
 
   it('builtins: "read-only" allows read but the model cannot call write (it is not advertised)', async () => {

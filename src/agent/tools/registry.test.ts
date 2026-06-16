@@ -2,6 +2,7 @@
 
 import { describe, expect, it } from "vitest";
 import { EngineError } from "../../errors.js";
+import { LspService } from "../lsp/index.js";
 import type { ToolHost } from "./host_tools.js";
 import { ALL_BUILTIN_NAMES, READ_ONLY_BUILTIN_NAMES, selectBuiltins } from "./registry.js";
 
@@ -11,27 +12,43 @@ const fullHost: ToolHost = {
     Promise.resolve({ status: 200, contentType: undefined, body: "", truncated: false }),
   webSearch: () => Promise.resolve([]),
   writeArtifact: () => Promise.resolve({ id: "1", name: "n", url: "u" }),
-  lsp: () => Promise.resolve("ok"),
 };
+
+// Selection never spawns anything; a bare LspService is enough to make `diagnostics` available.
+const lspService = new LspService({ workspaceDir: WS, isAvailable: () => false });
 
 function names(
   builtins: Parameters<typeof selectBuiltins>[0],
   host: ToolHost | undefined,
 ): string[] {
-  return selectBuiltins(builtins, { workspaceDir: WS, host })
+  return selectBuiltins(builtins, { workspaceDir: WS, host, lspService })
+    .map((t) => t.name)
+    .sort();
+}
+
+/** Names with NO LspService wired — the `diagnostics` built-in must be absent. */
+function namesNoLsp(builtins: Parameters<typeof selectBuiltins>[0]): string[] {
+  return selectBuiltins(builtins, { workspaceDir: WS, host: undefined, lspService: undefined })
     .map((t) => t.name)
     .sort();
 }
 
 describe("selectBuiltins", () => {
-  it('defaults to "all" — every sandbox built-in (no host ⇒ no host-backed tools)', () => {
+  it('defaults to "all" — sandbox built-ins + engine-native diagnostics (no host ⇒ no host-backed tools)', () => {
     expect(names(undefined, undefined)).toEqual(
-      ["apply_patch", "bash", "edit", "glob", "grep", "ls", "read", "write"].sort(),
+      ["apply_patch", "bash", "diagnostics", "edit", "glob", "grep", "ls", "read", "write"].sort(),
     );
   });
 
-  it('"all" with a full host includes the host-backed tools too', () => {
+  it('"all" with a full host + LSP service includes the host-backed tools too', () => {
     expect(names("all", fullHost).sort()).toEqual([...ALL_BUILTIN_NAMES].sort());
+  });
+
+  it("the engine-native diagnostics tool is omitted when the run has no LspService", () => {
+    expect(namesNoLsp("all")).not.toContain("diagnostics");
+    expect(namesNoLsp("all")).toEqual(
+      ["apply_patch", "bash", "edit", "glob", "grep", "ls", "read", "write"].sort(),
+    );
   });
 
   it('"none" selects nothing', () => {
@@ -39,10 +56,13 @@ describe("selectBuiltins", () => {
   });
 
   it('"read-only" is the non-mutating set (present ones only)', () => {
-    // With a full host, all read-only names resolve.
+    // With a full host + LSP service, all read-only names resolve.
     expect(names("read-only", fullHost)).toEqual([...READ_ONLY_BUILTIN_NAMES].sort());
-    // Without a host, the host-backed read-only tools drop out, sandbox ones remain.
-    expect(names("read-only", undefined)).toEqual(["glob", "grep", "ls", "read"].sort());
+    // Without a host (but with the LSP service), the host-backed read-only tools drop out; the
+    // sandbox ones plus the engine-native diagnostics remain.
+    expect(names("read-only", undefined)).toEqual(
+      ["diagnostics", "glob", "grep", "ls", "read"].sort(),
+    );
     // It never includes a mutating tool.
     for (const mutating of ["write", "edit", "apply_patch", "bash", "artifacts"]) {
       expect(names("read-only", fullHost)).not.toContain(mutating);
@@ -55,10 +75,14 @@ describe("selectBuiltins", () => {
 
   it("an explicit UNKNOWN name fails loudly (UNSUPPORTED)", () => {
     expect(() =>
-      selectBuiltins(["definitely_not_a_tool"], { workspaceDir: WS, host: undefined }),
+      selectBuiltins(["definitely_not_a_tool"], {
+        workspaceDir: WS,
+        host: undefined,
+        lspService,
+      }),
     ).toThrow(/not available on this engine/);
     try {
-      selectBuiltins(["nope"], { workspaceDir: WS, host: undefined });
+      selectBuiltins(["nope"], { workspaceDir: WS, host: undefined, lspService });
     } catch (err) {
       expect(err).toBeInstanceOf(EngineError);
       expect(err instanceof EngineError ? err.code : "").toBe("UNSUPPORTED");
@@ -67,7 +91,7 @@ describe("selectBuiltins", () => {
 
   it("an explicit host-backed name WITHOUT a backend fails loudly with a backend-specific hint", () => {
     try {
-      selectBuiltins(["web_search"], { workspaceDir: WS, host: undefined });
+      selectBuiltins(["web_search"], { workspaceDir: WS, host: undefined, lspService });
       throw new Error("expected throw");
     } catch (err) {
       expect(err).toBeInstanceOf(EngineError);

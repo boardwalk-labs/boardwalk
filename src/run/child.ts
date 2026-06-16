@@ -16,6 +16,7 @@ import {
 } from "@boardwalk-labs/workflow/runtime";
 import type { JsonValue } from "@boardwalk-labs/workflow";
 import type { AgentIdentity } from "../agent/leaf.js";
+import { LspService } from "../agent/lsp/index.js";
 import type { Redactor } from "../agent/redact.js";
 import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
@@ -70,6 +71,9 @@ async function runProgram(
   config: Record<string, unknown>,
 ): Promise<void> {
   let redactor: Redactor | undefined;
+  // Per-run, engine-native LSP: spawns a language server in the workspace on first relevant edit,
+  // reused across the run, shut down in the finally so no language-server child outlives the run.
+  const lspService = new LspService({ workspaceDir });
   try {
     process.chdir(workspaceDir);
     const childHost = createChildHost(
@@ -94,7 +98,7 @@ async function runProgram(
           send({ type: "memory_used", dir });
         },
       },
-      { workspaceDir, skillsDir },
+      { workspaceDir, skillsDir, lspService },
     );
     redactor = childHost.redactor;
     installHost(childHost.host);
@@ -135,6 +139,10 @@ async function runProgram(
       outputDeclared: declared !== null,
     });
   } finally {
+    // Shut every language server down before exiting so no child outlives the run (close() is
+    // best-effort + bounded: shutdown → exit → kill). The run's outcome was already reported above,
+    // so a slow teardown only delays the process exit, it never changes the result.
+    await lspService.close();
     // Why disconnect-then-exit: process.send is async under the hood; disconnecting flushes
     // the channel so the final message is never lost to an immediate exit.
     process.disconnect();

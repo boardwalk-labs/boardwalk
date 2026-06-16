@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { Diagnostic, FileDiagnostics, LspService } from "../lsp/index.js";
 import {
   editTool,
   globToRegExp,
@@ -155,4 +156,82 @@ it("write then read round-trips through the workspace", async () => {
   await writeTool(dir).execute({ path: "round.txt", content: "trip" });
   expect(existsSync(join(dir, "round.txt"))).toBe(true);
   expect(await readTool(dir).execute({ path: "round.txt" })).toBe("trip");
+});
+
+// ----------------------------------------------------------------------------
+// Diagnostics-after-edit (best-effort): write/edit append a language server's diagnostics when one
+// is available, and degrade silently (plain write result, no error, no hang) when it isn't.
+// ----------------------------------------------------------------------------
+
+const ERROR_DIAG: Diagnostic = { line: 2, severity: "error", message: "boom", source: "ts 2304" };
+
+/** A minimal LspService double — only the methods the fs tools call (supports + diagnostics). */
+function fakeLsp(opts: {
+  supports?: boolean;
+  result?: FileDiagnostics;
+  throwOnDiagnostics?: boolean;
+}): LspService {
+  const stub = {
+    supports: () => opts.supports ?? true,
+    diagnostics: () =>
+      opts.throwOnDiagnostics === true
+        ? Promise.reject(new Error("server hiccup"))
+        : Promise.resolve(opts.result ?? { available: true, diagnostics: [ERROR_DIAG] }),
+  };
+  return stub as unknown as LspService;
+}
+
+describe("diagnostics-after-edit", () => {
+  it("write appends the file's diagnostics after a successful write", async () => {
+    const dir = ws();
+    const out = await writeTool(dir, fakeLsp({})).execute({ path: "a.ts", content: "x\noops;\n" });
+    expect(out).toContain("wrote a.ts");
+    expect(out).toContain("error a.ts:2 boom [ts 2304]");
+  });
+
+  it("edit appends the file's diagnostics after a successful edit", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "a.ts"), "const ok = 1;\nbad;\n");
+    const out = await editTool(dir, fakeLsp({})).execute({ path: "a.ts", old: "bad", new: "oops" });
+    expect(out).toContain("edited a.ts");
+    expect(out).toContain("error a.ts:2 boom");
+  });
+
+  it("appends nothing when the file has no diagnostics (clean write result)", async () => {
+    const dir = ws();
+    const lsp = fakeLsp({ result: { available: true, diagnostics: [] } });
+    const out = await writeTool(dir, lsp).execute({ path: "a.ts", content: "ok\n" });
+    expect(out).toBe("wrote a.ts (3 chars)");
+  });
+
+  it("with LSP unavailable for the file, the result is the plain write (no error, no append)", async () => {
+    const dir = ws();
+    const lsp = fakeLsp({ supports: false });
+    const out = await writeTool(dir, lsp).execute({ path: "notes.md", content: "hi" });
+    expect(out).toBe("wrote notes.md (2 chars)");
+  });
+
+  it("with NO LspService at all, write/edit behave exactly as before", async () => {
+    const dir = ws();
+    expect(await writeTool(dir).execute({ path: "a.ts", content: "x" })).toBe(
+      "wrote a.ts (1 chars)",
+    );
+    const out = await editTool(dir).execute({ path: "a.ts", old: "x", new: "y" });
+    expect(out).toBe("edited a.ts (1 replacement)");
+  });
+
+  it("a language-server hiccup never fails the write (best-effort)", async () => {
+    const dir = ws();
+    const out = await writeTool(dir, fakeLsp({ throwOnDiagnostics: true })).execute({
+      path: "a.ts",
+      content: "x\n",
+    });
+    expect(out).toBe("wrote a.ts (2 chars)");
+  });
+
+  it("the write itself still succeeds even when diagnostics are appended (file is on disk)", async () => {
+    const dir = ws();
+    await writeTool(dir, fakeLsp({})).execute({ path: "a.ts", content: "payload\n" });
+    expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("payload\n");
+  });
 });

@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The host-backed built-ins: webfetch, web_search, artifacts, lsp. Unlike the Tier-1 sandbox
+// The host-backed built-ins: webfetch, web_search, artifacts. Unlike the Tier-1 sandbox
 // tools (which only need the workspace), these reach OUT — to the network, to a search provider,
-// to durable artifact storage, to a language server — so they go through a small `ToolHost`
+// to durable artifact storage — so they go through a small `ToolHost`
 // seam, in the same spirit as the leaf's `LeafIo`/`streamModel` seam. The OSS single-node engine
 // supplies a default local backend (see child_host.ts); the hosted platform swaps in a
 // broker-backed one (egress-policed fetch, a metered search provider, S3 artifacts) so the SAME
 // tools behave identically everywhere with no per-environment branching in the loop.
+//
+// LSP diagnostics are NOT here: they are ENGINE-NATIVE (the engine spawns a language server in the
+// run's workspace, like `bash` spawns a process), so they need no host backend and route through
+// the per-run LspService, not this seam. See src/agent/lsp/.
 //
 // A backend that does not implement a given hook means that tool is not present on the engine —
 // selecting it (or asking for it via `builtins: "all"` without the backend) fails loudly. We
@@ -57,8 +61,6 @@ export interface ToolHost {
     metadata?: Record<string, unknown>,
   ) => Promise<ArtifactWriteResult>;
   readArtifact?: (name: string) => Promise<string>;
-  /** Document-symbol/diagnostics style query against a language server, if the host runs one. */
-  lsp?: (request: { action: string; path: string; query?: string }) => Promise<string>;
 }
 
 /** Build the host-backed tools whose backend the host actually provides (others stay unregistered). */
@@ -67,17 +69,11 @@ export function hostBackedTools(host: ToolHost | undefined): Map<string, Executa
   if (host?.fetchUrl !== undefined) tools.set("webfetch", webfetchTool(host));
   if (host?.webSearch !== undefined) tools.set("web_search", webSearchTool(host));
   if (host?.writeArtifact !== undefined) tools.set("artifacts", artifactsTool(host));
-  if (host?.lsp !== undefined) tools.set("lsp", lspTool(host));
   return tools;
 }
 
 /** Names of every host-backed built-in (whether or not a backend is present), for selection checks. */
-export const HOST_BACKED_TOOL_NAMES: readonly string[] = [
-  "webfetch",
-  "web_search",
-  "artifacts",
-  "lsp",
-];
+export const HOST_BACKED_TOOL_NAMES: readonly string[] = ["webfetch", "web_search", "artifacts"];
 
 function webfetchTool(host: ToolHost): ExecutableTool {
   const fetchUrl = host.fetchUrl;
@@ -185,36 +181,6 @@ function artifactsTool(host: ToolHost): ExecutableTool {
         "VALIDATION",
         `artifacts: unknown action "${action}" (use "write" or "read").`,
       );
-    },
-  };
-}
-
-function lspTool(host: ToolHost): ExecutableTool {
-  const lsp = host.lsp;
-  if (lsp === undefined) throw unreachable("lsp");
-  return {
-    name: "lsp",
-    description:
-      'Query a language server about a workspace file: `action` (e.g. "symbols", "diagnostics", ' +
-      '"definition"), `path`, and an optional `query`.',
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          description: "The LSP query, e.g. symbols/diagnostics/definition.",
-        },
-        path: { type: "string", description: "Workspace-relative file path." },
-        query: { type: "string", description: "Optional symbol name or position hint." },
-      },
-      required: ["action", "path"],
-      additionalProperties: false,
-    },
-    execute: async (input) => {
-      const action = requireString(input, "action");
-      const path = requireString(input, "path");
-      const query = typeof input["query"] === "string" ? input["query"] : undefined;
-      return await lsp({ action, path, ...(query !== undefined ? { query } : {}) });
     },
   };
 }

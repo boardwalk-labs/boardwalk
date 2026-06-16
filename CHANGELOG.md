@@ -3,6 +3,30 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.9
+
+### Added
+
+- **Default-on `AGENTS.md` project context.** Every `agent()` leaf auto-discovers `AGENTS.md` files in
+  the run's workspace (the widely-adopted convention — the root file plus nested subtree files) and
+  prepends them to the leaf's context, before skills (project rules frame the task; skills are the
+  procedure). No option to set — it is on by convention, and a workspace with no `AGENTS.md` adds
+  nothing. Each file is rendered as a labeled `<AGENTS.md path="…">` block tagged with its
+  workspace-relative path. The walk is confined to the workspace, skips `node_modules`/`.git`/build
+  dirs/dotdirs, and is bounded on file count, per-file size, and total size (truncation is noted). The
+  content rides the same context channel as skills, so secret redaction already covers it. Zero new
+  dependencies.
+- **Engine-native LSP diagnostics — the autonomous self-correct edge.** After a successful `write` or
+  `edit`, the file's language-server diagnostics (severity + line + message) are appended to the tool
+  result, so an agent sees its type/lint errors and fixes them with no human in the loop. A new
+  `diagnostics` built-in (in the `'read-only'` set) queries a file on demand. The engine spawns the
+  language server in the run's workspace (no host backend needed), with a hand-rolled, zero-dependency
+  LSP client (Content-Length framing over `node:child_process`). v1 ships TypeScript/JavaScript via
+  `typescript-language-server --stdio` behind a pluggable ext→server registry; other languages drop in
+  later. Best-effort: if the server binary is not on PATH, diagnostics are silently skipped (a short
+  note, never an error or a hang), exactly like `grep`'s ripgrep→Node fallback. Every request is
+  bounded, and language servers are shut down at run end (no leaked processes).
+
 ## 0.1.8
 
 ### Added

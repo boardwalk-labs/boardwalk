@@ -20,10 +20,9 @@ describe("hostBackedTools — registration follows backend presence", () => {
         Promise.resolve({ status: 200, contentType: "x", body: "", truncated: false }),
       webSearch: () => Promise.resolve([]),
       writeArtifact: () => Promise.resolve({ id: "1", name: "n", url: "u" }),
-      lsp: () => Promise.resolve("ok"),
     };
     expect([...hostBackedTools(full).keys()].sort()).toEqual(
-      ["artifacts", "lsp", "web_search", "webfetch"].sort(),
+      ["artifacts", "web_search", "webfetch"].sort(),
     );
   });
 });
@@ -117,23 +116,5 @@ describe("artifacts", () => {
       "artifacts",
     );
     await expect(tool.execute({ action: "delete", name: "x" })).rejects.toThrow(/unknown action/);
-  });
-});
-
-describe("lsp", () => {
-  it("forwards the request to the backend", async () => {
-    let seen: unknown;
-    const tool = get(
-      {
-        lsp: (req) => {
-          seen = req;
-          return Promise.resolve("symbols: foo, bar");
-        },
-      },
-      "lsp",
-    );
-    const out = await tool.execute({ action: "symbols", path: "a.ts", query: "foo" });
-    expect(out).toContain("symbols: foo, bar");
-    expect(seen).toEqual({ action: "symbols", path: "a.ts", query: "foo" });
   });
 });

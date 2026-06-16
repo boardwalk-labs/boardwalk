@@ -10,6 +10,8 @@ import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { EngineError } from "../../errors.js";
+import type { LspService } from "../lsp/index.js";
+import { renderDiagnostics } from "../lsp/index.js";
 import type { ExecutableTool } from "../tools.js";
 import { containedPath, workspaceRelative } from "./sandbox.js";
 
@@ -69,7 +71,7 @@ export function readTool(workspaceDir: string): ExecutableTool {
   };
 }
 
-export function writeTool(workspaceDir: string): ExecutableTool {
+export function writeTool(workspaceDir: string, lsp?: LspService): ExecutableTool {
   return {
     name: "write",
     description:
@@ -84,22 +86,22 @@ export function writeTool(workspaceDir: string): ExecutableTool {
       required: ["path", "content"],
       additionalProperties: false,
     },
-    execute: (input) =>
-      sync(() => {
-        const path = requireString(input, "path");
-        const content = requireString(input, "content");
-        const file = containedPath(workspaceDir, path);
-        if (existsSync(file) && statSync(file).isDirectory()) {
-          throw new EngineError("VALIDATION", `write: "${path}" is a directory.`);
-        }
-        mkdirSync(dirname(file), { recursive: true });
-        writeFileSync(file, content, "utf8");
-        return `wrote ${path} (${String(content.length)} chars)`;
-      }),
+    execute: async (input) => {
+      const path = requireString(input, "path");
+      const content = requireString(input, "content");
+      const file = containedPath(workspaceDir, path);
+      if (existsSync(file) && statSync(file).isDirectory()) {
+        throw new EngineError("VALIDATION", `write: "${path}" is a directory.`);
+      }
+      mkdirSync(dirname(file), { recursive: true });
+      writeFileSync(file, content, "utf8");
+      const summary = `wrote ${path} (${String(content.length)} chars)`;
+      return summary + (await diagnosticsAfterWrite(lsp, file, path));
+    },
   };
 }
 
-export function editTool(workspaceDir: string): ExecutableTool {
+export function editTool(workspaceDir: string, lsp?: LspService): ExecutableTool {
   return {
     name: "edit",
     description:
@@ -119,40 +121,59 @@ export function editTool(workspaceDir: string): ExecutableTool {
       required: ["path", "old", "new"],
       additionalProperties: false,
     },
-    execute: (input) =>
-      sync(() => {
-        const path = requireString(input, "path");
-        const oldText = requireString(input, "old");
-        const newText = requireString(input, "new");
-        const replaceAll = input["replaceAll"] === true;
-        if (oldText === newText) {
-          throw new EngineError(
-            "VALIDATION",
-            "edit: `old` and `new` are identical — nothing to do.",
-          );
-        }
-        const file = containedPath(workspaceDir, path);
-        if (!existsSync(file) || statSync(file).isDirectory()) {
-          throw new EngineError("VALIDATION", `edit: no such file "${path}".`);
-        }
-        const content = readFileSync(file, "utf8");
-        const count = occurrences(content, oldText);
-        if (count === 0) {
-          throw new EngineError("VALIDATION", `edit: \`old\` text was not found in "${path}".`);
-        }
-        if (count > 1 && !replaceAll) {
-          throw new EngineError(
-            "VALIDATION",
-            `edit: \`old\` text appears ${String(count)} times in "${path}" — make it unique or pass replaceAll: true.`,
-          );
-        }
-        const updated = replaceAll
-          ? content.split(oldText).join(newText)
-          : content.replace(oldText, newText);
-        writeFileSync(file, updated, "utf8");
-        return `edited ${path} (${String(replaceAll ? count : 1)} replacement${count === 1 ? "" : replaceAll ? "s" : ""})`;
-      }),
+    execute: async (input) => {
+      const path = requireString(input, "path");
+      const oldText = requireString(input, "old");
+      const newText = requireString(input, "new");
+      const replaceAll = input["replaceAll"] === true;
+      if (oldText === newText) {
+        throw new EngineError("VALIDATION", "edit: `old` and `new` are identical — nothing to do.");
+      }
+      const file = containedPath(workspaceDir, path);
+      if (!existsSync(file) || statSync(file).isDirectory()) {
+        throw new EngineError("VALIDATION", `edit: no such file "${path}".`);
+      }
+      const content = readFileSync(file, "utf8");
+      const count = occurrences(content, oldText);
+      if (count === 0) {
+        throw new EngineError("VALIDATION", `edit: \`old\` text was not found in "${path}".`);
+      }
+      if (count > 1 && !replaceAll) {
+        throw new EngineError(
+          "VALIDATION",
+          `edit: \`old\` text appears ${String(count)} times in "${path}" — make it unique or pass replaceAll: true.`,
+        );
+      }
+      const updated = replaceAll
+        ? content.split(oldText).join(newText)
+        : content.replace(oldText, newText);
+      writeFileSync(file, updated, "utf8");
+      const summary = `edited ${path} (${String(replaceAll ? count : 1)} replacement${count === 1 ? "" : replaceAll ? "s" : ""})`;
+      return summary + (await diagnosticsAfterWrite(lsp, file, path));
+    },
   };
+}
+
+/**
+ * After a successful write/edit, append the file's language-server diagnostics so an autonomous
+ * agent sees its mistakes immediately and self-corrects. BEST-EFFORT: no LspService, no installed
+ * server for the file, or any failure → the plain write result, never an error and never a hang
+ * (the LspService's own bounded wait caps the latency). The leading newline only appears when
+ * there is something to report.
+ */
+async function diagnosticsAfterWrite(
+  lsp: LspService | undefined,
+  absolutePath: string,
+  relativePath: string,
+): Promise<string> {
+  if (lsp === undefined || !lsp.supports(absolutePath)) return "";
+  try {
+    const result = await lsp.diagnostics(absolutePath);
+    if (!result.available || result.diagnostics.length === 0) return "";
+    return `\n\n${renderDiagnostics(relativePath, result.diagnostics)}`;
+  } catch {
+    return ""; // diagnostics are observability — a server hiccup must never fail the write
+  }
 }
 
 export function lsTool(workspaceDir: string): ExecutableTool {

@@ -792,6 +792,68 @@ describe("runAgentLeaf — skills", () => {
 });
 
 // ----------------------------------------------------------------------------
+// AGENTS.md auto-load (project context, default-on, no AgentOptions field)
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — AGENTS.md auto-load", () => {
+  it("auto-loads the workspace's AGENTS.md into the first message — no option named", async () => {
+    const workspaceDir = tempDir("bw-agents-ws-");
+    writeFileSync(
+      join(workspaceDir, "AGENTS.md"),
+      "Always run the linter before finishing.",
+      "utf8",
+    );
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir });
+    // Plain agent() with NO options: the convention is auto, not a declared capability.
+    await runAgentLeaf("do the task", undefined, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain("Always run the linter before finishing.");
+    expect(sent).toContain('<AGENTS.md path=\\"AGENTS.md\\">');
+  });
+
+  it("adds nothing when the workspace has no AGENTS.md", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("do the task", undefined, rec.io);
+    expect(rec.requests[0]?.body ?? "").not.toContain("AGENTS.md");
+  });
+
+  it("places project context (AGENTS.md) BEFORE task-specific skills in the preamble", async () => {
+    const workspaceDir = tempDir("bw-agents-ws-");
+    writeFileSync(join(workspaceDir, "AGENTS.md"), "PROJECT-RULES-MARKER", "utf8");
+    const skillsDir = tempDir("bw-skills-");
+    writeFileSync(join(skillsDir, "reviewer.md"), "SKILL-PROCEDURE-MARKER", "utf8");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir, skillsDir });
+    await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain("PROJECT-RULES-MARKER");
+    expect(sent).toContain("SKILL-PROCEDURE-MARKER");
+    // Project rules frame the task; the skill is the procedure — AGENTS.md comes first.
+    expect(sent.indexOf("PROJECT-RULES-MARKER")).toBeLessThan(
+      sent.indexOf("SKILL-PROCEDURE-MARKER"),
+    );
+  });
+
+  it("redacts known secret values out of AGENTS.md before the model call", async () => {
+    const workspaceDir = tempDir("bw-agents-ws-");
+    writeFileSync(
+      join(workspaceDir, "AGENTS.md"),
+      "The deploy token is ghp_dont-leak-me-99.",
+      "utf8",
+    );
+    const redactor = new Redactor();
+    redactor.add("GH_TOKEN", "ghp_dont-leak-me-99");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir, redactor });
+    await runAgentLeaf("do the task", undefined, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).not.toContain("ghp_dont-leak-me-99");
+    expect(sent).toContain("[redacted:GH_TOKEN]");
+  });
+});
+
+// ----------------------------------------------------------------------------
 // Context compaction (mid-conversation summarization)
 // ----------------------------------------------------------------------------
 
