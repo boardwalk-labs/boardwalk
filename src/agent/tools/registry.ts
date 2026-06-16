@@ -1,0 +1,129 @@
+// SPDX-License-Identifier: Apache-2.0
+
+// The built-in coding toolset registry + the `builtins` selection logic.
+//
+// Built-ins are ON BY DEFAULT (SDK AgentOptions.builtins defaults to "all"): a plain agent(prompt)
+// can already read, edit, search, and run commands in the run's workspace. `builtins` SCOPES that
+// set:
+//   - "all"        → every built-in this engine provides (sandbox tools + whichever host-backed
+//                    tools have a backend).
+//   - "read-only"  → the non-mutating set: read, ls, grep, glob, webfetch, web_search, lsp.
+//   - "none"       → no built-ins; the leaf has only its inline ToolDefs.
+//   - string[]     → exactly those built-in names; an UNKNOWN name fails loudly (UNSUPPORTED),
+//                    because an explicit selection naming a tool the engine doesn't have is a bug
+//                    in the workflow, not something to silently drop.
+//
+// The default-on "all"/"read-only"/"none" paths intentionally do NOT error on a host-backed tool
+// whose backend is absent — they just don't include it (the engine advertises what it can run).
+// Only an EXPLICIT name list fails on an unknown name.
+
+import type { AgentOptions } from "@boardwalk-labs/workflow";
+import { EngineError } from "../../errors.js";
+import type { ExecutableTool } from "../tools.js";
+import { applyPatchTool } from "./apply_patch.js";
+import { bashTool } from "./bash.js";
+import { editTool, globTool, grepTool, lsTool, readTool, writeTool } from "./fs_tools.js";
+import { hostBackedTools, HOST_BACKED_TOOL_NAMES, type ToolHost } from "./host_tools.js";
+
+/** The non-mutating built-ins (the `"read-only"` set): no write/edit/apply_patch/bash/artifacts. */
+export const READ_ONLY_BUILTIN_NAMES: readonly string[] = [
+  "read",
+  "ls",
+  "grep",
+  "glob",
+  "webfetch",
+  "web_search",
+  "lsp",
+];
+
+/** Every built-in name this engine knows (sandbox + host-backed), independent of backend presence. */
+export const ALL_BUILTIN_NAMES: readonly string[] = [
+  "read",
+  "write",
+  "edit",
+  "ls",
+  "grep",
+  "glob",
+  "bash",
+  "apply_patch",
+  ...HOST_BACKED_TOOL_NAMES,
+];
+
+export interface BuiltinContext {
+  workspaceDir: string;
+  host: ToolHost | undefined;
+}
+
+/**
+ * Build the full registry of built-ins available on THIS engine for this run: the sandbox tools
+ * (always) plus the host-backed tools whose backend the host supplies. Keyed by name.
+ */
+function registry(ctx: BuiltinContext): Map<string, ExecutableTool> {
+  const tools = new Map<string, ExecutableTool>();
+  for (const tool of [
+    readTool(ctx.workspaceDir),
+    writeTool(ctx.workspaceDir),
+    editTool(ctx.workspaceDir),
+    lsTool(ctx.workspaceDir),
+    grepTool(ctx.workspaceDir),
+    globTool(ctx.workspaceDir),
+    bashTool({ workspaceDir: ctx.workspaceDir }),
+    applyPatchTool(ctx.workspaceDir),
+  ]) {
+    tools.set(tool.name, tool);
+  }
+  for (const [name, tool] of hostBackedTools(ctx.host)) {
+    tools.set(name, tool);
+  }
+  return tools;
+}
+
+/**
+ * Select the built-in tools for a call from `opts.builtins` (default "all"). Returns the chosen
+ * ExecutableTools; the caller adds inline ToolDefs on top and asserts name uniqueness.
+ */
+export function selectBuiltins(
+  builtins: AgentOptions["builtins"],
+  ctx: BuiltinContext,
+): ExecutableTool[] {
+  const available = registry(ctx);
+  const selection = builtins ?? "all";
+
+  if (selection === "none") return [];
+
+  if (selection === "all") {
+    return [...available.values()];
+  }
+
+  if (selection === "read-only") {
+    // The read-only NAMES are fixed; include only the ones actually present (a host-backed
+    // read-only tool with no backend is simply omitted, like in "all").
+    return READ_ONLY_BUILTIN_NAMES.flatMap((name) => {
+      const tool = available.get(name);
+      return tool !== undefined ? [tool] : [];
+    });
+  }
+
+  // An explicit name list: every name must resolve to a built-in the engine can run, else fail loud.
+  const selected: ExecutableTool[] = [];
+  for (const name of selection) {
+    const tool = available.get(name);
+    if (tool === undefined) {
+      throw new EngineError(
+        "UNSUPPORTED",
+        `Built-in tool "${name}" is not available on this engine.`,
+        knownHint(name),
+      );
+    }
+    selected.push(tool);
+  }
+  return selected;
+}
+
+/** A pointer at the fix: name a real built-in, or define it inline as a ToolDef. */
+function knownHint(name: string): string {
+  if (HOST_BACKED_TOOL_NAMES.includes(name)) {
+    return `"${name}" is a host-backed built-in; this engine has no backend configured for it.`;
+  }
+  return `Known built-ins: ${ALL_BUILTIN_NAMES.join(", ")}. Or define "${name}" inline as a ToolDef.`;
+}

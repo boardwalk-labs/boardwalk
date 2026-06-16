@@ -652,15 +652,112 @@ describe("runAgentLeaf — tool loop", () => {
     );
   });
 
-  it("rejects duplicate tool names and unavailable built-ins", async () => {
+  it("rejects duplicate inline tool names and an explicit unknown built-in", async () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
     await expect(runAgentLeaf("p", { tools: [doubler, { ...doubler }] }, rec.io)).rejects.toThrow(
       /Duplicate tool name/,
     );
-    await expect(runAgentLeaf("p", { tools: ["web_search"] }, rec.io)).rejects.toThrow(
-      /not available on this engine/,
+    // An EXPLICIT builtins selection naming a tool the engine doesn't have fails loudly.
+    await expect(
+      runAgentLeaf("p", { builtins: ["definitely_not_a_tool"] }, rec.io),
+    ).rejects.toThrow(/not available on this engine/);
+    expect(rec.requests).toHaveLength(0);
+  });
+
+  it("rejects an inline tool that shadows a default-on built-in", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")]);
+    const shadowsRead = {
+      name: "read",
+      description: "shadow",
+      inputSchema: { type: "object" },
+      execute: () => Promise.resolve("x"),
+    };
+    await expect(runAgentLeaf("p", { tools: [shadowsRead] }, rec.io)).rejects.toThrow(
+      /Duplicate tool name/,
     );
     expect(rec.requests).toHaveLength(0);
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Default-on built-in tools + the `builtins` scope
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — built-in tools (default-on)", () => {
+  it("advertises the full sandbox built-in set with NO tools/builtins named", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("do something", undefined, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    for (const name of ["read", "write", "edit", "ls", "grep", "glob", "bash", "apply_patch"]) {
+      expect(body).toContain(`"${name}"`);
+    }
+  });
+
+  it('builtins: "read-only" advertises read/grep but NOT write/edit/bash/apply_patch', async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("inspect", { builtins: "read-only" }, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    for (const name of ["read", "ls", "grep", "glob"]) expect(body).toContain(`"${name}"`);
+    for (const name of ["write", "edit", "bash", "apply_patch"]) {
+      expect(body).not.toContain(`"${name}"`);
+    }
+  });
+
+  it('builtins: "none" advertises no built-ins (only inline tools)', async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("plain", { builtins: "none" }, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    // With no inline tools and builtins "none", the request advertises an empty tools array.
+    for (const name of ["read", "write", "bash", "grep"]) expect(body).not.toContain(`"${name}"`);
+  });
+
+  it("builtins: explicit subset advertises exactly those", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("explicit", { builtins: ["read", "bash"] }, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    expect(body).toContain('"read"');
+    expect(body).toContain('"bash"');
+    expect(body).not.toContain('"write"');
+    expect(body).not.toContain('"glob"');
+  });
+
+  it("a default-on built-in actually executes against the workspace through the loop", async () => {
+    const workspaceDir = tempDir("bw-builtin-ws-");
+    writeFileSync(join(workspaceDir, "hello.txt"), "the secret is in here", "utf8");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () => openAiToolCalls([{ id: "r1", name: "read", args: { path: "hello.txt" } }]),
+        () => openAiText("done"),
+      ],
+      { workspaceDir },
+    );
+    const result = await runAgentLeaf("read the file", undefined, rec.io);
+    expect(result).toBe("done");
+    // The file's content came back into model context on the follow-up turn.
+    expect(rec.requests[1]?.body).toContain("the secret is in here");
+  });
+
+  it("the host-backed tools are absent without a ToolHost backend, present with one", async () => {
+    const withoutHost = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("p", undefined, withoutHost.io);
+    expect(withoutHost.requests[0]?.body ?? "").not.toContain('"webfetch"');
+    expect(withoutHost.requests[0]?.body ?? "").not.toContain('"web_search"');
+
+    const withHost = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    withHost.io.capabilities.host = {
+      fetchUrl: () =>
+        Promise.resolve({ status: 200, contentType: "text/plain", body: "page", truncated: false }),
+      webSearch: () => Promise.resolve([{ title: "t", url: "https://x" }]),
+      writeArtifact: () => Promise.resolve({ id: "a1", name: "n", url: "file://n" }),
+    };
+    await runAgentLeaf("p", undefined, withHost.io);
+    const body = withHost.requests[0]?.body ?? "";
+    expect(body).toContain('"webfetch"');
+    expect(body).toContain('"web_search"');
+    expect(body).toContain('"artifacts"');
+    // No lsp hook → no lsp tool even with a host present.
+    expect(body).not.toContain('"lsp"');
   });
 });
 

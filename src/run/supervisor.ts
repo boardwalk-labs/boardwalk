@@ -21,7 +21,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { join } from "node:path";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import {
   makeCursor,
   runEventSchema,
@@ -47,13 +47,16 @@ import {
   childToParentSchema,
   getSecretArgsSchema,
   mcpTokenArgsSchema,
+  readArtifactArgsSchema,
   resolveModelArgsSchema,
+  webSearchArgsSchema,
   writeArtifactArgsSchema,
   type HostMethod,
   type InitMessage,
   type IpcErrorShape,
   type RunEventBody,
 } from "./ipc.js";
+import { runWebSearch } from "./web_search.js";
 import {
   hydrateWorkspace,
   persistRoot,
@@ -619,6 +622,29 @@ export class RunSupervisor {
           ...(a.metadata !== undefined ? { metadata: a.metadata } : {}),
         });
         return { id: row.id, name: row.name, url: pathToFileURL(path).href };
+      }
+      case "read_artifact": {
+        const a = readArtifactArgsSchema.parse(args);
+        if (a.name.includes("/") || a.name.includes("\\") || a.name.includes("..")) {
+          throw new EngineError(
+            "VALIDATION",
+            `Artifact name "${a.name}" must be a plain file name.`,
+          );
+        }
+        const path = join(dirs.artifactsDir, a.name);
+        if (!existsSync(path)) {
+          throw new EngineError("NOT_FOUND", `No artifact named "${a.name}" in this run.`);
+        }
+        return { content: readFileSync(path, "utf8") };
+      }
+      case "web_search": {
+        const a = webSearchArgsSchema.parse(args);
+        const results = await runWebSearch(
+          a.query,
+          a.limit,
+          (name) => this.env.get(name) ?? process.env[name],
+        );
+        return { results };
       }
     }
   }

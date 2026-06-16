@@ -87,6 +87,8 @@ export const HOST_METHODS = [
   "call_workflow",
   "run_workflow",
   "write_artifact",
+  "read_artifact",
+  "web_search",
   "resolve_model",
   "mcp_token",
 ] as const;
@@ -161,6 +163,25 @@ export const writeArtifactArgsSchema = z.strictObject({
   /** Body crosses IPC as base64 — Uint8Array does not survive JSON serialization. */
   bodyBase64: z.string(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+});
+/** read_artifact: the built-in `artifacts` tool reads a previously written artifact by name. */
+export const readArtifactArgsSchema = z.strictObject({ name: z.string().min(1) });
+/** The supervisor's read_artifact response (UTF-8 text). Re-validated child-side before use. */
+export const readArtifactResultSchema = z.strictObject({ content: z.string() });
+/** web_search: the built-in `web_search` tool brokers a query to the engine's configured provider. */
+export const webSearchArgsSchema = z.strictObject({
+  query: z.string().min(1),
+  limit: z.number().int().positive().optional(),
+});
+/** The supervisor's web_search response — ranked results. Re-validated child-side before use. */
+export const webSearchResultSchema = z.strictObject({
+  results: z.array(
+    z.strictObject({
+      title: z.string(),
+      url: z.string(),
+      snippet: z.string().optional(),
+    }),
+  ),
 });
 export const resolveModelArgsSchema = z.strictObject({
   model: z.string().min(1).optional(),

@@ -3,6 +3,26 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.8
+
+### Added
+
+- **Default-on built-in coding tools.** `agent()` ships a coding toolset by default, so `agent(prompt)`
+  with nothing named can read, edit, and run commands in the run's workspace. Tier 1 (sandbox-native):
+  `bash`, `read`, `write`, `edit`, `ls`, `grep`, `glob`, `apply_patch`. Tier 2 (host-backed):
+  `webfetch`, `web_search`, `artifacts`. Scope them with the SDK's `builtins` option (`'all'`,
+  `'read-only'`, `'none'`, or an explicit name list). The host-backed tools are served by a `ToolHost`
+  backend; the single-node engine wires local defaults (in-process fetch, an env-configured search
+  provider, data-dir artifacts).
+- `bash` is a security boundary for autonomous runs: a command allowlist plus a denylist, refusal of
+  command/process substitution and I/O redirection, per-line and per-segment allowlist checks, a
+  workspace-confined working directory, and output + timeout caps.
+
+### Changed
+
+- Requires `@boardwalk-labs/workflow@^0.1.6` (the `builtins` option, and `tools` narrowed to inline
+  ToolDefs).
+
 ## 0.1.7
 
 ### Added

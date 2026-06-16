@@ -36,6 +36,11 @@ export type {
 // ---- Capability context + MCP token result (referenced by LeafIo) ----
 export type { ToolSetContext, McpTokenResult } from "./agent/tools.js";
 
+// ---- The host-backed-tool seam (webfetch/web_search/artifacts/lsp). A host (the single-node
+//      engine in-process, or the platform's broker) implements ToolHost; absent hooks ⇒ absent
+//      tools. Carried on ToolSetContext.host. ----
+export type { ToolHost, WebSearchResult, FetchResult, ArtifactWriteResult } from "./agent/tools.js";
+
 // ---- Secret redaction (the host shares one Redactor with the loop; whoever holds a key adds it) ----
 export { Redactor } from "./agent/redact.js";
 

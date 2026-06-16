@@ -19,17 +19,31 @@ import { HttpTransport } from "../mcp/transport_http.js";
 import { StdioTransport } from "../mcp/transport_stdio.js";
 import type { ToolSpec } from "./conversation.js";
 import type { Redactor } from "./redact.js";
+import { selectBuiltins } from "./tools/registry.js";
+import type { ToolHost } from "./tools/host_tools.js";
 
 /** A tool the loop can actually run. `execute` resolves to model-bound text (pre-redaction). */
 export interface ExecutableTool extends ToolSpec {
   execute(input: Record<string, unknown>): Promise<string>;
 }
 
+// Re-export the host-backed-tool seam so a host (the engine, or the platform's broker) can
+// implement it without reaching into the tools/ subdirectory.
+export type {
+  ToolHost,
+  WebSearchResult,
+  FetchResult,
+  ArtifactWriteResult,
+} from "./tools/host_tools.js";
+
 export interface ToolSetContext {
-  /** The run's working directory (memory dirs are workspace-relative). */
+  /** The run's working directory (built-in coding tools + memory dirs are workspace-relative). */
   workspaceDir: string;
   /** Where this workflow's deployed skills live, or null when none were deployed. */
   skillsDir: string | null;
+  /** The infrastructure backend for host-backed built-ins (webfetch/web_search/artifacts/lsp).
+   *  Omitted ⇒ those tools are simply not present on this engine. */
+  host?: ToolHost;
 }
 
 export interface ToolSet {
@@ -43,29 +57,26 @@ export interface ToolSet {
 }
 
 /**
- * Built-in tools this engine implements, selected by name. Deliberately empty in v0: the
- * hosted platform's curated built-ins don't exist locally yet, and the capability-presence
- * rule demands a loud failure over a silent stub. Program-defined ToolDefs and memory tools
- * cover the local story.
- */
-const BUILTIN_TOOLS: ReadonlyMap<string, ExecutableTool> = new Map();
-
-/**
  * Resolve the call's per-agent capability selection into an executable tool set. Sync by
  * design — every selection is shape-validated here so misconfiguration fails BEFORE anything
  * spawns a process or opens a connection; the async MCP step is `connectMcpServers`.
+ *
+ * The engine's built-in coding tools are ON BY DEFAULT (read/write/edit/ls/grep/glob/bash/
+ * apply_patch + the host-backed webfetch/web_search/artifacts/lsp), scoped by `opts.builtins`
+ * (default "all"). The call's inline ToolDefs are added ON TOP — an inline tool may not shadow a
+ * built-in (assertUniqueToolNames catches the collision with a clear error).
  */
 export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext): ToolSet {
   const mcp = validateMcpRefs(opts?.mcp);
-  const tools: ExecutableTool[] = [];
   const preamble: string[] = [];
 
-  for (const entry of opts?.tools ?? []) {
-    if (typeof entry === "string") {
-      tools.push(resolveBuiltinTool(entry));
-    } else {
-      tools.push(wrapProgramTool(entry));
-    }
+  // Built-ins first (default-on, scoped by `builtins`), then the call's own inline tools on top.
+  const tools: ExecutableTool[] = selectBuiltins(opts?.builtins, {
+    workspaceDir: ctx.workspaceDir,
+    host: ctx.host,
+  });
+  for (const def of opts?.tools ?? []) {
+    tools.push(wrapProgramTool(def));
   }
 
   for (const name of opts?.skills ?? []) {
@@ -84,33 +95,29 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   return { tools, preamble, memoryDir, mcp };
 }
 
-/** Tool names must be unique across the WHOLE advertised set — providers reject duplicates. */
+/**
+ * Tool names must be unique across the WHOLE advertised set — providers reject duplicates. The
+ * common cause is an inline ToolDef colliding with a default-on built-in (e.g. naming one "read"):
+ * rename it, or set `builtins` to a set that excludes the built-in you're replacing.
+ */
 export function assertUniqueToolNames(tools: readonly ExecutableTool[]): void {
   const seen = new Set<string>();
   for (const tool of tools) {
     if (seen.has(tool.name)) {
-      throw new EngineError("VALIDATION", `Duplicate tool name in agent() call: "${tool.name}".`);
+      throw new EngineError(
+        "VALIDATION",
+        `Duplicate tool name in agent() call: "${tool.name}".`,
+        `An inline tool may not shadow a built-in of the same name — rename it, or scope ` +
+          `\`builtins\` so the built-in "${tool.name}" isn't included.`,
+      );
     }
     seen.add(tool.name);
   }
 }
 
 // ----------------------------------------------------------------------------
-// Built-in names + program-defined tools
+// Program-defined tools
 // ----------------------------------------------------------------------------
-
-function resolveBuiltinTool(name: string): ExecutableTool {
-  const builtin = BUILTIN_TOOLS.get(name);
-  if (builtin === undefined) {
-    throw new EngineError(
-      "UNSUPPORTED",
-      `Built-in tool "${name}" is not available on this engine.`,
-      "This engine ships no built-in tools yet — define the tool in your program (an inline " +
-        "ToolDef with an execute function) for identical behavior on every engine.",
-    );
-  }
-  return builtin;
-}
 
 function wrapProgramTool(def: ToolDef): ExecutableTool {
   if (def.name.length === 0) {

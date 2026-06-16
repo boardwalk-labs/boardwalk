@@ -134,19 +134,73 @@ describe("conformance: agent() capabilities", () => {
     expect(done.error?.message).toContain("memory");
   }, 30_000);
 
-  it("an unknown built-in tool name fails the run loudly", async () => {
+  it("an explicit unknown built-in name fails the run loudly", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
       program: `
         import { agent } from "@boardwalk-labs/workflow";
         export const meta = { slug: "wants-builtin", triggers: [{ kind: "manual" }] };
-        await agent("search", { model: "test-model", tools: ["definitely_not_a_tool"] });
+        await agent("search", { model: "test-model", builtins: ["definitely_not_a_tool"] });
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-builtin").id);
     expect(done.status).toBe("failed");
     expect(["UNSUPPORTED", "VALIDATION"]).toContain(done.error?.code);
     expect(done.error?.message).toContain("definitely_not_a_tool");
+  }, 30_000);
+
+  it("the default toolset is on: an agent with NO tools/builtins reads + runs in its workspace", async () => {
+    const { engine } = createEngine({ inference: localInference(provider) });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        import { writeFileSync } from "node:fs";
+        export const meta = { slug: "default-tools", triggers: [{ kind: "manual" }] };
+        // Plant a file in the workspace (the run's cwd) the model will read via the built-in tool.
+        writeFileSync("note.txt", "workspace-content-7c2e");
+        output(await agent("read note.txt and tell me what it says"));
+      `,
+    });
+    // Turn 1: the model uses the default-on \`read\` built-in; turn 2: it answers.
+    provider.queueResponses(
+      toolCallResponse([{ id: "r1", name: "read", argsJson: '{"path":"note.txt"}' }]),
+    );
+    provider.respondWith("the note says workspace-content-7c2e", { in: 2, out: 2 });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("default-tools").id);
+    expect(done.status).toBe("completed");
+    expect(done.output).toBe("the note says workspace-content-7c2e");
+    const kinds = engine.store.listEvents(done.id).map((row) => row.event.kind);
+    expect(kinds).toContain("tool_call_result");
+    // The read built-in's content reached model context on the follow-up turn.
+    expect(provider.requests.slice(requestsBefore).at(-1)).toContain("workspace-content-7c2e");
+  }, 30_000);
+
+  it('builtins: "read-only" allows read but the model cannot call write (it is not advertised)', async () => {
+    const { engine } = createEngine({ inference: localInference(provider) });
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        import { writeFileSync } from "node:fs";
+        export const meta = { slug: "read-only-tools", triggers: [{ kind: "manual" }] };
+        writeFileSync("data.txt", "read-only-payload-44a");
+        output(await agent("read data.txt", { builtins: "read-only" }));
+      `,
+    });
+    provider.queueResponses(
+      toolCallResponse([{ id: "r1", name: "read", argsJson: '{"path":"data.txt"}' }]),
+    );
+    provider.respondWith("read it", { in: 1, out: 1 });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("read-only-tools").id);
+    expect(done.status).toBe("completed");
+    // The advertised tools (in the FIRST request of this run) include read but not write/bash.
+    const firstRequest = provider.requests.slice(requestsBefore)[0] ?? "";
+    expect(firstRequest).toContain('"read"');
+    expect(firstRequest).not.toContain('"write"');
+    expect(firstRequest).not.toContain('"bash"');
   }, 30_000);
 
   it("a skill that was never deployed fails the run loudly", async () => {

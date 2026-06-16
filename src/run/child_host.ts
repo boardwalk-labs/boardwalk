@@ -18,15 +18,26 @@ import { chatBedrock } from "../agent/bedrock.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "../agent/providers.js";
 import { Redactor } from "../agent/redact.js";
 import type { ResolvedModel } from "../agent/resolve.js";
-import type { ToolSetContext } from "../agent/tools.js";
+import type {
+  ArtifactWriteResult,
+  FetchResult,
+  ToolHost,
+  ToolSetContext,
+  WebSearchResult,
+} from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
   mcpTokenResultSchema,
+  readArtifactResultSchema,
   resolvedModelSchema,
+  webSearchResultSchema,
   type IpcErrorShape,
   type HostMethod,
   type RunEventBody,
 } from "./ipc.js";
+
+/** Cap on a webfetch response body (the local backend's default); the model can ask for less. */
+const DEFAULT_FETCH_MAX_BYTES = 256 * 1024;
 
 export interface ChildHostIo {
   /** Broker a host call to the supervisor; resolves with its result. */
@@ -135,6 +146,41 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     return { turn, modelRef: resolved.model };
   }
 
+  // The DEFAULT local backend for the host-backed built-ins (webfetch/web_search/artifacts/lsp).
+  // webfetch uses this process's fetch (honoring NODE_USE_ENV_PROXY when set); artifacts + search
+  // broker to the supervisor (artifacts integrate with the store; search uses the engine's
+  // configured provider, fail-closed if none). No `lsp` hook locally — the OSS engine runs no
+  // language server, so the tool is simply absent (naming it explicitly fails loudly upstream).
+  const toolHost: ToolHost = {
+    fetchUrl: (url, fetchOpts): Promise<FetchResult> => localFetch(url, fetchOpts?.maxBytes),
+    webSearch: async (query, searchOpts): Promise<WebSearchResult[]> => {
+      const result = webSearchResultSchema.parse(
+        await io.request("web_search", {
+          query,
+          ...(searchOpts?.limit !== undefined ? { limit: searchOpts.limit } : {}),
+        }),
+      );
+      return result.results.map((r) => ({
+        title: r.title,
+        url: r.url,
+        ...(r.snippet !== undefined ? { snippet: r.snippet } : {}),
+      }));
+    },
+    writeArtifact: async (name, contentType, body, metadata): Promise<ArtifactWriteResult> => {
+      const value = await io.request("write_artifact", {
+        name,
+        contentType,
+        bodyBase64: Buffer.from(body, "utf8").toString("base64"),
+        ...(metadata !== undefined ? { metadata } : {}),
+      });
+      return artifactRefSchema.parse(value);
+    },
+    readArtifact: async (name): Promise<string> => {
+      return readArtifactResultSchema.parse(await io.request("read_artifact", { name })).content;
+    },
+  };
+  const capabilitiesWithHost: ToolSetContext = { ...capabilities, host: toolHost };
+
   const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
@@ -164,7 +210,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
             }),
           ),
         redactor,
-        capabilities,
+        capabilities: capabilitiesWithHost,
       });
     },
 
@@ -263,6 +309,29 @@ function redactMessages(
         };
     }
   });
+}
+
+/**
+ * The local webfetch backend: a plain `fetch` of an http(s) URL, body capped. Runs in the run
+ * process — Node honors NODE_USE_ENV_PROXY for fetch, so a configured egress proxy is respected
+ * without any code here. A non-http(s) URL is refused (no file:// or data:); the model's URL is
+ * untrusted input.
+ */
+async function localFetch(url: string, maxBytes: number | undefined): Promise<FetchResult> {
+  if (!/^https?:\/\//i.test(url)) {
+    throw new EngineError("VALIDATION", `webfetch only supports http(s) URLs (got "${url}").`);
+  }
+  const cap = maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
+  const response = await fetch(url, { redirect: "follow" });
+  const full = Buffer.from(await response.arrayBuffer());
+  const truncated = full.length > cap;
+  const body = (truncated ? full.subarray(0, cap) : full).toString("utf8");
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type") ?? undefined,
+    body,
+    truncated,
+  };
 }
 
 function sleepMs(arg: SleepArg): number {
