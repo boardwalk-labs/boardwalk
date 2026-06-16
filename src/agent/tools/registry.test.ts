@@ -4,7 +4,12 @@ import { describe, expect, it } from "vitest";
 import { EngineError } from "../../errors.js";
 import { LspService } from "../lsp/index.js";
 import type { ToolHost } from "./host_tools.js";
-import { ALL_BUILTIN_NAMES, READ_ONLY_BUILTIN_NAMES, selectBuiltins } from "./registry.js";
+import {
+  ALL_BUILTIN_NAMES,
+  READ_ONLY_BUILTIN_NAMES,
+  selectBuiltins,
+  subagentSelected,
+} from "./registry.js";
 
 const WS = "/tmp/ws-not-touched"; // selection never touches the filesystem
 const fullHost: ToolHost = {
@@ -73,6 +78,13 @@ describe("selectBuiltins", () => {
     expect(names(["read", "bash"], undefined)).toEqual(["bash", "read"]);
   });
 
+  it("recognizes `subagent` in an explicit list but builds no registry tool for it (leaf-layer)", () => {
+    // `subagent` is assembled by the leaf layer (it needs io.forkLeaf); the registry only accepts
+    // the name (no UNSUPPORTED) and produces nothing for it.
+    expect(names(["read", "subagent"], undefined)).toEqual(["read"]);
+    expect(names(["subagent"], undefined)).toEqual([]);
+  });
+
   it("an explicit UNKNOWN name fails loudly (UNSUPPORTED)", () => {
     expect(() =>
       selectBuiltins(["definitely_not_a_tool"], {
@@ -97,5 +109,20 @@ describe("selectBuiltins", () => {
       expect(err).toBeInstanceOf(EngineError);
       expect(err instanceof EngineError ? (err.hint ?? "") : "").toContain("no backend configured");
     }
+  });
+});
+
+describe("subagentSelected", () => {
+  it('is default-on under "all"/undefined, off for "none"/"read-only"', () => {
+    expect(subagentSelected(undefined)).toBe(true);
+    expect(subagentSelected("all")).toBe(true);
+    expect(subagentSelected("none")).toBe(false);
+    expect(subagentSelected("read-only")).toBe(false);
+  });
+
+  it("under an explicit list, only when `subagent` is named", () => {
+    expect(subagentSelected(["read", "bash"])).toBe(false);
+    expect(subagentSelected(["read", "subagent"])).toBe(true);
+    expect(subagentSelected([])).toBe(false);
   });
 });

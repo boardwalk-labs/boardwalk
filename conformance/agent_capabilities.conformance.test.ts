@@ -68,6 +68,51 @@ describe("conformance: agent() capabilities", () => {
     expect(provider.requests.slice(requestsBefore).at(-1)).toContain("tool-answer-9b1c");
   }, 30_000);
 
+  it("subagent: an agent runs a child leaf as a tool — one level, child gets no subagent tool", async () => {
+    const { engine } = createEngine({ inference: localInference(provider) });
+    provider.queueResponses(
+      toolCallResponse(
+        [
+          {
+            id: "s1",
+            name: "subagent",
+            argsJson: JSON.stringify({ prompt: "do the sub-task", name: "helper" }),
+          },
+        ],
+        { in: 5, out: 5 },
+      ),
+    );
+    provider.respondWith("child did the work", { in: 4, out: 3 }); // the child leaf's model call
+    provider.respondWith("final: child did the work", { in: 2, out: 2 }); // the parent's follow-up
+    engine.deployWorkflow({
+      program: `
+        import { agent, output } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "delegator", triggers: [{ kind: "manual" }] };
+        output(await agent("delegate the task", { model: "test-model" }));
+      `,
+    });
+
+    const requestsBefore = provider.requests.length;
+    const done = await engine.waitForRun(engine.startRun("delegator").id);
+
+    expect(done.status).toBe("completed");
+    expect(done.output).toBe("final: child did the work");
+
+    const reqs = provider.requests.slice(requestsBefore);
+    // The parent was offered `subagent`; the child (second model call) was NOT — one level deep.
+    expect(reqs[0]).toContain('"subagent"');
+    expect(reqs[1]).toContain('"read"');
+    expect(reqs[1]).not.toContain('"subagent"');
+    // The child's result returned to the parent as the tool result.
+    expect(reqs[2]).toContain("child did the work");
+    // The child leaf emitted under its OWN run-unique identity (agent-2), distinct from the parent.
+    const sawChild = engine.store.listEvents(done.id).some((row) => {
+      const e = row.event;
+      return e.kind === "turn_ended" && e.agentId === "agent-2";
+    });
+    expect(sawChild).toBe(true);
+  }, 30_000);
+
   it("memory written by run 1 is in run 2's turn-start index — auto-persisted, no declarations", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({

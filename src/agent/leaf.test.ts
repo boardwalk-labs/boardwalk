@@ -1010,3 +1010,110 @@ describe("runAgentLeaf — memory", () => {
     expect(rec.requests).toHaveLength(0);
   });
 });
+
+// ----------------------------------------------------------------------------
+// Parallel tool dispatch + run-fatal tool errors
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — parallel tool dispatch", () => {
+  const delayed = (name: string, ms: number) => ({
+    name,
+    description: name,
+    inputSchema: { type: "object" },
+    execute: async (): Promise<string> => {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      order.push(name);
+      return `${name}-ok`;
+    },
+  });
+  let order: string[] = [];
+  afterEach(() => {
+    order = [];
+  });
+
+  it("runs a turn's tool calls CONCURRENTLY (a later-listed fast tool finishes first)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () =>
+        openAiToolCalls([
+          { id: "a", name: "slow", args: {} },
+          { id: "b", name: "fast", args: {} },
+        ]),
+      () => openAiText("both done"),
+    ]);
+    const result = await runAgentLeaf(
+      "go",
+      { builtins: "none", tools: [delayed("slow", 25), delayed("fast", 1)] },
+      rec.io,
+    );
+    expect(result).toBe("both done");
+    // Concurrent: the fast tool (listed SECOND) finished first. Sequential would be ["slow","fast"].
+    expect(order).toEqual(["fast", "slow"]);
+    // Both results came back into model context (order preserved by Promise.all).
+    expect(rec.requests[1]?.body).toContain("slow-ok");
+    expect(rec.requests[1]?.body).toContain("fast-ok");
+  });
+
+  it("a run-fatal tool error (BUDGET_EXCEEDED) ends the run instead of becoming a tool result", async () => {
+    const bomb = {
+      name: "spendy",
+      description: "x",
+      inputSchema: { type: "object" },
+      execute: () => Promise.reject(new EngineError("BUDGET_EXCEEDED", "cap hit")),
+    };
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "spendy", args: {} }]),
+      () => openAiText("should never run"),
+    ]);
+    await expect(runAgentLeaf("p", { builtins: "none", tools: [bomb] }, rec.io)).rejects.toThrow(
+      /cap hit/,
+    );
+    // The breach ended the run — there was no second model call.
+    expect(rec.requests).toHaveLength(1);
+    const ended = rec.events.at(-1)?.body;
+    expect(ended !== undefined && ended.kind === "turn_ended" ? ended.reason : "").toBe("error");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// subagent (one-level, attenuated delegation as a tool)
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — subagent", () => {
+  it("is NOT offered when the io cannot fork a leaf", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("p", undefined, rec.io);
+    expect(rec.requests[0]?.body ?? "").not.toContain('"subagent"');
+  });
+
+  it("is offered (default-on) when the io can fork, runs a child, and the child gets NO subagent tool", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () =>
+        openAiToolCalls([
+          { id: "s1", name: "subagent", args: { prompt: "research X", name: "helper" } },
+        ]),
+      () => openAiText("child found the answer"), // the child leaf's only model call
+      () => openAiText("parent summary: child found the answer"), // parent's final turn
+    ]);
+    rec.io.forkLeaf = ({ name }) => ({
+      ...rec.io,
+      identity: { agentId: "agent-2", ...(name !== undefined ? { agentName: name } : {}) },
+    });
+
+    const result = await runAgentLeaf("delegate it", undefined, rec.io);
+
+    expect(result).toBe("parent summary: child found the answer");
+    // The parent was offered the subagent tool…
+    expect(rec.requests[0]?.body ?? "").toContain('"subagent"');
+    // …the child ran a real leaf (advertised the sandbox built-ins) but NOT subagent (one level)…
+    expect(rec.requests[1]?.body ?? "").toContain('"read"');
+    expect(rec.requests[1]?.body ?? "").not.toContain('"subagent"');
+    // …the child's result returned to the parent as the tool result…
+    expect(rec.requests[2]?.body ?? "").toContain("child found the answer");
+    // …and the child leaf emitted under its OWN agentId.
+    const childEnded = rec.events.find((e) => {
+      const b = e.body;
+      return b.kind === "turn_ended" && b.agentId === "agent-2";
+    });
+    expect(childEnded).toBeDefined();
+  });
+});

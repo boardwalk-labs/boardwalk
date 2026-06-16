@@ -13,7 +13,12 @@ import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwal
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
 import type { ChatMessage } from "../agent/conversation.js";
-import { runAgentLeaf, type AgentIdentity, type ModelTurnRequest } from "../agent/leaf.js";
+import {
+  runAgentLeaf,
+  type AgentIdentity,
+  type LeafIo,
+  type ModelTurnRequest,
+} from "../agent/leaf.js";
 import { chatBedrock } from "../agent/bedrock.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "../agent/providers.js";
 import { Redactor } from "../agent/redact.js";
@@ -182,6 +187,39 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   };
   const capabilitiesWithHost: ToolSetContext = { ...capabilities, host: toolHost };
 
+  // One LeafIo per agent() leaf, reusable for sub-agents: forkLeaf mints a fresh run-unique
+  // identity over the SAME sinks (this process's one redactor + the supervisor's cursor authority),
+  // so a `subagent` tool call runs another leaf that interleaves on the run's event stream under
+  // its own agentId. Self-referential by design — forkLeaf runs after assignment, so the name is
+  // in scope.
+  const makeLeafIo = (identity: AgentIdentity): LeafIo => ({
+    identity,
+    streamModel,
+    startTurn: (turnId) => io.startTurn(turnId, identity),
+    emit: (turnId, body) => io.emit(body, turnId),
+    reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
+    memoryUsed: (dir) => io.memoryUsed(dir),
+    // MCP OAuth tokens are engine state: brokered per use, validated like any other supervisor
+    // response; refresh tokens and the store never enter this process.
+    mcpToken: async (serverUrl, invalidateToken) =>
+      mcpTokenResultSchema.parse(
+        await io.request("mcp_token", {
+          serverUrl,
+          ...(invalidateToken !== undefined ? { invalidateToken } : {}),
+        }),
+      ),
+    redactor,
+    capabilities: capabilitiesWithHost,
+    forkLeaf: ({ name }) => {
+      agentCount += 1;
+      const childIdentity: AgentIdentity = {
+        agentId: `agent-${String(agentCount)}`,
+        ...(name !== undefined ? { agentName: name } : {}),
+      };
+      return makeLeafIo(childIdentity);
+    },
+  });
+
   const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
@@ -194,25 +232,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
         agentId: `agent-${String(agentCount)}`,
         ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
       };
-      return await runAgentLeaf(prompt, opts, {
-        identity,
-        streamModel,
-        startTurn: (turnId) => io.startTurn(turnId, identity),
-        emit: (turnId, body) => io.emit(body, turnId),
-        reportUsage: (modelRef, usage) => io.reportUsage(modelRef, usage),
-        memoryUsed: (dir) => io.memoryUsed(dir),
-        // MCP OAuth tokens are engine state: brokered per use, validated like any other
-        // supervisor response; refresh tokens and the store never enter this process.
-        mcpToken: async (serverUrl, invalidateToken) =>
-          mcpTokenResultSchema.parse(
-            await io.request("mcp_token", {
-              serverUrl,
-              ...(invalidateToken !== undefined ? { invalidateToken } : {}),
-            }),
-          ),
-        redactor,
-        capabilities: capabilitiesWithHost,
-      });
+      return await runAgentLeaf(prompt, opts, makeLeafIo(identity));
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {

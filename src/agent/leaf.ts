@@ -15,7 +15,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk-labs/workflow";
 import { DEFAULT_COMPACTION_BUDGET_CHARS, planCompaction } from "./compaction.js";
-import { EngineError } from "../errors.js";
+import { EngineError, type EngineErrorCode } from "../errors.js";
 import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
 import type { ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
@@ -27,9 +27,22 @@ import {
   type McpTokenResult,
   type ToolSetContext,
 } from "./tools.js";
+import { subagentSelected } from "./tools/registry.js";
+import { makeSubagentTool } from "./tools/subagent.js";
 
 /** Tool iterations per agent() call before the loop is declared runaway. */
 const MAX_TOOL_ITERATIONS = 25;
+
+/**
+ * Error codes that are RUN-FATAL even when they surface through a tool call: a budget breach or a
+ * cancellation reported by a `subagent` leaf (via its forked io.reportUsage / aborted stream) must
+ * END the run, not be handed back to the model as a recoverable tool result. Every other tool
+ * failure stays a result the model can react to.
+ */
+const FATAL_TOOL_ERROR_CODES: ReadonlySet<EngineErrorCode> = new Set([
+  "BUDGET_EXCEEDED",
+  "CANCELLED",
+]);
 
 /**
  * Identity of one `agent()` leaf, carried on its `turn_started`/`turn_ended` frames so a stream
@@ -101,6 +114,11 @@ export interface LeafIo {
   /** Capability context: where the workspace and deployed skills live. */
   capabilities: ToolSetContext;
   provider?: ProviderIo;
+  /** Derive a child leaf io for a `subagent` tool call: a fresh run-unique identity over the SAME
+   *  sinks (model stream, usage/budget, event publisher, redactor, capabilities). OPTIONAL — an io
+   *  that omits it simply doesn't offer the `subagent` tool (like an absent host backend). `name`
+   *  is the child's optional display label. */
+  forkLeaf?(opts: { name?: string }): LeafIo;
 }
 
 /** Execute one agent() leaf call; resolves to final text, or the parsed object in schema mode. */
@@ -122,13 +140,26 @@ export async function runAgentLeaf(
           redactor: io.redactor,
         });
   try {
-    return await runLeafWithTools(
-      prompt,
-      opts,
-      io,
-      [...base.tools, ...(connected?.tools ?? [])],
-      base.preamble,
-    );
+    const resolved = [...base.tools, ...(connected?.tools ?? [])];
+    // `subagent` is assembled HERE (not in buildToolSet): it needs io.forkLeaf and the resolved
+    // parent tool set as its subset ceiling. Added only when the io can fork a child AND the call's
+    // builtins selection includes it (default-on under "all"; never for "none"/"read-only").
+    const forkLeaf = io.forkLeaf?.bind(io);
+    const tools =
+      forkLeaf !== undefined && subagentSelected(opts?.builtins)
+        ? [
+            ...resolved,
+            makeSubagentTool({
+              parentTools: resolved,
+              parentInlineTools: opts?.tools ?? [],
+              parentModel: opts?.model,
+              parentProvider: opts?.provider,
+              forkLeaf,
+              run: runAgentLeaf,
+            }),
+          ]
+        : resolved;
+    return await runLeafWithTools(prompt, opts, io, tools, base.preamble);
   } finally {
     // Disconnect on completion AND on error — stdio servers are real child processes.
     if (connected !== null) await connected.disconnect();
@@ -220,10 +251,13 @@ async function runToolLoop(
     }
 
     messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
-    const results = [];
-    for (const call of turn.toolCalls) {
-      results.push(await executeToolCall(call, tools, io, turnId));
-    }
+    // A turn's tool calls run CONCURRENTLY: the model is expected to batch only independent work,
+    // and a `subagent` call is just another tool call — so N of them fan out here in parallel.
+    // Promise.all preserves order, so results still line up with toolCalls; a run-fatal tool error
+    // (budget/cancel) rejects the batch and ends the run.
+    const results = await Promise.all(
+      turn.toolCalls.map((call) => executeToolCall(call, tools, io, turnId)),
+    );
     messages.push({ role: "tool_results", results });
   }
   throw new EngineError(
@@ -397,6 +431,9 @@ async function executeToolCall(
     const message = io.redactor.redact(err instanceof Error ? err.message : String(err));
     const code = err instanceof EngineError ? err.code : "PROGRAM_ERROR";
     io.emit(turnId, { kind: "tool_call_error", toolCallId: call.id, error: { code, message } });
+    // Run-fatal failures (a subagent leaf tripping the budget cap, or cancellation) must propagate
+    // and end the run — not be swallowed into a tool result the model would keep working past.
+    if (err instanceof EngineError && FATAL_TOOL_ERROR_CODES.has(err.code)) throw err;
     return { id: call.id, content: `Tool failed: ${message}`, isError: true };
   }
 }
