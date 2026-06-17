@@ -1,7 +1,14 @@
 # boardwalk
 
-The open-source single-node engine for Boardwalk workflows: cron scheduling, durable run
-semantics, SQLite run history, and a local run log — on hardware you own, with no account.
+**The control plane for agent workflows, open source.** A Boardwalk workflow is a plain
+TypeScript program: schedule it, call LLM agents from it, sleep durably, compose workflows out of
+workflows. Any trigger, any model, on infrastructure you own. Audit everything, self-host it,
+leave anytime.
+
+This repo is the **engine** that runs those workflows: the open-source, single-node core with
+cron scheduling, durable run semantics, SQLite run history, and a local run log, on hardware you
+own with no account. Same engine and same run semantics as the hosted Boardwalk platform; this is
+the part you run yourself.
 
 > **Status: pre-release.** This repo is being built in the open ahead of its first published
 > release. The contracts it implements are stable (see [`@boardwalk-labs/workflow`](https://www.npmjs.com/package/@boardwalk-labs/workflow));
@@ -10,7 +17,7 @@ semantics, SQLite run history, and a local run log — on hardware you own, with
 
 ## What it is
 
-A workflow is a plain TypeScript program. This engine runs it:
+The engine runs a workflow two ways:
 
 - **Server mode** — `docker run ghcr.io/boardwalk-labs/boardwalk`: a long-lived process that schedules cron
   workflows, accepts webhooks, keeps run history in SQLite, and serves a local run log.
