@@ -3,6 +3,18 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.17
+
+### Changed
+
+- Renamed the OpenAI-compatible reasoning encoder `reasoningToOpenRouter` to `reasoningToUnified`,
+  and the `ChatArgs.reasoningStyle` discriminant value `"openrouter"` to `"unified"` (the managed
+  lane's unified `reasoning` object). Breaking for direct callers of either symbol.
+
+### Removed
+
+- Dead unused exports `removeRunDir` (`run/run_dir.ts`) and `ParentToChild` (`run/ipc.ts`).
+
 ## 0.1.13
 
 ### Fixed

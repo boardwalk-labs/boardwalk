@@ -55,8 +55,6 @@ export interface HostResultMessage {
   result: { ok: true; value: unknown } | { ok: false; error: IpcErrorShape };
 }
 
-export type ParentToChild = InitMessage | HostResultMessage;
-
 // The child validates only the discriminator + the fields it dereferences; the manifest was
 // already validated by the store and `unknown` payloads are narrowed at their use sites.
 export const parentToChildSchema = z.union([

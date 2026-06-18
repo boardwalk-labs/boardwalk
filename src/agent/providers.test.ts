@@ -106,9 +106,9 @@ describe("chatOpenAi streaming", () => {
 });
 
 describe("chatOpenAi reasoning encoding", () => {
-  it("emits OpenRouter's unified `reasoning` object on the managed lane (openrouter style)", async () => {
+  it("emits the unified `reasoning` object on the managed lane (unified style)", async () => {
     const { io, body } = recordingFetch();
-    await chatOpenAi(baseArgs({ reasoning: { effort: "high" }, reasoningStyle: "openrouter" }), io);
+    await chatOpenAi(baseArgs({ reasoning: { effort: "high" }, reasoningStyle: "unified" }), io);
     expect(body().reasoning).toEqual({ effort: "high" });
     expect(body().reasoning_effort).toBeUndefined();
   });
@@ -116,7 +116,7 @@ describe("chatOpenAi reasoning encoding", () => {
   it("passes a token budget + exclude through the unified object", async () => {
     const { io, body } = recordingFetch();
     await chatOpenAi(
-      baseArgs({ reasoning: { maxTokens: 2000, exclude: true }, reasoningStyle: "openrouter" }),
+      baseArgs({ reasoning: { maxTokens: 2000, exclude: true }, reasoningStyle: "unified" }),
       io,
     );
     expect(body().reasoning).toEqual({ max_tokens: 2000, exclude: true });

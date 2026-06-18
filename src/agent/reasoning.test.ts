@@ -4,31 +4,31 @@ import { describe, expect, it } from "vitest";
 import {
   reasoningToAnthropicThinking,
   reasoningToOpenAiEffort,
-  reasoningToOpenRouter,
+  reasoningToUnified,
 } from "./reasoning.js";
 
-describe("reasoningToOpenRouter", () => {
+describe("reasoningToUnified", () => {
   it("passes an effort through", () => {
-    expect(reasoningToOpenRouter({ effort: "high" })).toEqual({ effort: "high" });
-    expect(reasoningToOpenRouter({ effort: "xhigh" })).toEqual({ effort: "xhigh" });
-    expect(reasoningToOpenRouter({ effort: "none" })).toEqual({ effort: "none" });
+    expect(reasoningToUnified({ effort: "high" })).toEqual({ effort: "high" });
+    expect(reasoningToUnified({ effort: "xhigh" })).toEqual({ effort: "xhigh" });
+    expect(reasoningToUnified({ effort: "none" })).toEqual({ effort: "none" });
   });
 
   it("maps a token budget to max_tokens", () => {
-    expect(reasoningToOpenRouter({ maxTokens: 2000 })).toEqual({ max_tokens: 2000 });
+    expect(reasoningToUnified({ maxTokens: 2000 })).toEqual({ max_tokens: 2000 });
   });
 
   it("carries exclude alongside (and on its own)", () => {
-    expect(reasoningToOpenRouter({ effort: "high", exclude: true })).toEqual({
+    expect(reasoningToUnified({ effort: "high", exclude: true })).toEqual({
       effort: "high",
       exclude: true,
     });
-    expect(reasoningToOpenRouter({ exclude: true })).toEqual({ exclude: true });
+    expect(reasoningToUnified({ exclude: true })).toEqual({ exclude: true });
   });
 
   it("is undefined for nothing to send", () => {
-    expect(reasoningToOpenRouter(undefined)).toBeUndefined();
-    expect(reasoningToOpenRouter({})).toBeUndefined();
+    expect(reasoningToUnified(undefined)).toBeUndefined();
+    expect(reasoningToUnified({})).toBeUndefined();
   });
 });
 

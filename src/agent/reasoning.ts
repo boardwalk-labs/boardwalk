@@ -3,9 +3,9 @@
 // Provider wire encoding for the neutral reasoning control (SDK `AgentOptions.reasoning`, already
 // normalized to `NormalizedReasoning` by the SDK's `normalizeReasoning`). ONE neutral knob maps to
 // three wire shapes — the same split the loop already has across its two-and-a-bit protocols:
-//   - OpenRouter unified `reasoning` object  → the managed `boardwalk` lane (openai protocol).
-//   - OpenAI `reasoning_effort` string       → a BYO OpenAI / OpenAI-compatible endpoint.
-//   - Anthropic `thinking` token budget      → BYO Anthropic + Bedrock (the Messages schema).
+//   - unified `reasoning` object (OpenAI-compatible) → the managed `boardwalk` lane.
+//   - OpenAI `reasoning_effort` string               → a BYO OpenAI / OpenAI-compatible endpoint.
+//   - Anthropic `thinking` token budget              → BYO Anthropic + Bedrock (the Messages schema).
 //
 // Pure functions (no fetch, no I/O), tested directly; the adapters in providers.ts / bedrock.ts call
 // them, and the backend's hosted broker imports them (via core.ts) so both paths encode identically.
@@ -13,9 +13,9 @@
 import type { NormalizedReasoning } from "@boardwalk-labs/workflow";
 
 /**
- * Effort → fraction-of-max-tokens, OpenRouter's own normalization (used to DERIVE an Anthropic
- * token budget from an effort level, since Anthropic takes a budget, not an effort). `none` is 0 —
- * the caller reads that as "thinking off".
+ * Effort → fraction-of-max-tokens, the standard effort→budget normalization (used to DERIVE an
+ * Anthropic token budget from an effort level, since Anthropic takes a budget, not an effort).
+ * `none` is 0 — the caller reads that as "thinking off".
  */
 const EFFORT_RATIOS: Record<string, number> = {
   none: 0,
@@ -30,11 +30,11 @@ const EFFORT_RATIOS: Record<string, number> = {
 const MIN_THINKING_BUDGET = 1024;
 
 /**
- * OpenRouter's unified `reasoning` object for the managed lane. Pass-through of the neutral fields
- * (`effort` XOR `max_tokens`, plus `exclude`). Returns `undefined` when there is nothing to send so
- * the caller can omit the field entirely.
+ * The unified `reasoning` object (OpenAI-compatible) for the managed lane. Pass-through of the
+ * neutral fields (`effort` XOR `max_tokens`, plus `exclude`). Returns `undefined` when there is
+ * nothing to send so the caller can omit the field entirely.
  */
-export function reasoningToOpenRouter(
+export function reasoningToUnified(
   r: NormalizedReasoning | undefined,
 ): Record<string, unknown> | undefined {
   if (r === undefined) return undefined;

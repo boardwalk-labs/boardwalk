@@ -140,10 +140,10 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       messages: redactMessages(req.messages, redactor),
       tools: req.tools,
       // Reasoning-effort control: pass the normalized request through, and tell the OpenAI adapter
-      // which dialect to speak — the managed lane fulfills via OpenRouter (unified `reasoning`),
-      // every other provider gets `reasoning_effort` / a `thinking` budget per its protocol.
+      // which dialect to speak — the managed lane uses the unified `reasoning` object, every other
+      // provider gets `reasoning_effort` / a `thinking` budget per its protocol.
       ...(req.reasoning !== undefined ? { reasoning: req.reasoning } : {}),
-      reasoningStyle: resolved.provider === BOARDWALK_PROVIDER ? "openrouter" : "openai_effort",
+      reasoningStyle: resolved.provider === BOARDWALK_PROVIDER ? "unified" : "openai_effort",
       // Bedrock SigV4 credentials (present only for protocol "bedrock"); the adapter signs with them.
       ...(resolved.aws !== undefined ? { aws: resolved.aws } : {}),
     };

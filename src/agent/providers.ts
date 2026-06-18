@@ -18,7 +18,7 @@ import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./convers
 import {
   reasoningToAnthropicThinking,
   reasoningToOpenAiEffort,
-  reasoningToOpenRouter,
+  reasoningToUnified,
 } from "./reasoning.js";
 import { sseDataLines } from "./sse.js";
 
@@ -35,13 +35,13 @@ export interface ChatArgs {
   /** Anthropic requires max_tokens; this default is deliberately generous. */
   maxTokens?: number;
   /** Reasoning-effort control, already normalized (SDK `normalizeReasoning`). Encoded per protocol:
-   *  the Anthropic adapters derive a `thinking` token budget; the OpenAI adapter emits OpenRouter's
-   *  unified `reasoning` object on the managed lane, or `reasoning_effort` otherwise (`reasoningStyle`). */
+   *  the Anthropic adapters derive a `thinking` token budget; the OpenAI adapter emits the unified
+   *  `reasoning` object on the managed lane, or `reasoning_effort` otherwise (`reasoningStyle`). */
   reasoning?: NormalizedReasoning;
-  /** How the OpenAI adapter encodes `reasoning`: `"openrouter"` (the managed lane → unified object)
-   *  or `"openai_effort"` (a BYO OpenAI-compatible endpoint → `reasoning_effort`). Ignored by the
-   *  Anthropic/Bedrock adapters. Defaults to `"openai_effort"`. */
-  reasoningStyle?: "openrouter" | "openai_effort";
+  /** How the OpenAI adapter encodes `reasoning`: `"unified"` (the managed lane → the unified
+   *  `reasoning` object) or `"openai_effort"` (a BYO OpenAI-compatible endpoint → `reasoning_effort`).
+   *  Ignored by the Anthropic/Bedrock adapters. Defaults to `"openai_effort"`. */
+  reasoningStyle?: "unified" | "openai_effort";
   /** AWS region + SigV4 credentials — present only for the bedrock protocol (chatBedrock). */
   aws?:
     | {
@@ -301,15 +301,15 @@ function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
   return out;
 }
 
-/** The reasoning field(s) for an OpenAI-compatible body: OpenRouter's unified `reasoning` object on
- *  the managed lane, else OpenAI's `reasoning_effort` string. Empty when there is nothing to send. */
+/** The reasoning field(s) for an OpenAI-compatible body: the unified `reasoning` object on the
+ *  managed lane, else OpenAI's `reasoning_effort` string. Empty when there is nothing to send. */
 function openAiReasoningFields(
   reasoning: NormalizedReasoning | undefined,
-  style: "openrouter" | "openai_effort" | undefined,
+  style: "unified" | "openai_effort" | undefined,
 ): Record<string, unknown> {
   if (reasoning === undefined) return {};
-  if (style === "openrouter") {
-    const unified = reasoningToOpenRouter(reasoning);
+  if (style === "unified") {
+    const unified = reasoningToUnified(reasoning);
     return unified !== undefined ? { reasoning: unified } : {};
   }
   const effort = reasoningToOpenAiEffort(reasoning);

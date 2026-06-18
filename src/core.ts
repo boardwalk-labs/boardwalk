@@ -62,7 +62,7 @@ export type { ChatArgs, ProviderIo } from "./agent/providers.js";
 export {
   reasoningToAnthropicThinking,
   reasoningToOpenAiEffort,
-  reasoningToOpenRouter,
+  reasoningToUnified,
   type AnthropicThinking,
 } from "./agent/reasoning.js";
 

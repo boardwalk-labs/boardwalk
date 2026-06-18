@@ -61,11 +61,6 @@ export function prepareRunDir(dataDir: string, runId: string, program: string): 
   return { root, programPath, workspaceDir, artifactsDir };
 }
 
-/** Remove a run directory (terminal-run cleanup; never called on active runs). */
-export function removeRunDir(dataDir: string, runId: string): void {
-  rmSync(join(dataDir, "runs", runId), { recursive: true, force: true });
-}
-
 // ----------------------------------------------------------------------------
 // The deployed workflow PACKAGE (deploy artifacts that ride alongside the program)
 //
