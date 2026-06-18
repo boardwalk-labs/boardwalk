@@ -56,6 +56,16 @@ export { chatAnthropic, chatOpenAi } from "./agent/providers.js";
 export { chatBedrock } from "./agent/bedrock.js";
 export type { ChatArgs, ProviderIo } from "./agent/providers.js";
 
+// ---- Reasoning-effort wire encoders. The neutral `AgentOptions.reasoning` (normalized by the SDK's
+//      `normalizeReasoning`) → each provider's wire shape. Exported so the hosted platform's broker
+//      encodes IDENTICALLY to the single-node engine's adapters above. ----
+export {
+  reasoningToAnthropicThinking,
+  reasoningToOpenAiEffort,
+  reasoningToOpenRouter,
+  type AnthropicThinking,
+} from "./agent/reasoning.js";
+
 // ---- Model + provider resolution ----
 export { resolveModel, BOARDWALK_PROVIDER } from "./agent/resolve.js";
 export type {

@@ -11,9 +11,15 @@
 // jitter on 429/5xx/network errors; a non-rate-limit 4xx never retries.
 
 import { z } from "zod";
+import type { NormalizedReasoning } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 import { isJsonValue, isPlainObject } from "../json_value.js";
 import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
+import {
+  reasoningToAnthropicThinking,
+  reasoningToOpenAiEffort,
+  reasoningToOpenRouter,
+} from "./reasoning.js";
 import { sseDataLines } from "./sse.js";
 
 export interface ChatArgs {
@@ -28,6 +34,14 @@ export interface ChatArgs {
   tools: readonly ToolSpec[];
   /** Anthropic requires max_tokens; this default is deliberately generous. */
   maxTokens?: number;
+  /** Reasoning-effort control, already normalized (SDK `normalizeReasoning`). Encoded per protocol:
+   *  the Anthropic adapters derive a `thinking` token budget; the OpenAI adapter emits OpenRouter's
+   *  unified `reasoning` object on the managed lane, or `reasoning_effort` otherwise (`reasoningStyle`). */
+  reasoning?: NormalizedReasoning;
+  /** How the OpenAI adapter encodes `reasoning`: `"openrouter"` (the managed lane → unified object)
+   *  or `"openai_effort"` (a BYO OpenAI-compatible endpoint → `reasoning_effort`). Ignored by the
+   *  Anthropic/Bedrock adapters. Defaults to `"openai_effort"`. */
+  reasoningStyle?: "openrouter" | "openai_effort";
   /** AWS region + SigV4 credentials — present only for the bedrock protocol (chatBedrock). */
   aws?:
     | {
@@ -74,10 +88,16 @@ export function anthropicMessagesBody(args: {
   messages: readonly ChatMessage[];
   tools: readonly ToolSpec[];
   maxTokens?: number;
+  reasoning?: NormalizedReasoning;
 }): Record<string, unknown> {
+  const baseMaxTokens = args.maxTokens ?? DEFAULT_MAX_TOKENS;
+  // Extended thinking: an effort level becomes a token budget (Anthropic takes a budget, not an
+  // effort), and max_tokens is grown when needed to stay strictly above it. Off when no reasoning.
+  const thinking = reasoningToAnthropicThinking(args.reasoning, baseMaxTokens);
   return {
-    max_tokens: args.maxTokens ?? DEFAULT_MAX_TOKENS,
+    max_tokens: thinking?.maxTokens ?? baseMaxTokens,
     messages: anthropicMessages(args.messages),
+    ...(thinking !== undefined ? { thinking: thinking.thinking } : {}),
     ...(args.tools.length > 0
       ? {
           tools: args.tools.map((tool) => ({
@@ -275,6 +295,21 @@ function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
   return out;
 }
 
+/** The reasoning field(s) for an OpenAI-compatible body: OpenRouter's unified `reasoning` object on
+ *  the managed lane, else OpenAI's `reasoning_effort` string. Empty when there is nothing to send. */
+function openAiReasoningFields(
+  reasoning: NormalizedReasoning | undefined,
+  style: "openrouter" | "openai_effort" | undefined,
+): Record<string, unknown> {
+  if (reasoning === undefined) return {};
+  if (style === "openrouter") {
+    const unified = reasoningToOpenRouter(reasoning);
+    return unified !== undefined ? { reasoning: unified } : {};
+  }
+  const effort = reasoningToOpenAiEffort(reasoning);
+  return effort !== undefined ? { reasoning_effort: effort } : {};
+}
+
 const openAiResponseSchema = z.looseObject({
   choices: z
     .array(
@@ -317,6 +352,7 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
       body: JSON.stringify({
         model: args.model,
         messages: openAiMessages(args.messages),
+        ...openAiReasoningFields(args.reasoning, args.reasoningStyle),
         ...(args.tools.length > 0
           ? {
               tools: args.tools.map((tool) => ({

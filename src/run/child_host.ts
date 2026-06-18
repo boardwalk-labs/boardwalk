@@ -22,7 +22,7 @@ import {
 import { chatBedrock } from "../agent/bedrock.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "../agent/providers.js";
 import { Redactor } from "../agent/redact.js";
-import type { ResolvedModel } from "../agent/resolve.js";
+import { BOARDWALK_PROVIDER, type ResolvedModel } from "../agent/resolve.js";
 import type {
   ArtifactWriteResult,
   FetchResult,
@@ -139,6 +139,11 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       // untouched. Whoever holds the key (this seam locally; the broker on the platform) redacts.
       messages: redactMessages(req.messages, redactor),
       tools: req.tools,
+      // Reasoning-effort control: pass the normalized request through, and tell the OpenAI adapter
+      // which dialect to speak — the managed lane fulfills via OpenRouter (unified `reasoning`),
+      // every other provider gets `reasoning_effort` / a `thinking` budget per its protocol.
+      ...(req.reasoning !== undefined ? { reasoning: req.reasoning } : {}),
+      reasoningStyle: resolved.provider === BOARDWALK_PROVIDER ? "openrouter" : "openai_effort",
       // Bedrock SigV4 credentials (present only for protocol "bedrock"); the adapter signs with them.
       ...(resolved.aws !== undefined ? { aws: resolved.aws } : {}),
     };

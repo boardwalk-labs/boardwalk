@@ -56,6 +56,7 @@ function harness(
     parentInlineTools: [doubleDef],
     parentModel: "anthropic/claude-sonnet-4.5",
     parentProvider: undefined,
+    parentReasoning: undefined,
     forkLeaf: (opts) => {
       forked.push(opts);
       return stubIo({
@@ -84,6 +85,12 @@ describe("makeSubagentTool", () => {
     expect(h.runs[0]?.opts?.tools).toEqual([doubleDef]);
     // The model/provider default to the parent's when the call names none.
     expect(h.runs[0]?.opts?.model).toBe("anthropic/claude-sonnet-4.5");
+  });
+
+  it("inherits the parent's reasoning effort (like model/provider)", async () => {
+    const h = harness({ parentReasoning: { effort: "high" } });
+    await h.tool.execute({ prompt: "p" });
+    expect(h.runs[0]?.opts?.reasoning).toEqual({ effort: "high" });
   });
 
   it("attenuates to a requested subset of the parent's tools", async () => {

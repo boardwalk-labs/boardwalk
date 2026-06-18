@@ -13,7 +13,7 @@
 // deps; the only edges back to the leaf are type-only (erased at runtime).
 
 import { z } from "zod";
-import type { AgentOptions, ToolDef } from "@boardwalk-labs/workflow";
+import type { AgentOptions, NormalizedReasoning, ToolDef } from "@boardwalk-labs/workflow";
 import { EngineError } from "../../errors.js";
 import type { LeafIo } from "../leaf.js";
 import type { ExecutableTool } from "../tools.js";
@@ -27,6 +27,8 @@ export interface SubagentToolDeps {
   /** Defaults inherited when the call names no model/provider. */
   parentModel: string | undefined;
   parentProvider: string | undefined;
+  /** The parent's reasoning-effort control, inherited by the child (like model/provider). */
+  parentReasoning: NormalizedReasoning | undefined;
   /** Derive the child's leaf io: fresh identity, shared sinks (io.forkLeaf, known present). */
   forkLeaf: (opts: { name?: string }) => LeafIo;
   /** The leaf runner (runAgentLeaf) — injected to avoid an import cycle with leaf.ts. */
@@ -128,6 +130,7 @@ export function makeSubagentTool(deps: SubagentToolDeps): ExecutableTool {
         ...(childInline.length > 0 ? { tools: childInline } : {}),
         ...(model !== undefined ? { model } : {}),
         ...(provider !== undefined ? { provider } : {}),
+        ...(deps.parentReasoning !== undefined ? { reasoning: deps.parentReasoning } : {}),
         ...(input.memory !== undefined ? { memory: input.memory } : {}),
         ...(input.name !== undefined ? { name: input.name } : {}),
       };

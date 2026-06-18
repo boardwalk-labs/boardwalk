@@ -13,7 +13,13 @@
 // holding a credential. Same loop, same observable behavior, either way.
 
 import { randomUUID } from "node:crypto";
-import type { AgentOptions, TokenUsage, ToolReturn } from "@boardwalk-labs/workflow";
+import { normalizeReasoning } from "@boardwalk-labs/workflow";
+import type {
+  AgentOptions,
+  NormalizedReasoning,
+  TokenUsage,
+  ToolReturn,
+} from "@boardwalk-labs/workflow";
 import { DEFAULT_COMPACTION_BUDGET_CHARS, planCompaction } from "./compaction.js";
 import { EngineError, type EngineErrorCode } from "../errors.js";
 import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
@@ -86,6 +92,10 @@ export interface ModelTurnRequest {
   provider: string | undefined;
   messages: readonly ChatMessage[];
   tools: readonly ToolSpec[];
+  /** Normalized reasoning-effort control for this turn (the SDK `AgentOptions.reasoning`), or
+   *  omitted to use the provider default. Resolution to a provider's wire format happens behind the
+   *  `streamModel` seam, never here. */
+  reasoning?: NormalizedReasoning;
 }
 
 /** The result of one model turn: the turn itself, plus the resolved model id usage is keyed by. */
@@ -156,6 +166,7 @@ export async function runAgentLeaf(
               parentInlineTools: opts?.tools ?? [],
               parentModel: opts?.model,
               parentProvider: opts?.provider,
+              parentReasoning: normalizeReasoning(opts?.reasoning),
               forkLeaf,
               run: runAgentLeaf,
             }),
@@ -380,6 +391,10 @@ async function modelTurn(
       io.emit(turnId, { kind: "text_delta", blockId, text: io.redactor.redact(text) });
     },
   };
+  // The author's reasoning-effort control (string sugar expanded, no-ops dropped) rides every real
+  // turn. The internal compaction/summary call (summarizeRange) deliberately omits it — that's
+  // overhead, not the author's work, and shouldn't burn extra reasoning tokens.
+  const reasoning = normalizeReasoning(opts?.reasoning);
   const result = await io.streamModel(
     {
       model: opts?.model,
@@ -390,6 +405,7 @@ async function modelTurn(
         description,
         inputSchema,
       })),
+      ...(reasoning !== undefined ? { reasoning } : {}),
     },
     providerIo,
   );
