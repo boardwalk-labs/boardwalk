@@ -260,7 +260,13 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
 }
 
 // ----------------------------------------------------------------------------
-// OpenAI-compatible chat completions (non-streaming in v0 — one final delta)
+// OpenAI-compatible chat completions (STREAMED — SSE chunks)
+//
+// We request `stream: true` so the provider sends tokens incrementally: text deltas drive
+// io.onDelta live, and the connection keeps producing bytes throughout a long generation (so a
+// hosted relay / idle-timeout can't sever a slow turn — e.g. heavy reasoning). Tool calls stream as
+// indexed deltas (id+name first, arguments accreted); usage rides a final chunk requested via
+// `stream_options.include_usage`.
 // ----------------------------------------------------------------------------
 
 function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
@@ -310,30 +316,41 @@ function openAiReasoningFields(
   return effort !== undefined ? { reasoning_effort: effort } : {};
 }
 
-const openAiResponseSchema = z.looseObject({
+// One streamed chat-completion chunk: a `choices[].delta` (content + indexed tool_call fragments)
+// and, on the final chunk (requested via stream_options.include_usage), a `usage` object.
+const openAiStreamChunkSchema = z.looseObject({
   choices: z
     .array(
       z.looseObject({
         finish_reason: z.string().nullable().optional(),
-        message: z.looseObject({
-          content: z.string().nullable().optional(),
-          tool_calls: z
-            .array(
-              z.looseObject({
-                id: z.string(),
-                function: z.looseObject({ name: z.string(), arguments: z.string() }),
-              }),
-            )
-            .optional(),
-        }),
+        delta: z
+          .looseObject({
+            content: z.string().nullable().optional(),
+            tool_calls: z
+              .array(
+                z.looseObject({
+                  index: z.number().int().nonnegative(),
+                  id: z.string().optional(),
+                  function: z
+                    .looseObject({
+                      name: z.string().optional(),
+                      arguments: z.string().optional(),
+                    })
+                    .optional(),
+                }),
+              )
+              .optional(),
+          })
+          .optional(),
       }),
     )
-    .min(1),
+    .optional(),
   usage: z
     .looseObject({
       prompt_tokens: z.number().int().nonnegative().optional(),
       completion_tokens: z.number().int().nonnegative().optional(),
     })
+    .nullable()
     .optional(),
 });
 
@@ -352,6 +369,10 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
       body: JSON.stringify({
         model: args.model,
         messages: openAiMessages(args.messages),
+        // Stream so a long generation produces bytes continuously (no idle-timeout sever) and text
+        // arrives live; `include_usage` asks for the terminal usage chunk.
+        stream: true,
+        stream_options: { include_usage: true },
         ...openAiReasoningFields(args.reasoning, args.reasoningStyle),
         ...(args.tools.length > 0
           ? {
@@ -371,27 +392,57 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
     return res;
   });
 
-  const parsed = openAiResponseSchema.safeParse(await response.json());
-  if (!parsed.success) {
-    throw new EngineError("PROVIDER_ERROR", "Provider returned a malformed chat completion.");
+  let text = "";
+  let inputTokens: number | undefined;
+  let outputTokens: number | undefined;
+  let finishReason: string | null = null;
+  // Tool calls stream as indexed deltas: id + name arrive (usually in the first fragment for an
+  // index), then `arguments` accrete across fragments. Assemble by index, in index order.
+  const toolAcc = new Map<number, { id: string; name: string; args: string }>();
+
+  for await (const data of sseDataLines(response)) {
+    const parsed = openAiStreamChunkSchema.safeParse(safeJson(data));
+    if (!parsed.success) continue; // unknown/non-JSON frames are forward-compat, not errors
+    const choice = parsed.data.choices?.[0];
+    if (choice !== undefined) {
+      const chunk = choice.delta?.content;
+      if (chunk !== undefined && chunk !== null && chunk.length > 0) {
+        text += chunk;
+        io.onDelta?.(chunk);
+      }
+      for (const tc of choice.delta?.tool_calls ?? []) {
+        const cur = toolAcc.get(tc.index) ?? { id: "", name: "", args: "" };
+        if (tc.id !== undefined) cur.id = tc.id;
+        if (tc.function?.name !== undefined) cur.name = tc.function.name;
+        if (tc.function?.arguments !== undefined) cur.args += tc.function.arguments;
+        toolAcc.set(tc.index, cur);
+      }
+      if (choice.finish_reason !== undefined && choice.finish_reason !== null) {
+        finishReason = choice.finish_reason;
+      }
+    }
+    if (parsed.data.usage !== undefined && parsed.data.usage !== null) {
+      inputTokens = parsed.data.usage.prompt_tokens ?? inputTokens;
+      outputTokens = parsed.data.usage.completion_tokens ?? outputTokens;
+    }
   }
-  const choice = parsed.data.choices[0];
-  const text = choice?.message.content ?? "";
-  if (text.length > 0) io.onDelta?.(text);
-  const toolCalls: ToolCallRequest[] = (choice?.message.tool_calls ?? []).map((call) => ({
-    id: call.id,
-    name: call.function.name,
-    input: parseToolInput(call.function.arguments, call.function.name),
-  }));
-  const usage = parsed.data.usage;
+
+  const toolCalls: ToolCallRequest[] = [...toolAcc.entries()]
+    .sort(([a], [b]) => a - b)
+    .map(([index, tool]) => ({
+      id: tool.id.length > 0 ? tool.id : `call-${String(index + 1)}`,
+      name: tool.name,
+      input: parseToolInput(tool.args, tool.name),
+    }));
+
   return {
     text,
     toolCalls,
     usage: {
-      ...(usage?.prompt_tokens !== undefined ? { inputTokens: usage.prompt_tokens } : {}),
-      ...(usage?.completion_tokens !== undefined ? { outputTokens: usage.completion_tokens } : {}),
+      ...(inputTokens !== undefined ? { inputTokens } : {}),
+      ...(outputTokens !== undefined ? { outputTokens } : {}),
     },
-    wantsTools: choice?.finish_reason === "tool_calls" || toolCalls.length > 0,
+    wantsTools: finishReason === "tool_calls" || toolCalls.length > 0,
   };
 }
 

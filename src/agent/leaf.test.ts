@@ -34,34 +34,46 @@ const ANTHROPIC_MODEL: ResolvedModel = {
 // Scripted responses
 // ----------------------------------------------------------------------------
 
+// OpenAI chat completions stream as SSE chunks (chatOpenAi requests stream: true). These build the
+// chunk sequence for a turn: text/tool-call deltas, a finish chunk, then a usage chunk + [DONE].
+function openAiSse(...events: object[]): Response {
+  const body = events.map((e) => `data: ${JSON.stringify(e)}\n\n`).join("") + "data: [DONE]\n\n";
+  return new Response(body, { status: 200 });
+}
+
 function openAiText(content: string, usage?: { in: number; out: number }): Response {
-  return Response.json({
-    choices: [{ finish_reason: "stop", message: { content } }],
+  return openAiSse(
+    { choices: [{ delta: { content }, finish_reason: null }] },
+    { choices: [{ delta: {}, finish_reason: "stop" }] },
     ...(usage !== undefined
-      ? { usage: { prompt_tokens: usage.in, completion_tokens: usage.out } }
-      : {}),
-  });
+      ? [{ choices: [], usage: { prompt_tokens: usage.in, completion_tokens: usage.out } }]
+      : []),
+  );
 }
 
 function openAiToolCalls(
   calls: { id: string; name: string; args: Record<string, unknown> }[],
   text = "",
 ): Response {
-  return Response.json({
-    choices: [
-      {
-        finish_reason: "tool_calls",
-        message: {
-          content: text.length > 0 ? text : null,
-          tool_calls: calls.map((c) => ({
-            id: c.id,
-            function: { name: c.name, arguments: JSON.stringify(c.args) },
-          })),
+  return openAiSse(
+    ...(text.length > 0 ? [{ choices: [{ delta: { content: text }, finish_reason: null }] }] : []),
+    {
+      choices: [
+        {
+          delta: {
+            tool_calls: calls.map((c, index) => ({
+              index,
+              id: c.id,
+              function: { name: c.name, arguments: JSON.stringify(c.args) },
+            })),
+          },
+          finish_reason: null,
         },
-      },
-    ],
-    usage: { prompt_tokens: 5, completion_tokens: 5 },
-  });
+      ],
+    },
+    { choices: [{ delta: {}, finish_reason: "tool_calls" }] },
+    { choices: [], usage: { prompt_tokens: 5, completion_tokens: 5 } },
+  );
 }
 
 function anthropicSse(...events: object[]): Response {

@@ -126,6 +126,43 @@ export interface FakeProvider {
  * makes the secret-redaction canary and the "context reached the model" assertions possible
  * without any real provider.
  */
+/** Convert a non-streaming OpenAI response object (the shape the suite queues) into an SSE body:
+ *  a content delta, an indexed tool_calls delta, a finish chunk, then a usage chunk + [DONE]. */
+function toSseBody(resp: object): string {
+  const r = resp as {
+    choices?: {
+      finish_reason?: string | null;
+      message?: {
+        content?: string | null;
+        tool_calls?: { id: string; function: { name: string; arguments: string } }[];
+      };
+    }[];
+    usage?: object;
+  };
+  const choice = r.choices?.[0];
+  const chunks: object[] = [];
+  const content = choice?.message?.content;
+  if (typeof content === "string" && content.length > 0) {
+    chunks.push({ choices: [{ delta: { content }, finish_reason: null }] });
+  }
+  const toolCalls = choice?.message?.tool_calls ?? [];
+  if (toolCalls.length > 0) {
+    chunks.push({
+      choices: [
+        {
+          delta: {
+            tool_calls: toolCalls.map((c, index) => ({ index, id: c.id, function: c.function })),
+          },
+          finish_reason: null,
+        },
+      ],
+    });
+  }
+  chunks.push({ choices: [{ delta: {}, finish_reason: choice?.finish_reason ?? "stop" }] });
+  if (r.usage !== undefined) chunks.push({ choices: [], usage: r.usage });
+  return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
 export function startFakeProvider(): Promise<FakeProvider> {
   const requests: string[] = [];
   const queue: object[] = [];
@@ -135,10 +172,12 @@ export function startFakeProvider(): Promise<FakeProvider> {
     req.on("data", (chunk: Buffer) => (body += chunk.toString()));
     req.on("end", () => {
       requests.push(body);
-      res.setHeader("content-type", "application/json");
+      // chatOpenAi requests stream:true, so reply with SSE — the queued/default objects are the
+      // non-streaming OpenAI shape, streamified on the fly (so the test call sites stay unchanged).
+      res.setHeader("content-type", "text/event-stream");
       const queued = queue.shift();
       res.end(
-        JSON.stringify(
+        toSseBody(
           queued ?? {
             choices: [{ finish_reason: "stop", message: { content: reply.text } }],
             usage: { prompt_tokens: reply.usage.in, completion_tokens: reply.usage.out },

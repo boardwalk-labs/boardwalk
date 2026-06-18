@@ -32,6 +32,41 @@ interface FakeProvider {
   close: () => Promise<void>;
 }
 
+/** Streamify a non-streaming OpenAI response object into an SSE body (chatOpenAi requests stream). */
+function openAiSse(resp: object): string {
+  const r = resp as {
+    choices?: {
+      finish_reason?: string | null;
+      message?: {
+        content?: string | null;
+        tool_calls?: { id: string; function: { name: string; arguments: string } }[];
+      };
+    }[];
+    usage?: object;
+  };
+  const choice = r.choices?.[0];
+  const chunks: object[] = [];
+  if (typeof choice?.message?.content === "string" && choice.message.content.length > 0) {
+    chunks.push({ choices: [{ delta: { content: choice.message.content }, finish_reason: null }] });
+  }
+  const toolCalls = choice?.message?.tool_calls ?? [];
+  if (toolCalls.length > 0) {
+    chunks.push({
+      choices: [
+        {
+          delta: {
+            tool_calls: toolCalls.map((c, index) => ({ index, id: c.id, function: c.function })),
+          },
+          finish_reason: null,
+        },
+      ],
+    });
+  }
+  chunks.push({ choices: [{ delta: {}, finish_reason: choice?.finish_reason ?? "stop" }] });
+  if (r.usage !== undefined) chunks.push({ choices: [], usage: r.usage });
+  return chunks.map((c) => `data: ${JSON.stringify(c)}\n\n`).join("") + "data: [DONE]\n\n";
+}
+
 function startFakeProvider(): Promise<FakeProvider> {
   const requests: string[] = [];
   const queue: object[] = [];
@@ -41,10 +76,11 @@ function startFakeProvider(): Promise<FakeProvider> {
     req.on("data", (chunk: Buffer) => (body += chunk.toString()));
     req.on("end", () => {
       requests.push(body);
-      res.setHeader("content-type", "application/json");
+      // chatOpenAi streams (stream:true) → reply as SSE, streamifying the OpenAI-shaped object.
+      res.setHeader("content-type", "text/event-stream");
       const queued = queue.shift();
       res.end(
-        JSON.stringify(
+        openAiSse(
           queued ?? {
             choices: [{ finish_reason: "stop", message: { content: reply.text } }],
             usage: { prompt_tokens: reply.usage.in, completion_tokens: reply.usage.out },
