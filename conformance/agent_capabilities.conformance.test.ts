@@ -8,11 +8,14 @@
 // round-trip through the loop, memory auto-persists across runs with no declaration anywhere,
 // and deployed skill markdown loads into model context.
 
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   createEngine,
   disposeEngines,
   localInference,
+  makeDataDir,
   startFakeProvider,
   toolCallResponse,
   type FakeProvider,
@@ -144,9 +147,17 @@ describe("conformance: agent() capabilities", () => {
     expect(provider.requests.at(-1)).toContain("learned.md");
   }, 30_000);
 
-  it("skill markdown deployed via deployWorkflow's skills map loads into model context", async () => {
+  it("a deployed skill discloses progressively: catalog up front, body on demand via the skill tool", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
-    provider.respondWith("checked", { in: 1, out: 1 });
+    // Deploy folder-per-skill: skills/<name>/SKILL.md (frontmatter + body), passed by source dir.
+    const pkg = makeDataDir();
+    const skillDir = join(pkg, "skills", "review-checklist");
+    mkdirSync(skillDir, { recursive: true });
+    writeFileSync(
+      join(skillDir, "SKILL.md"),
+      "---\nname: review-checklist\ndescription: How to inspect a boat\n---\nAlways check the bilge pump first.",
+      "utf8",
+    );
     engine.deployWorkflow({
       program: `
         import { agent, output } from "@boardwalk-labs/workflow";
@@ -156,12 +167,26 @@ describe("conformance: agent() capabilities", () => {
           skills: ["review-checklist"],
         }));
       `,
-      skills: { "review-checklist": "Always check the bilge pump first." },
+      skillsSourceDir: join(pkg, "skills"),
     });
 
+    // The model loads the skill (progressive disclosure), then answers.
+    provider.queueResponses(
+      toolCallResponse([{ id: "s1", name: "skill", argsJson: '{"name":"review-checklist"}' }], {
+        in: 1,
+        out: 1,
+      }),
+    );
+    provider.respondWith("checked", { in: 1, out: 1 });
+
+    const requestsBefore = provider.requests.length;
     const done = await engine.waitForRun(engine.startRun("skilled").id);
     expect(done.status).toBe("completed");
-    expect(provider.requests.at(-1)).toContain("Always check the bilge pump first.");
+    const reqs = provider.requests.slice(requestsBefore);
+    // The catalog description rides the FIRST request; the body arrives only after the skill tool call.
+    expect(reqs[0] ?? "").toContain("How to inspect a boat");
+    expect(reqs[0] ?? "").not.toContain("Always check the bilge pump first.");
+    expect(reqs.at(-1) ?? "").toContain("Always check the bilge pump first.");
   }, 30_000);
 
   it("auto-loads an AGENTS.md in the workspace into the agent's context — no option named", async () => {

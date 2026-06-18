@@ -68,11 +68,12 @@ export interface DeployArgs {
   /** Engine-side deploy config (e.g. catch_up). Replaced wholesale on redeploy. */
   config?: Record<string, JsonValue>;
   /**
-   * Skill markdown deployed alongside the program, keyed by skill name (the CLI ships the
-   * project's skills/ dir this way). Every name declared in meta.skills must be present;
-   * replaced wholesale on redeploy.
+   * Absolute path to the project's `skills/` directory, deployed alongside the program (the CLI
+   * passes the package's skills/ dir). Copied WHOLESALE into the workflow package as
+   * skills/<name>/SKILL.md (+ bundled resources); replaced wholesale on redeploy. Skills are
+   * per-agent (no manifest field) — an agent() naming an undeployed skill fails at call time.
    */
-  skills?: Record<string, string>;
+  skillsSourceDir?: string;
   /**
    * The workflow's BUNDLED AGENTS.md — the author's standing project instructions, shipped in the
    * package alongside the program (the CLI ships the project's root AGENTS.md this way). Read by
@@ -161,7 +162,7 @@ export class Engine {
     // (Skills are per-agent — no manifest field — so an agent() selecting an undeployed skill fails
     // at call time, not here. The bundled AGENTS.md is default-on, read by every agent().)
     writePackage(this.dataDir, workflow.id, {
-      ...(args.skills !== undefined ? { skills: args.skills } : {}),
+      ...(args.skillsSourceDir !== undefined ? { skillsSourceDir: args.skillsSourceDir } : {}),
       ...(args.agentsMd !== undefined ? { agentsMd: args.agentsMd } : {}),
     });
     return workflow;

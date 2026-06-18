@@ -70,11 +70,12 @@ export function removeRunDir(dataDir: string, runId: string): void {
 // The deployed workflow PACKAGE (deploy artifacts that ride alongside the program)
 //
 // A per-workflow directory under <dataDir>/packages/<workflowId> holding the deploy artifacts the
-// CLI ships beside the program: skills/<name>.md and a bundled AGENTS.md (the author's standing
-// instructions, read by every agent() in the workflow). It is the program PACKAGE root the run's
-// ToolSetContext.programDir points at; skillsDir is <packageRoot>/skills (so programDir is literally
-// the parent of skillsDir). Replaced wholesale on redeploy: a redeploy that dropped a skill — or the
-// AGENTS.md — must not leave the stale file behind.
+// CLI ships beside the program: the skills/ subtree (folder-per-skill — skills/<name>/SKILL.md plus
+// any bundled resources) and a bundled AGENTS.md (the author's standing instructions, read by every
+// agent() in the workflow). It is the program PACKAGE root the run's ToolSetContext.programDir points
+// at; skillsDir is <packageRoot>/skills (so programDir is literally the parent of skillsDir). Replaced
+// wholesale on redeploy: a redeploy that dropped a skill — or the AGENTS.md — must not leave the stale
+// file behind.
 // ----------------------------------------------------------------------------
 
 /** The deployed workflow's package root (skills + bundled AGENTS.md live under here). */
@@ -82,7 +83,7 @@ export function packageRoot(dataDir: string, workflowId: string): string {
   return join(dataDir, "packages", workflowId);
 }
 
-/** Where deployed skill markdown lives: <packageRoot>/skills/<name>.md. */
+/** Where deployed skills live: <packageRoot>/skills/<name>/SKILL.md (+ bundled resources). */
 export function skillsDirOf(packageDir: string): string {
   return join(packageDir, "skills");
 }
@@ -93,8 +94,9 @@ export function bundledAgentsMdPath(packageDir: string): string {
 }
 
 export interface PackageArtifacts {
-  /** Skill markdown keyed by skill name (written to skills/<name>.md). */
-  skills?: Record<string, string> | undefined;
+  /** Absolute path to the project's `skills/` directory, copied WHOLESALE into the package root
+   *  (folder-per-skill: skills/<name>/SKILL.md + bundled resources). Undefined ⇒ no skills. */
+  skillsSourceDir?: string | undefined;
   /** The bundled AGENTS.md content (the author's standing instructions), or undefined for none. */
   agentsMd?: string | undefined;
 }
@@ -112,13 +114,10 @@ export function writePackage(
   const root = packageRoot(dataDir, workflowId);
   rmSync(root, { recursive: true, force: true });
 
-  const skills = Object.entries(artifacts.skills ?? {});
-  if (skills.length > 0) {
-    const dir = skillsDirOf(root);
-    mkdirSync(dir, { recursive: true });
-    for (const [name, markdown] of skills) {
-      writeFileSync(join(dir, `${name}.md`), markdown, "utf8");
-    }
+  if (artifacts.skillsSourceDir !== undefined && existsSync(artifacts.skillsSourceDir)) {
+    // Copy the whole skills/ subtree (folder-per-skill + bundled resources) into the package root.
+    // cpSync creates the destination tree, matching the hosted "extract the tarball" layout exactly.
+    cpSync(artifacts.skillsSourceDir, skillsDirOf(root), { recursive: true });
   }
   if (artifacts.agentsMd !== undefined) {
     mkdirSync(root, { recursive: true });

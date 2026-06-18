@@ -14,6 +14,12 @@ import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
+import {
+  listSkillFiles,
+  loadSkillBody,
+  loadSkillCatalogEntry,
+  loadSkillResource,
+} from "./skills.js";
 import { EngineError } from "../errors.js";
 import { McpConnection } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";
@@ -119,8 +125,14 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   const agentsMd = loadAgentsMd(ctx.workspaceDir, ctx.programDir);
   if (agentsMd !== "") preamble.push(agentsMd);
 
-  for (const name of opts?.skills ?? []) {
-    preamble.push(loadSkill(name, ctx));
+  // Skills: author-pinned, progressively disclosed. Inject a compact CATALOG (name + description) —
+  // validating every pinned skill resolves NOW (fail loud before any model call) — and add the
+  // built-in `skill` tool the model calls to load a skill's full body on demand. Bundled resources
+  // beside each SKILL.md are reachable with the ordinary file tools.
+  const skills = opts?.skills ?? [];
+  if (skills.length > 0) {
+    preamble.push(buildSkillCatalog(skills, ctx.skillsDir));
+    tools.push(skillTool(skills, ctx.skillsDir));
   }
 
   let memoryDir: string | null = null;
@@ -336,23 +348,75 @@ function transportFor(ref: McpServerRef, io: McpConnectIo): HttpTransport | Stdi
 }
 
 // ----------------------------------------------------------------------------
-// Skills
+// Skills (folder-per-skill, progressive disclosure — see ./skills.ts)
 // ----------------------------------------------------------------------------
 
-function loadSkill(name: string, ctx: ToolSetContext): string {
-  // Skill names become file names — keep them shape-safe before touching the filesystem.
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(name)) {
-    throw new EngineError("VALIDATION", `Skill name "${name}" is not a valid skill name.`);
-  }
-  const path = ctx.skillsDir === null ? null : join(ctx.skillsDir, `${name}.md`);
-  if (path === null || !existsSync(path)) {
-    throw new EngineError(
-      "VALIDATION",
-      `agent() selected skill "${name}" but no skills/${name}.md was deployed with this workflow.`,
-      `Deploy the workflow with a skills/${name}.md file alongside the program.`,
-    );
-  }
-  return `<skill name="${name}">\n${readFileSync(path, "utf8")}\n</skill>`;
+const skillToolInput = z.object({ name: z.string().min(1), file: z.string().min(1).optional() });
+
+/** The catalog block prepended to the leaf's preamble: every pinned skill's name + description, plus
+ *  how to load one. Validates each pinned skill resolves NOW so a missing/misnamed skill fails before
+ *  any model call (the capability-presence rule — never silently degrade). */
+function buildSkillCatalog(names: readonly string[], skillsDir: string | null): string {
+  const rows = names.map((name) => {
+    const entry = loadSkillCatalogEntry(skillsDir, name);
+    return `- ${entry.name}: ${entry.description}`;
+  });
+  return [
+    "<skills>",
+    "Skills are procedures you can load on demand. Before performing a skill's task, call the",
+    "`skill` tool with its name to read its full instructions. Available skills:",
+    ...rows,
+    "</skills>",
+  ].join("\n");
+}
+
+/** The built-in `skill` tool: loads a PINNED skill's full SKILL.md body on demand (progressive
+ *  disclosure), or a bundled resource file from the skill's folder when `file` is given. The model
+ *  may only reach skills the agent() call pinned — the input enum is the allowed set (belt) and
+ *  execute re-checks membership (suspenders, since model input is untrusted); resource reads are
+ *  path-contained to the skill folder by `loadSkillResource`. */
+function skillTool(pinned: readonly string[], skillsDir: string | null): ExecutableTool {
+  const allowed = new Set(pinned);
+  return {
+    name: "skill",
+    description:
+      "Load a skill's full instructions by name before performing its procedure. Pass `file` to " +
+      `read one of a skill's bundled resource files instead. Available skills: ${pinned.join(", ")}.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", enum: [...pinned], description: "The skill to load." },
+        file: {
+          type: "string",
+          description: "Optional: a bundled resource file in the skill's folder to read instead.",
+        },
+      },
+      required: ["name"],
+      additionalProperties: false,
+    },
+    execute: (input) => {
+      const { name, file } = skillToolInput.parse(input);
+      if (!allowed.has(name)) {
+        throw new EngineError(
+          "VALIDATION",
+          `Skill "${name}" is not available to this agent. Pinned skills: ${pinned.join(", ") || "(none)"}.`,
+        );
+      }
+      if (file !== undefined) {
+        return Promise.resolve(
+          `<skill-file name="${name}" file="${file}">\n${loadSkillResource(skillsDir, name, file)}\n</skill-file>`,
+        );
+      }
+      const files = listSkillFiles(skillsDir, name);
+      const footer =
+        files.length > 0
+          ? `\nBundled files (read with skill({ name: "${name}", file }) ): ${files.join(", ")}`
+          : "";
+      return Promise.resolve(
+        `<skill name="${name}">\n${loadSkillBody(skillsDir, name)}\n</skill>${footer}`,
+      );
+    },
+  };
 }
 
 // ----------------------------------------------------------------------------

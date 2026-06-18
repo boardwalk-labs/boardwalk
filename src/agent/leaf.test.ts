@@ -822,24 +822,100 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
 // Skills + memory
 // ----------------------------------------------------------------------------
 
-describe("runAgentLeaf — skills", () => {
-  it("loads deployed skill markdown into the first message", async () => {
+describe("runAgentLeaf — skills (folder-per-skill, progressive disclosure)", () => {
+  function writeSkill(
+    skillsDir: string,
+    name: string,
+    skillMd: string,
+    files: Record<string, string> = {},
+  ): void {
+    const dir = join(skillsDir, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), skillMd, "utf8");
+    for (const [file, content] of Object.entries(files)) {
+      writeFileSync(join(dir, file), content, "utf8");
+    }
+  }
+
+  it("injects a compact catalog (name + description), NOT the full body, into the first message", async () => {
     const skillsDir = tempDir("bw-skills-");
-    writeFileSync(join(skillsDir, "reviewer.md"), "Always check for SQL injection.", "utf8");
+    writeSkill(
+      skillsDir,
+      "reviewer",
+      "---\nname: reviewer\ndescription: Review a PR for SQL injection\n---\nSKILL-BODY-MARKER: check parameterized queries.",
+    );
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { skillsDir });
     await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
 
     const sent = rec.requests[0]?.body ?? "";
-    expect(sent).toContain("Always check for SQL injection.");
-    expect(sent).toContain('<skill name=\\"reviewer\\">');
+    expect(sent).toContain("Review a PR for SQL injection"); // the catalog description
+    expect(sent).toContain("<skills>");
+    expect(sent).not.toContain("SKILL-BODY-MARKER"); // the body is NOT eagerly injected
   });
 
-  it("fails loudly on a missing skill and on a malformed skill name", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")], {
-      skillsDir: tempDir("bw-skills-"),
+  it("advertises a `skill` tool restricted to the pinned set", async () => {
+    const skillsDir = tempDir("bw-skills-");
+    writeSkill(skillsDir, "reviewer", "---\ndescription: Review PRs\n---\nbody");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { skillsDir });
+    await runAgentLeaf("go", { skills: ["reviewer"] }, rec.io);
+
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain('"name":"skill"'); // the tool is advertised
+    expect(sent).toContain('"enum":["reviewer"]'); // restricted to the pinned set
+  });
+
+  it("loads the full body on demand when the model calls the `skill` tool", async () => {
+    const skillsDir = tempDir("bw-skills-");
+    writeSkill(
+      skillsDir,
+      "reviewer",
+      "---\ndescription: Review PRs\n---\nSKILL-BODY-MARKER: the full procedure.",
+    );
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () => openAiToolCalls([{ id: "s1", name: "skill", args: { name: "reviewer" } }]),
+        () => openAiText("done"),
+      ],
+      { skillsDir },
+    );
+    await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
+
+    // The body enters context only after the model loads it — the SECOND model request carries it.
+    expect(rec.requests[1]?.body ?? "").toContain("SKILL-BODY-MARKER");
+  });
+
+  it("reads a bundled resource file on demand via skill({ name, file })", async () => {
+    const skillsDir = tempDir("bw-skills-");
+    writeSkill(skillsDir, "reviewer", "---\ndescription: Review PRs\n---\nbody", {
+      "checklist.md": "RESOURCE-MARKER: parameterize, then escape",
     });
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiToolCalls([
+            { id: "s1", name: "skill", args: { name: "reviewer", file: "checklist.md" } },
+          ]),
+        () => openAiText("done"),
+      ],
+      { skillsDir },
+    );
+    await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
+    expect(rec.requests[1]?.body ?? "").toContain("RESOURCE-MARKER");
+  });
+
+  it("fails loudly on a missing skill, a flat-layout skill, and a malformed name", async () => {
+    const skillsDir = tempDir("bw-skills-");
+    // A leftover flat-layout file gets a migration hint, not the generic missing error.
+    writeFileSync(join(skillsDir, "legacy.md"), "old", "utf8");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("never")], { skillsDir });
+
     await expect(runAgentLeaf("p", { skills: ["ghost"] }, rec.io)).rejects.toThrow(
-      /no skills\/ghost\.md was deployed/,
+      /no skills\/ghost\/SKILL\.md was deployed/,
+    );
+    await expect(runAgentLeaf("p", { skills: ["legacy"] }, rec.io)).rejects.toThrow(
+      /old flat layout/,
     );
     await expect(runAgentLeaf("p", { skills: ["../etc/passwd"] }, rec.io)).rejects.toThrow(
       /not a valid skill name/,
@@ -876,21 +952,25 @@ describe("runAgentLeaf — AGENTS.md auto-load", () => {
     expect(rec.requests[0]?.body ?? "").not.toContain("AGENTS.md");
   });
 
-  it("places project context (AGENTS.md) BEFORE task-specific skills in the preamble", async () => {
+  it("places project context (AGENTS.md) BEFORE the skills catalog in the preamble", async () => {
     const workspaceDir = tempDir("bw-agents-ws-");
     writeFileSync(join(workspaceDir, "AGENTS.md"), "PROJECT-RULES-MARKER", "utf8");
     const skillsDir = tempDir("bw-skills-");
-    writeFileSync(join(skillsDir, "reviewer.md"), "SKILL-PROCEDURE-MARKER", "utf8");
+    const dir = join(skillsDir, "reviewer");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "SKILL.md"),
+      "---\ndescription: SKILL-CATALOG-MARKER\n---\nbody",
+      "utf8",
+    );
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir, skillsDir });
     await runAgentLeaf("review this", { skills: ["reviewer"] }, rec.io);
 
     const sent = rec.requests[0]?.body ?? "";
     expect(sent).toContain("PROJECT-RULES-MARKER");
-    expect(sent).toContain("SKILL-PROCEDURE-MARKER");
-    // Project rules frame the task; the skill is the procedure — AGENTS.md comes first.
-    expect(sent.indexOf("PROJECT-RULES-MARKER")).toBeLessThan(
-      sent.indexOf("SKILL-PROCEDURE-MARKER"),
-    );
+    expect(sent).toContain("SKILL-CATALOG-MARKER");
+    // Project rules frame the task; the skill catalog is the procedure index — AGENTS.md comes first.
+    expect(sent.indexOf("PROJECT-RULES-MARKER")).toBeLessThan(sent.indexOf("SKILL-CATALOG-MARKER"));
   });
 
   it("redacts known secret values out of AGENTS.md before the model call", async () => {
