@@ -68,10 +68,23 @@ describe("bash — allowlist / denylist", () => {
     expect(() => assertEverySegmentAllowed("/usr/bin/git status", ALLOW)).not.toThrow();
   });
 
+  it("allows cd (navigation) and chains it with another allowed command", () => {
+    expect(() => assertEverySegmentAllowed("cd sub", ALLOW)).not.toThrow();
+    expect(() => assertEverySegmentAllowed("cd sub && pnpm test", ALLOW)).not.toThrow();
+  });
+
   it("rejects a command not on the allowlist", () => {
     expect(() => assertEverySegmentAllowed("mysterytool --do-it", ALLOW)).toThrow(
       /not on the allowlist/,
     );
+  });
+
+  it("points a refused command at the structured alternative (apply_patch / cwd)", () => {
+    // not on the allowlist (e.g. mkdir) → file tools + cwd
+    expect(() => assertEverySegmentAllowed("mkdir foo", ALLOW)).toThrow(/apply_patch/);
+    expect(() => assertEverySegmentAllowed("mkdir foo", ALLOW)).toThrow(/cwd parameter/);
+    // denylisted destructive op → file tools
+    expect(() => assertEverySegmentAllowed("rm foo", ALLOW)).toThrow(/write\/edit\/apply_patch/);
   });
 
   it("rejects any segment of a pipeline that is not allowlisted", () => {
@@ -136,6 +149,11 @@ describe("bash — forbidden constructs (the bypass vectors)", () => {
   it("allows a plain allowed pipeline (no forbidden construct)", () => {
     expect(() => assertNoForbiddenConstructs("git log | head -5")).not.toThrow();
   });
+
+  it("names the alternative in the refusal, not just what failed", () => {
+    expect(() => assertNoForbiddenConstructs("ls > out")).toThrow(/write tool/);
+    expect(() => assertNoForbiddenConstructs("echo $(whoami)")).toThrow(/its own bash call/);
+  });
 });
 
 describe("bash tool — execution + traversal", () => {
@@ -177,6 +195,15 @@ describe("bash tool — execution + traversal", () => {
     const tool = bashTool({ workspaceDir: dir });
     const result = rich(await tool.execute({ command: "cat f.txt", cwd: "sub" }));
     expect(result.llmText).toContain("in-sub");
+  });
+
+  it("runs `cd <subdir> && …` so the chained command sees that directory", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "sub"), { recursive: true });
+    writeFileSync(join(dir, "sub", "f.txt"), "via-cd");
+    const tool = bashTool({ workspaceDir: dir });
+    const result = rich(await tool.execute({ command: "cd sub && cat f.txt" }));
+    expect(result.llmText).toContain("via-cd");
   });
 
   it("a denylisted command fails before spawning anything", async () => {

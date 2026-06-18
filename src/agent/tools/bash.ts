@@ -8,7 +8,9 @@
 //   1. Reject command substitution (`$(...)`, backticks, `<(...)`/`>(...)`) and I/O redirection
 //      (`>`, `>>`, `<`, `2>`, `&>`, `2>&1`, heredocs `<<`). These are the allowlist-bypass
 //      vectors: substitution smuggles a denied command inside an allowed one, redirection writes
-//      outside the tool's intent. They are refused outright — the tool does not try to make them safe.
+//      outside the tool's intent. They are refused outright (the tool does not try to make them safe);
+//      each refusal names the structured alternative — write/edit/apply_patch for files, the workflow
+//      program for network — so the model redirects to the right tool instead of guessing.
 //   2. Split the command into segments on the shell control operators (`;`, `&&`, `||`, `|`, `&`)
 //      AND on newlines (a newline separates commands to `/bin/sh -c`, so a second line must be
 //      allowlist-checked too), quote-aware so a `;`/newline inside a string is not a separator.
@@ -73,6 +75,11 @@ export const DEFAULT_BASH_ALLOWLIST: ReadonlySet<string> = new Set([
   "file",
   "realpath",
   "pwd",
+  // navigation: `cd` changes the directory only for the CURRENT command (each call is a fresh shell,
+  // so it never persists across calls) and grants no access an absolute path doesn't already have.
+  // The structured `cwd` param is still preferred, but models reach for `cd` reflexively — allowing it
+  // avoids burning a turn on a confusing refusal. See the bashTool description for the full contract.
+  "cd",
   // search
   "grep",
   "rg",
@@ -195,10 +202,16 @@ export function bashTool(options: BashToolOptions): ExecutableTool {
   return {
     name: "bash",
     description:
-      "Run a shell command in the run's workspace. Only a fixed set of commands is allowed " +
-      "(git, gh, node, npm/pnpm, python, build/test runners, and read-only file/text tools); " +
-      "command substitution, process substitution, and I/O redirection are rejected. Pipelines " +
-      "of allowed commands are fine. stdout and stderr are returned separately.",
+      "Run a shell command in the run's workspace, via an allowlist of common dev tools: git, gh, " +
+      "node/npm/npx/pnpm/yarn, tsc/vitest/eslint/prettier, python/pip/pytest/ruff, make/cargo/go, cd, " +
+      "and read-only file/text tools (ls, cat, grep, rg, find, sed, awk, jq, …). Pipelines of allowed " +
+      "commands work; stdout and stderr come back separately. The following are NOT allowed — use the " +
+      "alternative instead: (1) I/O redirection (>, >>, 2>&1) — output is already returned to you " +
+      "separately, and to SAVE output to a file use the write tool; (2) command/process substitution " +
+      "($(...), backticks, <(...)) — run the inner command in its own call and reuse the output; " +
+      "(3) file mutation (rm, mv, cp, mkdir) — use the write/edit/apply_patch tools (apply_patch can add, " +
+      "move, and delete files); (4) network (curl, wget) — network access belongs to the workflow " +
+      "program, not the agent. Set the working directory with the cwd parameter (preferred) or a plain cd.",
     inputSchema: {
       type: "object",
       properties: {
@@ -344,26 +357,30 @@ function resolveTimeout(raw: unknown): number {
   return Math.min(Math.floor(raw), MAX_TIMEOUT_MS);
 }
 
+/** Advice appended to a refusal so the model knows what to do INSTEAD, not just what failed. */
+const SUBSTITUTION_ADVICE =
+  "Run the inner command in its own bash call and reuse the output yourself — substitution can smuggle " +
+  "a denied command inside an allowed one, so it's refused.";
+const REDIRECTION_ADVICE =
+  "stdout and stderr are already returned to you separately, so you rarely need redirection; to SAVE " +
+  "output to a file, use the write tool. (Redirection can write outside the command's intent, so it's refused.)";
+
 /** Refuse substitution + redirection before splitting — these are the allowlist-bypass vectors. */
 export function assertNoForbiddenConstructs(command: string): void {
   // Substitution: scan with only single-quoted spans neutralized (double quotes don't disable it).
   const noSingle = stripQuoted(command, true, false);
   for (const { re, what } of SUBSTITUTION_PATTERNS) {
-    if (re.test(noSingle)) throw forbidden(what);
+    if (re.test(noSingle)) throw forbidden(what, SUBSTITUTION_ADVICE);
   }
   // Redirection: scan with BOTH quote types neutralized (quotes make `<`/`>` literal in any shell).
   const noQuotes = stripQuoted(command, true, true);
   for (const { re, what } of REDIRECTION_PATTERNS) {
-    if (re.test(noQuotes)) throw forbidden(what);
+    if (re.test(noQuotes)) throw forbidden(what, REDIRECTION_ADVICE);
   }
 }
 
-function forbidden(what: string): EngineError {
-  return new EngineError(
-    "VALIDATION",
-    `bash rejected ${what}: it can bypass the command allowlist. ` +
-      `Run the commands separately, or have the program do file I/O via the write/edit tools.`,
-  );
+function forbidden(what: string, advice: string): EngineError {
+  return new EngineError("VALIDATION", `bash rejected ${what}. ${advice}`);
 }
 
 /** Every segment's root command must be allowlisted; the denylist wins. */
@@ -375,15 +392,18 @@ export function assertEverySegmentAllowed(command: string, allowlist: ReadonlySe
     if (DENYLISTED_COMMANDS.has(base) || DENYLISTED_COMMANDS.has(root)) {
       throw new EngineError(
         "VALIDATION",
-        `bash refused the command "${base}": it is on the denylist (privilege escalation, ` +
-          `network fetch, or destructive file ops are never allowed autonomously).`,
+        `bash refused the command "${base}": it is on the denylist (privilege escalation, network ` +
+          `fetch, or destructive file ops are never run autonomously). For file changes use the ` +
+          `write/edit/apply_patch tools; network calls belong in the workflow program, not the agent.`,
       );
     }
     if (!allowlist.has(base)) {
       throw new EngineError(
         "VALIDATION",
-        `bash refused the command "${base}": it is not on the allowlist of permitted commands. ` +
-          `Allowed roots include git, gh, node, npm/pnpm, python, and read-only file/text tools.`,
+        `bash refused the command "${base}": it is not on the allowlist of permitted commands ` +
+          `(git, gh, node, npm/pnpm, yarn, python/pip/pytest, build+test runners, cd, and read-only ` +
+          `file/text tools). To change files use the write/edit/apply_patch tools; to set the working ` +
+          `directory use the cwd parameter.`,
       );
     }
   }
