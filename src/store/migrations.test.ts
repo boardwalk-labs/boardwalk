@@ -58,11 +58,19 @@ function expectEngineError(fn: () => unknown, code: EngineError["code"]): void {
 }
 
 describe("migrate", () => {
-  it("brings an empty database to the latest version with all v1 tables and indexes", () => {
+  it("brings an empty database to the latest version with all tables and indexes", () => {
     const db = openDb();
     migrate(db);
     expect(userVersion(db)).toBe(LATEST_VERSION);
-    expect(tableNames(db)).toEqual(["artifacts", "cron_fires", "run_events", "runs", "workflows"]);
+    expect(tableNames(db)).toEqual([
+      "artifacts",
+      "cron_fires",
+      "human_input_requests",
+      "run_events",
+      "run_journal",
+      "runs",
+      "workflows",
+    ]);
     const indexes = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%'")
       .all()
@@ -70,8 +78,11 @@ describe("migrate", () => {
       .sort();
     expect(indexes).toEqual([
       "artifacts_run_id",
+      "human_input_requests_run_id",
+      "human_input_requests_status",
       "runs_parent_idempotency_key",
       "runs_status",
+      "runs_wake_at",
       "runs_workflow_id_status",
     ]);
   });

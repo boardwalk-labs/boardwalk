@@ -111,8 +111,62 @@ CREATE TABLE artifacts (
 CREATE INDEX artifacts_run_id ON artifacts (run_id);
 `;
 
+// v2 — durable suspension. The run journal memoizes durable-seam results so a resumed run
+// REPLAYS them instead of recomputing; (run_id, seq) is the program's synchronous monotonic
+// key. human_input_requests is a pending human-in-the-loop gate. runs.wake_at is the due time
+// for a TIMED suspension (long sleep / human-input timeout), NULL otherwise — the resume sweep
+// queries it.
+const V2_SQL = `
+ALTER TABLE runs ADD COLUMN wake_at INTEGER;
+
+-- Run journal: one row per durable-seam call. \`state\` is pending|resolved; \`result\` is the
+-- memoized JSON value once resolved (or a parked-leaf checkpoint while pending). On replay a
+-- resolved hit returns \`result\` without re-executing; a \`fingerprint\` mismatch is a
+-- determinism error. (run_id, seq) is the append key — a seq is written once.
+CREATE TABLE run_journal (
+  run_id       TEXT NOT NULL REFERENCES runs (id),
+  seq          INTEGER NOT NULL,
+  kind         TEXT NOT NULL,
+  fingerprint  TEXT NOT NULL,
+  label        TEXT,
+  state        TEXT NOT NULL,
+  result       TEXT,
+  created_at   INTEGER NOT NULL,
+  resolved_at  INTEGER,
+  PRIMARY KEY (run_id, seq)
+) STRICT, WITHOUT ROWID;
+
+-- Human-input requests: a pending HITL gate. \`input_spec\` is the JSON form descriptor
+-- (text|choice|multiselect); \`response\` is the validated answer once submitted. \`seq\` links
+-- the request to its run_journal entry.
+CREATE TABLE human_input_requests (
+  id            TEXT PRIMARY KEY,
+  run_id        TEXT NOT NULL REFERENCES runs (id),
+  seq           INTEGER NOT NULL,
+  key           TEXT NOT NULL,
+  prompt        TEXT NOT NULL,
+  input_spec    TEXT NOT NULL,
+  assignees     TEXT,
+  status        TEXT NOT NULL,
+  response      TEXT,
+  responded_by  TEXT,
+  created_at    INTEGER NOT NULL,
+  expires_at    INTEGER,
+  responded_at  INTEGER
+) STRICT;
+
+CREATE INDEX human_input_requests_run_id ON human_input_requests (run_id);
+CREATE INDEX human_input_requests_status ON human_input_requests (status);
+
+-- Timed-wake lookup: suspended runs whose wake_at has passed.
+CREATE INDEX runs_wake_at ON runs (wake_at) WHERE wake_at IS NOT NULL;
+`;
+
 /** Every migration the engine knows, ascending. Append-only — never edit a shipped entry. */
-export const MIGRATIONS: readonly Migration[] = [{ version: 1, sql: V1_SQL }];
+export const MIGRATIONS: readonly Migration[] = [
+  { version: 1, sql: V1_SQL },
+  { version: 2, sql: V2_SQL },
+];
 
 /**
  * Bring `db` up to the latest schema version. Idempotent: already-applied versions are

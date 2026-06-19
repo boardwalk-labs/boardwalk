@@ -63,6 +63,52 @@ export interface RunRow {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
+  /** Due time for a timed suspension (long sleep / human-input timeout); null otherwise. */
+  wakeAt: number | null;
+}
+
+/** A durable-seam memoization state: `pending` (started, not yet satisfied) or `resolved`. */
+export type JournalState = "pending" | "resolved";
+
+/** The durable seams a run journals (the only ones whose results survive a resume). */
+export type JournalKind = "agent" | "step" | "human_input" | "sleep" | "workflow_call";
+
+/**
+ * One memoized durable-seam call. On a resume the program re-runs from the top; each seam looks
+ * up its (run_id, seq) entry and, on a `resolved` hit with a matching `fingerprint`, returns
+ * `result` WITHOUT re-executing. A `pending` entry is a seam awaiting an external event (a human
+ * answer / a timer); `result` then holds its wake payload or a parked-leaf checkpoint.
+ */
+export interface JournalRow {
+  runId: string;
+  seq: number;
+  kind: JournalKind;
+  fingerprint: string;
+  label: string | null;
+  state: JournalState;
+  result: JsonValue | null;
+  createdAt: number;
+  resolvedAt: number | null;
+}
+
+/** Lifecycle of a human-in-the-loop gate. */
+export type HumanInputStatus = "pending" | "resolved" | "expired" | "cancelled";
+
+/** A pending (or resolved/expired/cancelled) human-in-the-loop request. */
+export interface HumanInputRequestRow {
+  id: string;
+  runId: string;
+  seq: number;
+  key: string;
+  prompt: string;
+  inputSpec: JsonValue;
+  assignees: string[] | null;
+  status: HumanInputStatus;
+  response: JsonValue | null;
+  respondedBy: string | null;
+  createdAt: number;
+  expiresAt: number | null;
+  respondedAt: number | null;
 }
 
 /** One entry in a run's append-only event log (the SDK wire format, cursor-indexed). */
@@ -139,6 +185,22 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 
 const configSchema = z.record(z.string(), jsonValueSchema);
 const metadataSchema = z.record(z.string(), z.unknown());
+
+const journalStateSchema: z.ZodType<JournalState> = z.enum(["pending", "resolved"]);
+const journalKindSchema: z.ZodType<JournalKind> = z.enum([
+  "agent",
+  "step",
+  "human_input",
+  "sleep",
+  "workflow_call",
+]);
+const humanInputStatusSchema: z.ZodType<HumanInputStatus> = z.enum([
+  "pending",
+  "resolved",
+  "expired",
+  "cancelled",
+]);
+const assigneesSchema: z.ZodType<string[]> = z.array(z.string());
 
 // ============================================================================
 // Row mapping — narrow SQLOutputValue without casts
@@ -247,6 +309,40 @@ function mapRun(row: SqlRow): RunRow {
     createdAt: readInteger(row, "runs", "created_at"),
     startedAt: readIntegerOrNull(row, "runs", "started_at"),
     endedAt: readIntegerOrNull(row, "runs", "ended_at"),
+    wakeAt: readIntegerOrNull(row, "runs", "wake_at"),
+  };
+}
+
+function mapJournal(row: SqlRow): JournalRow {
+  return {
+    runId: readText(row, "run_journal", "run_id"),
+    seq: readInteger(row, "run_journal", "seq"),
+    kind: readEnum(row, "run_journal", "kind", journalKindSchema),
+    fingerprint: readText(row, "run_journal", "fingerprint"),
+    label: readTextOrNull(row, "run_journal", "label"),
+    state: readEnum(row, "run_journal", "state", journalStateSchema),
+    result: readJsonOrNull(row, "run_journal", "result", jsonValueSchema),
+    createdAt: readInteger(row, "run_journal", "created_at"),
+    resolvedAt: readIntegerOrNull(row, "run_journal", "resolved_at"),
+  };
+}
+
+function mapHumanInputRequest(row: SqlRow): HumanInputRequestRow {
+  const t = "human_input_requests";
+  return {
+    id: readText(row, t, "id"),
+    runId: readText(row, t, "run_id"),
+    seq: readInteger(row, t, "seq"),
+    key: readText(row, t, "key"),
+    prompt: readText(row, t, "prompt"),
+    inputSpec: readJson(row, t, "input_spec", jsonValueSchema),
+    assignees: readJsonOrNull(row, t, "assignees", assigneesSchema),
+    status: readEnum(row, t, "status", humanInputStatusSchema),
+    response: readJsonOrNull(row, t, "response", jsonValueSchema),
+    respondedBy: readTextOrNull(row, t, "responded_by"),
+    createdAt: readInteger(row, t, "created_at"),
+    expiresAt: readIntegerOrNull(row, t, "expires_at"),
+    respondedAt: readIntegerOrNull(row, t, "responded_at"),
   };
 }
 
@@ -548,7 +644,14 @@ export class Store {
   updateRunStatus(
     id: string,
     status: RunStatus,
-    opts: { error?: RunErrorShape; output?: JsonValue; startedAt?: number; endedAt?: number } = {},
+    opts: {
+      error?: RunErrorShape;
+      output?: JsonValue;
+      startedAt?: number;
+      endedAt?: number;
+      /** Present ⇒ set wake_at (a number arms a timed wake; `null` clears it on resume). */
+      wakeAt?: number | null;
+    } = {},
   ): void {
     const sets = ["status = ?"];
     const params: SQLInputValue[] = [status];
@@ -567,6 +670,11 @@ export class Store {
     if (opts.endedAt !== undefined) {
       sets.push("ended_at = ?");
       params.push(opts.endedAt);
+    }
+    // Present-key (not value) decides: { wakeAt: null } clears, absence leaves it unchanged.
+    if (Object.hasOwn(opts, "wakeAt")) {
+      sets.push("wake_at = ?");
+      params.push(opts.wakeAt ?? null);
     }
     const result = this.prepare(`UPDATE runs SET ${sets.join(", ")} WHERE id = ?`).run(
       ...params,
@@ -771,6 +879,221 @@ export class Store {
     return this.prepare("SELECT * FROM artifacts WHERE run_id = ? ORDER BY id ASC")
       .all(runId)
       .map(mapArtifact);
+  }
+
+  // --------------------------------------------------------------------------
+  // Run journal (durable-seam memoization)
+  // --------------------------------------------------------------------------
+
+  /** The memoized entry for a seam, or null if it hasn't run yet (a replay miss). */
+  getJournalEntry(runId: string, seq: number): JournalRow | null {
+    const row = this.prepare("SELECT * FROM run_journal WHERE run_id = ? AND seq = ?").get(
+      runId,
+      seq,
+    );
+    return row === undefined ? null : mapJournal(row);
+  }
+
+  /**
+   * Record a seam's journal entry, idempotent on (run_id, seq): if the row already exists (e.g. a
+   * crash between the write and the suspend, then a replay), the EXISTING row wins and is
+   * returned — a seq is memoized exactly once.
+   */
+  putJournalEntry(entry: {
+    runId: string;
+    seq: number;
+    kind: JournalKind;
+    fingerprint: string;
+    label?: string | null;
+    state: JournalState;
+    result?: JsonValue | null;
+  }): JournalRow {
+    const resultJson = serializeJson(entry.result, "journal result");
+    return this.transaction(() => {
+      const existing = this.getJournalEntry(entry.runId, entry.seq);
+      if (existing !== null) return existing;
+      const t = this.now();
+      try {
+        this.prepare(
+          `INSERT INTO run_journal (run_id, seq, kind, fingerprint, label, state, result, created_at, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).run(
+          entry.runId,
+          entry.seq,
+          entry.kind,
+          entry.fingerprint,
+          entry.label ?? null,
+          entry.state,
+          resultJson,
+          t,
+          entry.state === "resolved" ? t : null,
+        );
+      } catch (err) {
+        if (isForeignKeyViolation(err)) {
+          throw new EngineError("NOT_FOUND", `run ${entry.runId} not found`);
+        }
+        throw err;
+      }
+      const row = this.getJournalEntry(entry.runId, entry.seq);
+      if (row === null) {
+        throw new EngineError(
+          "INTERNAL",
+          `journal entry ${entry.runId}/${String(entry.seq)} vanished mid-write`,
+        );
+      }
+      return row;
+    });
+  }
+
+  /** Resolve a pending journal entry with its memoized result (the awaited event arrived). */
+  resolveJournalEntry(runId: string, seq: number, result: JsonValue): void {
+    const resultJson = serializeJson(result, "journal result");
+    const changed = this.prepare(
+      "UPDATE run_journal SET state = 'resolved', result = ?, resolved_at = ? WHERE run_id = ? AND seq = ?",
+    ).run(resultJson, this.now(), runId, seq);
+    if (Number(changed.changes) === 0) {
+      throw new EngineError("NOT_FOUND", `journal entry ${runId}/${String(seq)} not found`);
+    }
+  }
+
+  /** A run's full journal in seq order (replay seeding + debugging). */
+  listJournal(runId: string): JournalRow[] {
+    return this.prepare("SELECT * FROM run_journal WHERE run_id = ? ORDER BY seq ASC")
+      .all(runId)
+      .map(mapJournal);
+  }
+
+  // --------------------------------------------------------------------------
+  // Human-input requests (human-in-the-loop gates)
+  // --------------------------------------------------------------------------
+
+  /** Create a pending human-input request (its run_journal entry is written separately). */
+  createHumanInputRequest(args: {
+    runId: string;
+    seq: number;
+    key: string;
+    prompt: string;
+    inputSpec: JsonValue;
+    assignees?: readonly string[] | null;
+    expiresAt?: number | null;
+  }): HumanInputRequestRow {
+    const specJson = serializeJson(args.inputSpec, "human-input spec");
+    const assigneesJson = serializeJson(
+      args.assignees == null ? null : [...args.assignees],
+      "human-input assignees",
+    );
+    const t = this.now();
+    const id = ulid(t);
+    try {
+      this.prepare(
+        `INSERT INTO human_input_requests
+           (id, run_id, seq, key, prompt, input_spec, assignees, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
+      ).run(
+        id,
+        args.runId,
+        args.seq,
+        args.key,
+        args.prompt,
+        specJson,
+        assigneesJson,
+        t,
+        args.expiresAt ?? null,
+      );
+    } catch (err) {
+      if (isForeignKeyViolation(err)) {
+        throw new EngineError("NOT_FOUND", `run ${args.runId} not found`);
+      }
+      throw err;
+    }
+    const row = this.prepare("SELECT * FROM human_input_requests WHERE id = ?").get(id);
+    if (row === undefined) {
+      throw new EngineError("INTERNAL", `human-input request ${id} vanished mid-write`);
+    }
+    return mapHumanInputRequest(row);
+  }
+
+  getHumanInputRequest(id: string): HumanInputRequestRow | null {
+    const row = this.prepare("SELECT * FROM human_input_requests WHERE id = ?").get(id);
+    return row === undefined ? null : mapHumanInputRequest(row);
+  }
+
+  /** The pending request for (run, key), or null — the respond-by-key lookup. */
+  findPendingHumanInputRequest(runId: string, key: string): HumanInputRequestRow | null {
+    const row = this.prepare(
+      "SELECT * FROM human_input_requests WHERE run_id = ? AND key = ? AND status = 'pending' ORDER BY seq DESC",
+    ).get(runId, key);
+    return row === undefined ? null : mapHumanInputRequest(row);
+  }
+
+  /** List requests newest-first, optionally filtered by run and/or status (the inbox query). */
+  listHumanInputRequests(
+    filter: { runId?: string; statuses?: readonly HumanInputStatus[] } = {},
+  ): HumanInputRequestRow[] {
+    const where: string[] = [];
+    const params: SQLInputValue[] = [];
+    if (filter.runId !== undefined) {
+      where.push("run_id = ?");
+      params.push(filter.runId);
+    }
+    if (filter.statuses !== undefined) {
+      if (filter.statuses.length === 0) return [];
+      where.push(`status IN (${filter.statuses.map(() => "?").join(", ")})`);
+      params.push(...filter.statuses);
+    }
+    const whereSql = where.length > 0 ? ` WHERE ${where.join(" AND ")}` : "";
+    return this.prepare(
+      `SELECT * FROM human_input_requests${whereSql} ORDER BY created_at DESC, rowid DESC`,
+    )
+      .all(...params)
+      .map(mapHumanInputRequest);
+  }
+
+  /**
+   * Atomically resolve a PENDING request with its validated response. Returns the updated row,
+   * or null if it was no longer pending (already answered/expired/cancelled) — the caller turns
+   * that into a conflict, so two responders can't both win.
+   */
+  resolveHumanInputRequest(
+    id: string,
+    response: JsonValue,
+    respondedBy?: string | null,
+  ): HumanInputRequestRow | null {
+    const responseJson = serializeJson(response, "human-input response");
+    const changed = this.prepare(
+      `UPDATE human_input_requests SET status = 'resolved', response = ?, responded_by = ?, responded_at = ?
+       WHERE id = ? AND status = 'pending'`,
+    ).run(responseJson, respondedBy ?? null, this.now(), id);
+    if (Number(changed.changes) === 0) return null;
+    return this.getHumanInputRequest(id);
+  }
+
+  /** Mark a pending request expired/cancelled (timeout, or the run was cancelled). No-op otherwise. */
+  closeHumanInputRequest(id: string, status: "expired" | "cancelled"): void {
+    this.prepare(
+      "UPDATE human_input_requests SET status = ?, responded_at = ? WHERE id = ? AND status = 'pending'",
+    ).run(status, this.now(), id);
+  }
+
+  /** Cancel every pending request for a run (called when the run is cancelled). */
+  cancelPendingHumanInputRequests(runId: string): void {
+    this.prepare(
+      "UPDATE human_input_requests SET status = 'cancelled', responded_at = ? WHERE run_id = ? AND status = 'pending'",
+    ).run(this.now(), runId);
+  }
+
+  // --------------------------------------------------------------------------
+  // Timed wake
+  // --------------------------------------------------------------------------
+
+  /** Suspended runs whose timed wake is due (long sleep / human-input timeout). */
+  listRunsToWake(now: number): RunRow[] {
+    return this.prepare(
+      `SELECT * FROM runs WHERE status IN ('sleeping', 'awaiting_input') AND wake_at IS NOT NULL AND wake_at <= ?
+       ORDER BY wake_at ASC`,
+    )
+      .all(now)
+      .map(mapRun);
   }
 
   // --------------------------------------------------------------------------
