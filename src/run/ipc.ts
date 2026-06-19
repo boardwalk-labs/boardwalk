@@ -93,6 +93,10 @@ export const HOST_METHODS = [
   "web_search",
   "resolve_model",
   "mcp_token",
+  // Durable suspension: the child memoizes durable-seam results through the journal so a
+  // re-executed run (crash-restart or resume) returns them instead of recomputing.
+  "journal_get",
+  "journal_put",
 ] as const;
 export type HostMethod = (typeof HOST_METHODS)[number];
 
@@ -222,6 +226,34 @@ export const mcpTokenArgsSchema = z.strictObject({
   serverUrl: z.string().min(1),
   invalidateToken: z.string().min(1).optional(),
 });
+
+/** The durable-seam kinds the journal memoizes (mirrors the store's JournalKind). */
+const journalKindIpc = z.enum(["agent", "step", "human_input", "sleep", "workflow_call"]);
+
+/** journal_get: look up a seam's memoized entry by its synchronous seq. */
+export const journalGetArgsSchema = z.strictObject({ seq: z.number().int().positive() });
+
+/** journal_put: record a seam's entry (idempotent supervisor-side on run_id+seq). */
+export const journalPutArgsSchema = z.strictObject({
+  seq: z.number().int().positive(),
+  kind: journalKindIpc,
+  fingerprint: z.string().min(1),
+  label: z.string().optional(),
+  state: z.enum(["pending", "resolved"]),
+  result: z.unknown().optional(),
+});
+
+/** The supervisor's journal_get response — the memoized entry, or null on a miss. Re-validated
+ *  child-side before use. */
+export const journalEntryResultSchema = z
+  .strictObject({
+    seq: z.number().int().positive(),
+    kind: journalKindIpc,
+    fingerprint: z.string(),
+    state: z.enum(["pending", "resolved"]),
+    result: z.unknown(),
+  })
+  .nullable();
 /** The supervisor's mcp_token response. null accessToken ⇒ interaction would be required —
  *  the hint names the `engine.authorizeMcpServer(...)` call that fixes it. */
 export const mcpTokenResultSchema = z.strictObject({

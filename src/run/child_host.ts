@@ -8,6 +8,7 @@
 // supervisor over IPC. agent() runs its loop in THIS process too — program-defined tools and
 // MCP connections must execute where the program lives (the trusted layer).
 
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
@@ -32,6 +33,7 @@ import type {
 } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
+  journalEntryResultSchema,
   mcpTokenResultSchema,
   readArtifactResultSchema,
   resolvedModelSchema,
@@ -77,6 +79,26 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   // One redactor for the whole run process: every secret value revealed to the program (and
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
   const redactor = new Redactor();
+
+  // Durable-seam sequence: a synchronous monotonic counter assigned at each journaled seam's
+  // entry (agent / step). Because a program's synchronous call order is deterministic, the same
+  // logical call gets the same seq on every execution — the journal key that lets a resumed run
+  // return a memoized result instead of recomputing. A miss runs the seam and records it; a hit
+  // returns the stored result (a fingerprint mismatch is a determinism error). The counter
+  // resets per child process, so a re-executed run re-derives the identical keys from the top.
+  let seamCount = 0;
+  async function journalGet(seq: number): Promise<JournalLookup> {
+    return journalEntryResultSchema.parse(await io.request("journal_get", { seq }));
+  }
+  async function journalPut(entry: {
+    seq: number;
+    kind: "agent" | "step";
+    fingerprint: string;
+    label: string;
+    result: unknown;
+  }): Promise<void> {
+    await io.request("journal_put", { ...entry, state: "resolved" });
+  }
 
   // Resolution is supervisor-side (keys never live in config here); the result is cached per
   // (model, provider) so a tool loop's many turns resolve — and register their key/headers with
@@ -232,12 +254,44 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
+      const seq = ++seamCount;
+      const fingerprint = seamFingerprint([
+        "agent",
+        opts?.provider ?? null,
+        opts?.model ?? null,
+        prompt,
+        opts?.schema ?? null,
+      ]);
+      const existing = await journalGet(seq);
+      if (existing !== null) {
+        if (existing.fingerprint !== fingerprint)
+          throw determinismError(seq, "agent", existing.kind);
+        if (existing.state === "resolved") return existing.result;
+        // A `pending` entry is a leaf parked on tool-level human_input; resuming it is handled by
+        // the leaf-checkpoint path, not here. With no checkpoint yet, fall through to re-run.
+      }
       agentCount += 1;
       const identity: AgentIdentity = {
         agentId: `agent-${String(agentCount)}`,
         ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
       };
-      return await runAgentLeaf(prompt, opts, makeLeafIo(identity));
+      const result = await runAgentLeaf(prompt, opts, makeLeafIo(identity));
+      await journalPut({ seq, kind: "agent", fingerprint, label: prompt.slice(0, 120), result });
+      return result;
+    },
+
+    async step(name: string, fn: () => unknown): Promise<unknown> {
+      const seq = ++seamCount;
+      const fingerprint = seamFingerprint(["step", name]);
+      const existing = await journalGet(seq);
+      if (existing !== null) {
+        if (existing.fingerprint !== fingerprint)
+          throw determinismError(seq, "step", existing.kind);
+        if (existing.state === "resolved") return existing.result;
+      }
+      const result = await fn();
+      await journalPut({ seq, kind: "step", fingerprint, label: name, result });
+      return result;
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
@@ -308,6 +362,28 @@ const artifactRefSchema = z.strictObject({
   name: z.string().min(1),
   url: z.string().min(1),
 });
+
+/** The supervisor's journal_get response: a memoized seam entry, or null on a miss. */
+type JournalLookup = z.infer<typeof journalEntryResultSchema>;
+
+/** A stable content hash of a seam's salient args — the determinism check on replay. */
+function seamFingerprint(parts: readonly unknown[]): string {
+  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
+
+/** A seam reached on replay didn't match what the journal recorded at that seq. */
+function determinismError(seq: number, got: string, recorded: string): EngineError {
+  const detail =
+    got === recorded
+      ? `the same "${got}" seam but with different arguments (a changed prompt, model, or step name)`
+      : `a "${recorded}" call, but this execution reached a "${got}" call`;
+  return new EngineError(
+    "PROGRAM_ERROR",
+    `Nondeterministic replay at seam ${String(seq)}: the journal recorded ${detail}. A workflow's ` +
+      `code on the path to a suspend/resume must be deterministic — route nondeterministic I/O ` +
+      `through agent(), step.run(), or workflows.call so it is journaled.`,
+  );
+}
 
 /** Scrub every known secret value out of model-bound message text — the seam's last word before
  *  anything reaches the provider. Pure + idempotent: returns redacted copies, mutates nothing. */

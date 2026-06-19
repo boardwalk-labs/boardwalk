@@ -46,6 +46,8 @@ import {
   callWorkflowArgsSchema,
   childToParentSchema,
   getSecretArgsSchema,
+  journalGetArgsSchema,
+  journalPutArgsSchema,
   mcpTokenArgsSchema,
   readArtifactArgsSchema,
   resolveModelArgsSchema,
@@ -650,6 +652,38 @@ export class RunSupervisor {
           (name) => this.env.get(name) ?? process.env[name],
         );
         return { results };
+      }
+      case "journal_get": {
+        const a = journalGetArgsSchema.parse(args);
+        const entry = this.store.getJournalEntry(run.id, a.seq);
+        return entry === null
+          ? null
+          : {
+              seq: entry.seq,
+              kind: entry.kind,
+              fingerprint: entry.fingerprint,
+              state: entry.state,
+              result: entry.result,
+            };
+      }
+      case "journal_put": {
+        const a = journalPutArgsSchema.parse(args);
+        const row = this.store.putJournalEntry({
+          runId: run.id,
+          seq: a.seq,
+          kind: a.kind,
+          fingerprint: a.fingerprint,
+          label: a.label ?? null,
+          state: a.state,
+          result: a.result === undefined ? null : asJsonValue(a.result, "journal result"),
+        });
+        return {
+          seq: row.seq,
+          kind: row.kind,
+          fingerprint: row.fingerprint,
+          state: row.state,
+          result: row.result,
+        };
       }
     }
   }
