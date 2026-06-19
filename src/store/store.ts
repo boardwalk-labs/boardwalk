@@ -109,6 +109,10 @@ const runStatusSchema = enumFromKeys<RunStatus>({
   queued: true,
   pending: true,
   running: true,
+  // Suspended (durable suspension): the run released its task and will resume later.
+  sleeping: true,
+  awaiting_input: true,
+  waiting_for_child: true,
   completed: true,
   failed: true,
   cancelled: true,
