@@ -12,8 +12,11 @@ import {
   handleCancelRun,
   handleGetRun,
   handleListEvents,
+  handleListPendingInputs,
+  handleListRunInputs,
   handleListRuns,
   handleListWorkflows,
+  handleRespondToInput,
   handleStartRun,
 } from "./api.js";
 import { handleWebhook } from "./hooks.js";
@@ -80,6 +83,9 @@ function matchRoute(segments: readonly string[]): Record<string, Handler> | null
       return { POST: (ctx) => handleStartRun(ctx, third) };
     }
   }
+  if (first === "api" && second === "inputs" && segments.length === 2) {
+    return { GET: handleListPendingInputs };
+  }
   if (first === "api" && second === "runs") {
     if (segments.length === 2) return { GET: handleListRuns };
     if (third === undefined) return null;
@@ -88,6 +94,12 @@ function matchRoute(segments: readonly string[]): Record<string, Handler> | null
       if (fourth === "events") return { GET: (ctx) => handleListEvents(ctx, third) };
       if (fourth === "cancel") return { POST: (ctx) => handleCancelRun(ctx, third) };
       if (fourth === "stream") return { GET: (ctx) => handleStreamRun(ctx, third) };
+      if (fourth === "inputs") return { GET: (ctx) => handleListRunInputs(ctx, third) };
+    }
+    // POST /api/runs/:id/inputs/:key — answer a pending gate.
+    if (segments.length === 5 && fourth === "inputs") {
+      const key = segments[4];
+      if (key !== undefined) return { POST: (ctx) => handleRespondToInput(ctx, third, key) };
     }
   }
   if (first === "hooks" && segments.length === 3 && second !== undefined && third !== undefined) {

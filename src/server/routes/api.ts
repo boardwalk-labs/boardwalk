@@ -26,6 +26,7 @@ import type { RouteContext } from "./router.js";
 const DEFAULT_RUNS_LIMIT = 100;
 
 const startRunBodySchema = z.strictObject({ input: jsonValueSchema.optional() });
+const respondInputBodySchema = z.strictObject({ value: jsonValueSchema });
 
 // Why a Record and not an array: the Record<RunStatus, true> shape makes the value list
 // provably complete — a status added to the union without a flag here is a compile error, so
@@ -127,6 +128,37 @@ export function handleListEvents(ctx: RouteContext, runId: string): void {
     .listEvents(runId, { afterCursor })
     .filter((row) => matchesChannels(row.event, channels));
   sendJson(ctx.res, 200, { events });
+}
+
+/** GET /api/inputs — every pending human-input gate across runs (the responder's inbox). */
+export function handleListPendingInputs(ctx: RouteContext): void {
+  sendJson(ctx.res, 200, {
+    inputs: ctx.engine.listInputRequests({ statuses: ["pending"] }),
+  });
+}
+
+/** GET /api/runs/:id/inputs — a run's human-input gates (pending + resolved history). */
+export function handleListRunInputs(ctx: RouteContext, runId: string): void {
+  if (ctx.engine.store.getRun(runId) === null) {
+    throw new HttpError(404, "NOT_FOUND", `Unknown run: ${runId}`);
+  }
+  sendJson(ctx.res, 200, { inputs: ctx.engine.listInputRequests({ runId }) });
+}
+
+/**
+ * POST /api/runs/:id/inputs/:key — answer a pending gate, validated against its input spec, then
+ * resume the run. 200 with the resolved request. The engine's NOT_FOUND / VALIDATION / CONFLICT
+ * map to 404 / 400 / 409 via the shared error renderer.
+ */
+export async function handleRespondToInput(
+  ctx: RouteContext,
+  runId: string,
+  key: string,
+): Promise<void> {
+  const raw = await readBody(ctx.req, MAX_BODY_BYTES);
+  const body = parseJsonBody(raw, respondInputBodySchema, "input response body");
+  const request = ctx.engine.respondToInput(runId, key, body.value);
+  sendJson(ctx.res, 200, { request });
 }
 
 /** POST /api/runs/:id/cancel — 202: accepted now, completes after the cooperative grace. */

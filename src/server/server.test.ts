@@ -50,6 +50,17 @@ await sleep(5000);
 output("never-finished");
 `;
 
+const APPROVAL_PROGRAM = `
+import { humanInput, output } from "@boardwalk-labs/workflow";
+export const meta = { slug: "approval", triggers: [{ kind: "manual" }] };
+const decision = await humanInput({
+  key: "approve",
+  prompt: "Approve?",
+  input: { kind: "choice", options: ["Approve", "Reject"] },
+});
+output({ decision });
+`;
+
 const TOKEN_HOOK_PROGRAM = `
 import { input, output } from "@boardwalk-labs/workflow";
 export const meta = {
@@ -140,6 +151,15 @@ const webhookAcceptedSchema = z.object({
   run: z.object({ id: z.string(), status: z.string() }),
 });
 const emptyObjectSchema = z.strictObject({});
+const inputRequestSchema = z.looseObject({
+  id: z.string(),
+  runId: z.string(),
+  key: z.string(),
+  prompt: z.string(),
+  status: z.string(),
+});
+const inputsResponseSchema = z.object({ inputs: z.array(inputRequestSchema) });
+const inputResponseSchema = z.object({ request: inputRequestSchema });
 
 async function fetchJson<T>(
   url: string,
@@ -440,6 +460,57 @@ describe("engine HTTP server", () => {
       method: "POST",
     });
     expect(missing.status).toBe(404);
+  }, 20_000);
+
+  it("human-in-the-loop: lists the pending gate and resumes on POST /inputs/:key", async () => {
+    const { engine, base } = await makeServer();
+    engine.deployWorkflow({ program: APPROVAL_PROGRAM });
+    const started = await fetchJson(`${base}/api/workflows/approval/runs`, runResponseSchema, {
+      method: "POST",
+    });
+    const runId = started.body.run.id;
+    await pollRunUntil(base, runId, (s) => s === "awaiting_input");
+
+    // The gate shows up on the run and in the org-wide inbox.
+    const runInputs = await fetchJson(`${base}/api/runs/${runId}/inputs`, inputsResponseSchema);
+    expect(runInputs.status).toBe(200);
+    expect(runInputs.body.inputs).toHaveLength(1);
+    expect(runInputs.body.inputs[0]?.key).toBe("approve");
+    const inbox = await fetchJson(`${base}/api/inputs`, inputsResponseSchema);
+    expect(inbox.body.inputs.some((r) => r.runId === runId)).toBe(true);
+
+    // A bad answer is a 400; the run stays parked.
+    const bad = await fetchJson(`${base}/api/runs/${runId}/inputs/approve`, errorResponseSchema, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: { value: "Maybe", isOther: false } }),
+    });
+    expect(bad.status).toBe(400);
+
+    // The valid answer resumes the run to completion.
+    const ok = await fetchJson(`${base}/api/runs/${runId}/inputs/approve`, inputResponseSchema, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: { value: "Approve", isOther: false } }),
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.body.request.status).toBe("resolved");
+
+    const done = await pollRunUntil(base, runId, (s) => TERMINAL_STATUSES.has(s));
+    expect(done.status).toBe("completed");
+    expect(done.output).toEqual({ decision: { value: "Approve", isOther: false } });
+
+    // A second answer to the now-resolved gate is a 404 (no pending request).
+    const second = await fetchJson(
+      `${base}/api/runs/${runId}/inputs/approve`,
+      errorResponseSchema,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ value: { value: "Reject", isOther: false } }),
+      },
+    );
+    expect(second.status).toBe(404);
   }, 20_000);
 
   it("webhook token auth: 503 unconfigured, 401 bad token, 201 success, 404 non-webhook", async () => {
