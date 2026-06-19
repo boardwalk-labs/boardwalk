@@ -22,7 +22,13 @@ import type {
 } from "@boardwalk-labs/workflow";
 import { DEFAULT_COMPACTION_BUDGET_CHARS, planCompaction } from "./compaction.js";
 import { EngineError, type EngineErrorCode } from "../errors.js";
-import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
+import type {
+  ChatMessage,
+  ChatTurn,
+  ToolCallRequest,
+  ToolResultMessage,
+  ToolSpec,
+} from "./conversation.js";
 import type { ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
 import {
@@ -50,6 +56,79 @@ const FATAL_TOOL_ERROR_CODES: ReadonlySet<EngineErrorCode> = new Set([
   "BUDGET_EXCEEDED",
   "CANCELLED",
 ]);
+
+/** The built-in tool a leaf gets when `AgentOptions.humanInput` is set — lets the model pause the
+ *  run mid-loop to ask a person. Its execution is handled in the loop (it needs the tool-call id +
+ *  the answers map), not via a normal `execute`. */
+export const HUMAN_INPUT_TOOL_NAME = "human_input";
+
+/** A human-input request the model raised mid-leaf (carried out of the loop by {@link LeafParked}). */
+export interface HumanInputRequest {
+  /** The tool-call id — the STABLE key across park + resume (it lives in the checkpointed turn). */
+  toolCallId: string;
+  prompt: string;
+  /** The response form the model asked for (`{ kind: "text" | "choice" | "multiselect", ... }`). */
+  inputSpec: unknown;
+}
+
+/** Everything needed to resume a parked leaf where it left off, without re-running prior turns. */
+export interface LeafCheckpoint {
+  /** The transcript up to and including the assistant turn that called `human_input`. */
+  messages: readonly ChatMessage[];
+  /** The loop iteration of the parked turn — resume continues from the next one. */
+  iteration: number;
+  totals: { inputTokens: number; outputTokens: number };
+}
+
+/** Resume input for {@link runAgentLeaf}: the parked checkpoint + answers keyed by tool-call id. */
+export interface LeafResume {
+  checkpoint: LeafCheckpoint;
+  answers: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Thrown when the model calls `human_input` and no answer is available yet — it unwinds the leaf so
+ * the host can suspend the run. The loop attaches `checkpoint` as it propagates (the seam that
+ * threw only knows the request); the host stores both and re-invokes the leaf with a {@link LeafResume}
+ * once the person responds.
+ */
+export class LeafParked extends Error {
+  readonly request: HumanInputRequest;
+  checkpoint: LeafCheckpoint | undefined;
+
+  constructor(request: HumanInputRequest) {
+    super("agent leaf parked for human input");
+    this.name = "LeafParked";
+    this.request = request;
+  }
+}
+
+/** The `human_input` tool spec advertised to the model. Execution is intercepted in the loop. */
+function humanInputToolSpec(): ExecutableTool {
+  return {
+    name: HUMAN_INPUT_TOOL_NAME,
+    description:
+      "Pause the run and ask a person, then continue with their answer. Use when a decision " +
+      "genuinely needs a human (an approval, a choice between options, missing information only a " +
+      "person has). Give a clear `prompt`; optionally an `input` form.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        prompt: { type: "string", description: "The question to show the person." },
+        input: {
+          type: "object",
+          description:
+            'Optional response form: { kind: "text" } | { kind: "choice", options: string[] } | ' +
+            '{ kind: "multiselect", options: string[] }. Omit for free text.',
+        },
+      },
+      required: ["prompt"],
+    },
+    execute: () => {
+      throw new EngineError("INTERNAL", "human_input is handled by the loop, not execute()");
+    },
+  };
+}
 
 /**
  * Identity of one `agent()` leaf, carried on its `turn_started`/`turn_ended` frames so a stream
@@ -138,6 +217,7 @@ export async function runAgentLeaf(
   prompt: string,
   opts: AgentOptions | undefined,
   io: LeafIo,
+  resume?: LeafResume,
 ): Promise<unknown> {
   const base = buildToolSet(opts, io.capabilities);
   if (base.memoryDir !== null) io.memoryUsed(base.memoryDir);
@@ -157,7 +237,7 @@ export async function runAgentLeaf(
     // parent tool set as its subset ceiling. Added only when the io can fork a child AND the call's
     // builtins selection includes it (default-on under "all"; never for "none"/"read-only").
     const forkLeaf = io.forkLeaf?.bind(io);
-    const tools =
+    const withSubagent =
       forkLeaf !== undefined && subagentSelected(opts?.builtins)
         ? [
             ...resolved,
@@ -172,7 +252,11 @@ export async function runAgentLeaf(
             }),
           ]
         : resolved;
-    return await runLeafWithTools(prompt, opts, io, tools, base.preamble);
+    // The human_input tool is opt-in per call. It is NOT forked into subagents (a subagent never
+    // parks in v0), so only a top-level leaf with `humanInput: true` can pause for a person.
+    const tools =
+      opts?.humanInput === true ? [...withSubagent, humanInputToolSpec()] : withSubagent;
+    return await runLeafWithTools(prompt, opts, io, tools, base.preamble, resume);
   } finally {
     // Disconnect on completion AND on error — stdio servers are real child processes.
     if (connected !== null) await connected.disconnect();
@@ -185,31 +269,70 @@ async function runLeafWithTools(
   io: LeafIo,
   tools: readonly ExecutableTool[],
   preamble: readonly string[],
+  resume: LeafResume | undefined,
 ): Promise<unknown> {
   // Re-check across the MERGED set: a namespaced MCP tool can collide with a program tool.
   assertUniqueToolNames(tools);
 
-  const schemaInstruction =
-    opts?.schema === undefined
-      ? []
-      : [
-          `Respond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`,
-        ];
-  const firstMessage = [...preamble, prompt, ...schemaInstruction].join("\n\n");
-
+  // A resume runs under a FRESH turn block (its own turnId); the pre-park segment's frames stay in
+  // the log under the old turn, sharing this leaf's agentId.
   const turnId = `turn-${randomUUID()}`;
   io.startTurn(turnId);
 
-  const totals: { inputTokens: number; outputTokens: number } = {
-    inputTokens: 0,
-    outputTokens: 0,
-  };
-  const messages: ChatMessage[] = [{ role: "user", text: io.redactor.redact(firstMessage) }];
+  const totals: { inputTokens: number; outputTokens: number } = { inputTokens: 0, outputTokens: 0 };
+  let messages: ChatMessage[];
+  let startIteration: number;
+
+  if (resume !== undefined) {
+    // Resume: rebuild the transcript and re-execute the parked turn's tools — `human_input` now
+    // returns the person's answer (by tool-call id) instead of parking — then continue the loop.
+    messages = [...resume.checkpoint.messages];
+    totals.inputTokens = resume.checkpoint.totals.inputTokens;
+    totals.outputTokens = resume.checkpoint.totals.outputTokens;
+    startIteration = resume.checkpoint.iteration;
+    const last = messages[messages.length - 1];
+    if (last === undefined || last.role !== "assistant") {
+      throw new EngineError("INTERNAL", "resume checkpoint did not end with an assistant turn.");
+    }
+    const results = await executeTurnTools(
+      last.toolCalls,
+      tools,
+      io,
+      turnId,
+      resume.answers,
+      messages,
+      startIteration,
+      totals,
+    );
+    messages.push({ role: "tool_results", results });
+  } else {
+    const schemaInstruction =
+      opts?.schema === undefined
+        ? []
+        : [
+            `Respond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`,
+          ];
+    const firstMessage = [...preamble, prompt, ...schemaInstruction].join("\n\n");
+    messages = [{ role: "user", text: io.redactor.redact(firstMessage) }];
+    startIteration = 0;
+  }
 
   let finalText: string;
   try {
-    finalText = await runToolLoop(messages, tools, opts, io, turnId, totals);
+    finalText = await runToolLoop(
+      messages,
+      tools,
+      opts,
+      io,
+      turnId,
+      totals,
+      resume?.answers ?? {},
+      startIteration,
+    );
   } catch (err) {
+    // A park unwinds the leaf cleanly — propagate it for the host to suspend, without emitting a
+    // turn_ended error (the turn is paused, not failed).
+    if (err instanceof LeafParked) throw err;
     // Redact like the tool path does: a misbehaving provider can echo request headers (the
     // API key) into an error body, and this message persists in run_events AND — via the
     // rethrow — in the run's failed row. The secrets invariant covers error paths too.
@@ -246,8 +369,11 @@ async function runToolLoop(
   io: LeafIo,
   turnId: string,
   totals: { inputTokens: number; outputTokens: number },
+  answers: Readonly<Record<string, unknown>>,
+  startIteration: number,
 ): Promise<string> {
-  for (let iteration = 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
+  // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
+  for (let iteration = startIteration + 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
     // Bound the context BEFORE each model call: a long loop (or one fat tool result) grows
     // `messages` until the provider rejects it. Compaction summarizes the oldest middle in place,
     // keeping the task framing + the latest exchanges verbatim. Its own model call is metered.
@@ -264,12 +390,15 @@ async function runToolLoop(
     }
 
     messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
-    // A turn's tool calls run CONCURRENTLY: the model is expected to batch only independent work,
-    // and a `subagent` call is just another tool call — so N of them fan out here in parallel.
-    // Promise.all preserves order, so results still line up with toolCalls; a run-fatal tool error
-    // (budget/cancel) rejects the batch and ends the run.
-    const results = await Promise.all(
-      turn.toolCalls.map((call) => executeToolCall(call, tools, io, turnId)),
+    const results = await executeTurnTools(
+      turn.toolCalls,
+      tools,
+      io,
+      turnId,
+      answers,
+      messages,
+      iteration,
+      totals,
     );
     messages.push({ role: "tool_results", results });
   }
@@ -413,15 +542,78 @@ async function modelTurn(
   return result;
 }
 
+/**
+ * Run a turn's tool calls concurrently. On a {@link LeafParked} (the model called `human_input`
+ * with no answer yet), attach the resume checkpoint as it unwinds — `messages` already includes the
+ * assistant turn, and `iteration` is its loop index — so the host can store it and resume here.
+ * Other run-fatal tool errors (budget/cancel) propagate as before.
+ */
+async function executeTurnTools(
+  toolCalls: readonly ToolCallRequest[],
+  tools: readonly ExecutableTool[],
+  io: LeafIo,
+  turnId: string,
+  answers: Readonly<Record<string, unknown>>,
+  messages: readonly ChatMessage[],
+  iteration: number,
+  totals: { inputTokens: number; outputTokens: number },
+): Promise<ToolResultMessage[]> {
+  try {
+    return await Promise.all(
+      toolCalls.map((call) => executeToolCall(call, tools, io, turnId, answers)),
+    );
+  } catch (err) {
+    if (err instanceof LeafParked && err.checkpoint === undefined) {
+      err.checkpoint = {
+        messages: [...messages],
+        iteration,
+        totals: { inputTokens: totals.inputTokens, outputTokens: totals.outputTokens },
+      };
+    }
+    throw err;
+  }
+}
+
+/**
+ * The `human_input` tool, intercepted in the loop (it needs the tool-call id + the answers map). On
+ * resume the person's answer is keyed by the tool-call id → return it as the result; otherwise PARK
+ * (throw {@link LeafParked}) so the run suspends until they respond.
+ */
+function executeHumanInput(
+  call: ToolCallRequest,
+  io: LeafIo,
+  turnId: string,
+  answers: Readonly<Record<string, unknown>>,
+): { id: string; content: string; isError: boolean } {
+  if (Object.hasOwn(answers, call.id)) {
+    const content = io.redactor.redact(JSON.stringify(answers[call.id]));
+    io.emit(turnId, {
+      kind: "tool_call_result",
+      toolCallId: call.id,
+      result: { humanSummary: "human responded" },
+    });
+    return { id: call.id, content, isError: false };
+  }
+  const prompt = typeof call.input.prompt === "string" ? call.input.prompt : "Input needed";
+  throw new LeafParked({ toolCallId: call.id, prompt, inputSpec: call.input.input });
+}
+
 /** Run one tool call; failures return to the MODEL as error results, they don't fail the run. */
 async function executeToolCall(
   call: ToolCallRequest,
   tools: readonly ExecutableTool[],
   io: LeafIo,
   turnId: string,
+  answers: Readonly<Record<string, unknown>>,
 ): Promise<{ id: string; content: string; isError: boolean }> {
   io.emit(turnId, { kind: "tool_call_start", toolCallId: call.id, toolName: call.name });
   io.emit(turnId, { kind: "tool_call_input_complete", toolCallId: call.id, input: call.input });
+
+  // human_input is intercepted here (it needs the tool-call id + the answers map), not via execute.
+  if (call.name === HUMAN_INPUT_TOOL_NAME) {
+    io.emit(turnId, { kind: "tool_call_executing", toolCallId: call.id });
+    return executeHumanInput(call, io, turnId, answers);
+  }
 
   const tool = tools.find((t) => t.name === call.name);
   if (tool === undefined) {

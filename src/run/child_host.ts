@@ -22,9 +22,11 @@ import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
 import type { ChatMessage } from "../agent/conversation.js";
 import {
+  LeafParked,
   runAgentLeaf,
   type AgentIdentity,
   type LeafIo,
+  type LeafResume,
   type ModelTurnRequest,
 } from "../agent/leaf.js";
 import { chatBedrock } from "../agent/bedrock.js";
@@ -64,6 +66,8 @@ export interface SuspendSignal {
     inputSpec: unknown;
     assignees?: string[];
   };
+  /** A tool-level gate's leaf transcript checkpoint, stored so the leaf resumes where it paused. */
+  leafCheckpoint?: unknown;
   /** Relative wait (ms) for reason "sleep"; the supervisor computes the absolute wake time. */
   durationMs?: number;
 }
@@ -314,21 +318,43 @@ export function createChildHost(
         opts?.schema ?? null,
       ]);
       const existing = await journalGet(seq);
+      let resume: LeafResume | undefined;
       if (existing !== null) {
         if (existing.fingerprint !== fingerprint)
           throw determinismError(seq, "agent", existing.kind);
         if (existing.state === "resolved") return existing.result;
-        // A `pending` entry is a leaf parked on tool-level human_input; resuming it is handled by
-        // the leaf-checkpoint path, not here. With no checkpoint yet, fall through to re-run.
+        // A `suspended` entry is a parked leaf (tool-level human_input): resume it from the stored
+        // checkpoint + the answers the supervisor joined in.
+        resume = leafResumeSchema.parse(existing.result);
       }
       agentCount += 1;
       const identity: AgentIdentity = {
         agentId: `agent-${String(agentCount)}`,
         ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
       };
-      const result = await runAgentLeaf(prompt, opts, makeLeafIo(identity));
-      await journalPut({ seq, kind: "agent", fingerprint, label: prompt.slice(0, 120), result });
-      return result;
+      try {
+        const result = await runAgentLeaf(prompt, opts, makeLeafIo(identity), resume);
+        await journalPut({ seq, kind: "agent", fingerprint, label: prompt.slice(0, 120), result });
+        return result;
+      } catch (err) {
+        if (err instanceof LeafParked) {
+          // The model paused for a person: suspend the run with the leaf's checkpoint + the gate.
+          io.suspend({
+            reason: "human_input",
+            seq,
+            fingerprint,
+            leafCheckpoint: err.checkpoint,
+            humanInput: {
+              key: err.request.toolCallId,
+              prompt: err.request.prompt,
+              inputSpec: err.request.inputSpec,
+            },
+          });
+          // Park: the supervisor kills this process; a fresh process resumes the leaf.
+          return new Promise<never>(() => {});
+        }
+        throw err;
+      }
     },
 
     async step(name: string, fn: () => unknown): Promise<unknown> {
@@ -466,6 +492,23 @@ const artifactRefSchema = z.strictObject({
 
 /** The supervisor's journal_get response: a memoized seam entry, or null on a miss. */
 type JournalLookup = z.infer<typeof journalEntryResultSchema>;
+
+/**
+ * The shape of a SUSPENDED agent leaf's journal result on resume: the transcript checkpoint plus
+ * the answers the supervisor joined from the resolved request rows. `messages` is our own
+ * serialized transcript round-tripping through JSON — passed back to the leaf, not re-validated.
+ */
+const leafResumeSchema = z.object({
+  checkpoint: z.object({
+    messages: z.array(z.custom<ChatMessage>()),
+    iteration: z.number().int(),
+    totals: z.object({
+      inputTokens: z.number().int(),
+      outputTokens: z.number().int(),
+    }),
+  }),
+  answers: z.record(z.string(), z.unknown()),
+});
 
 /** A stable content hash of a seam's salient args — the determinism check on replay. */
 function seamFingerprint(parts: readonly unknown[]): string {

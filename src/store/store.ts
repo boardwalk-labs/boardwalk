@@ -67,8 +67,12 @@ export interface RunRow {
   wakeAt: number | null;
 }
 
-/** A durable-seam memoization state: `pending` (started, not yet satisfied) or `resolved`. */
-export type JournalState = "pending" | "resolved";
+/**
+ * A durable-seam memoization state: `pending` (a sleep / program-level gate awaiting its event),
+ * `suspended` (a parked agent leaf holding a transcript checkpoint), or `resolved` (memoized). Only
+ * `resolved` is immutable; a pending/suspended entry is overwritten as the seam progresses.
+ */
+export type JournalState = "pending" | "suspended" | "resolved";
 
 /** The durable seams a run journals (the only ones whose results survive a resume). */
 export type JournalKind = "agent" | "step" | "human_input" | "sleep" | "workflow_call";
@@ -186,7 +190,7 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 const configSchema = z.record(z.string(), jsonValueSchema);
 const metadataSchema = z.record(z.string(), z.unknown());
 
-const journalStateSchema: z.ZodType<JournalState> = z.enum(["pending", "resolved"]);
+const journalStateSchema: z.ZodType<JournalState> = z.enum(["pending", "suspended", "resolved"]);
 const journalKindSchema: z.ZodType<JournalKind> = z.enum([
   "agent",
   "step",
@@ -911,11 +915,14 @@ export class Store {
     const resultJson = serializeJson(entry.result, "journal result");
     return this.transaction(() => {
       const existing = this.getJournalEntry(entry.runId, entry.seq);
-      if (existing !== null) return existing;
+      // A RESOLVED entry is immutable — that is the memoization guarantee (and the crash-between-
+      // write-and-suspend re-attach). A pending/suspended entry is overwritten: a parked leaf
+      // resuming records its new checkpoint (re-park) or its final result (done).
+      if (existing !== null && existing.state === "resolved") return existing;
       const t = this.now();
       try {
         this.prepare(
-          `INSERT INTO run_journal (run_id, seq, kind, fingerprint, label, state, result, created_at, resolved_at)
+          `INSERT OR REPLACE INTO run_journal (run_id, seq, kind, fingerprint, label, state, result, created_at, resolved_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(
           entry.runId,
@@ -925,7 +932,7 @@ export class Store {
           entry.label ?? null,
           entry.state,
           resultJson,
-          t,
+          existing?.createdAt ?? t, // preserve the original creation time across a replace
           entry.state === "resolved" ? t : null,
         );
       } catch (err) {
@@ -1081,6 +1088,23 @@ export class Store {
     ).run(responseJson, respondedBy ?? null, this.now(), id);
     if (Number(changed.changes) === 0) return null;
     return this.getHumanInputRequest(id);
+  }
+
+  /**
+   * Resolved human-input answers for a parked agent leaf at (runId, seq), keyed by request key
+   * (which is the tool-call id for a tool-level gate). The leaf reconstructs with these on resume —
+   * the request rows are the single source of truth for answers, joined here at read time.
+   */
+  resolvedAnswersForSeq(runId: string, seq: number): Record<string, JsonValue> {
+    const rows = this.prepare(
+      "SELECT key, response FROM human_input_requests WHERE run_id = ? AND seq = ? AND status = 'resolved'",
+    ).all(runId, seq);
+    const out: Record<string, JsonValue> = {};
+    for (const row of rows) {
+      const key = readText(row, "human_input_requests", "key");
+      out[key] = readJson(row, "human_input_requests", "response", jsonValueSchema);
+    }
+    return out;
   }
 
   /** Mark a pending request expired/cancelled (timeout, or the run was cancelled). No-op otherwise. */

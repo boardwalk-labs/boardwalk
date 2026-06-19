@@ -256,7 +256,13 @@ export class Engine {
         opts.respondedBy ?? null,
       );
       if (r === null) return null;
-      this.store.resolveJournalEntry(runId, request.seq, validated);
+      // A PROGRAM-level gate's journal entry IS the answer slot → resolve it. A TOOL-level gate's
+      // entry holds the leaf checkpoint (the answer is joined from the request row at read) → leave
+      // it suspended.
+      const entry = this.store.getJournalEntry(runId, request.seq);
+      if (entry !== null && entry.kind === "human_input") {
+        this.store.resolveJournalEntry(runId, request.seq, validated);
+      }
       return r;
     });
     if (resolved === null) {

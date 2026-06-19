@@ -163,6 +163,9 @@ export const childToParentSchema = z.union([
         assignees: z.array(z.string()).optional(),
       })
       .optional(),
+    /** Present for a TOOL-level gate (the model's `human_input` mid-leaf): the leaf's transcript
+     *  checkpoint, stored on the suspended journal entry so the leaf resumes where it paused. */
+    leafCheckpoint: z.unknown().optional(),
     /** Present for reason "sleep": the relative wait in ms. The supervisor computes the absolute
      *  wake time with ITS clock, so the wake is consistent with the scheduler (and test clocks). */
     durationMs: z.number().int().positive().optional(),
@@ -277,7 +280,8 @@ export const journalEntryResultSchema = z
     seq: z.number().int().positive(),
     kind: journalKindIpc,
     fingerprint: z.string(),
-    state: z.enum(["pending", "resolved"]),
+    // `suspended` is a parked agent leaf the child resumes from its checkpoint (+ joined answers).
+    state: z.enum(["pending", "suspended", "resolved"]),
     result: z.unknown(),
   })
   .nullable();

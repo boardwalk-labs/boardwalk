@@ -302,14 +302,29 @@ export class RunSupervisor {
     }
     const hi = msg.humanInput;
     const inputSpec = asJsonValue(hi.inputSpec, "human_input input spec");
+    // A TOOL-level gate (the model's mid-leaf `human_input`) carries the leaf's transcript
+    // checkpoint — store it on a `suspended` agent journal entry so the leaf resumes where it
+    // paused. A PROGRAM-level gate (the `humanInput()` hook) has no leaf to resume — its journal
+    // entry is just `pending`, and the answer becomes its memoized value on resolve.
     const result = this.store.transaction(() => {
-      this.store.putJournalEntry({
-        runId: run.id,
-        seq: msg.seq,
-        kind: "human_input",
-        fingerprint: msg.fingerprint,
-        state: "pending",
-      });
+      if (msg.leafCheckpoint !== undefined) {
+        this.store.putJournalEntry({
+          runId: run.id,
+          seq: msg.seq,
+          kind: "agent",
+          fingerprint: msg.fingerprint,
+          state: "suspended",
+          result: { checkpoint: asJsonValue(msg.leafCheckpoint, "leaf checkpoint") },
+        });
+      } else {
+        this.store.putJournalEntry({
+          runId: run.id,
+          seq: msg.seq,
+          kind: "human_input",
+          fingerprint: msg.fingerprint,
+          state: "pending",
+        });
+      }
       const existing = this.store.findPendingHumanInputRequest(run.id, hi.key);
       const request =
         existing ??
@@ -345,10 +360,23 @@ export class RunSupervisor {
     this.doResume(runId, this.resumeEnvelope(runId), []);
   }
 
-  /** A human answered a pending gate: emit the resolution, then re-dispatch the run. */
+  /**
+   * A human answered a pending gate: emit the resolution. Re-dispatch only once EVERY gate the run
+   * is waiting on is answered (whole-batch resume — a fan-out that raised N questions resumes once,
+   * not N times); until then the run stays parked.
+   */
   onInputResolved(runId: string, requestId: string, key: string): void {
     const run = this.store.getRun(runId);
     if (run === null || run.status !== "awaiting_input") return;
+    const stillPending = this.store.listHumanInputRequests({ runId, statuses: ["pending"] });
+    if (stillPending.length > 0) {
+      this.stampAndStore(runId, this.resumeEnvelope(runId), {
+        kind: "human_input_resolved",
+        requestId,
+        key,
+      });
+      return;
+    }
     this.doResume(runId, this.resumeEnvelope(runId), [
       { kind: "human_input_resolved", requestId, key },
     ]);
@@ -819,15 +847,27 @@ export class RunSupervisor {
       case "journal_get": {
         const a = journalGetArgsSchema.parse(args);
         const entry = this.store.getJournalEntry(run.id, a.seq);
-        return entry === null
-          ? null
-          : {
-              seq: entry.seq,
-              kind: entry.kind,
-              fingerprint: entry.fingerprint,
-              state: entry.state,
-              result: entry.result,
-            };
+        if (entry === null) return null;
+        let result = entry.result;
+        // A suspended agent leaf resumes with the person's answers joined from the request rows
+        // (the single source of truth) — merged into { checkpoint, answers } for the child.
+        if (entry.state === "suspended" && entry.kind === "agent") {
+          const answers = this.store.resolvedAnswersForSeq(run.id, a.seq);
+          const base =
+            typeof entry.result === "object" &&
+            entry.result !== null &&
+            !Array.isArray(entry.result)
+              ? entry.result
+              : {};
+          result = { ...base, answers };
+        }
+        return {
+          seq: entry.seq,
+          kind: entry.kind,
+          fingerprint: entry.fingerprint,
+          state: entry.state,
+          result,
+        };
       }
       case "journal_put": {
         const a = journalPutArgsSchema.parse(args);
