@@ -90,6 +90,35 @@ describe("conformance: human-in-the-loop", () => {
     await waitForStatus(engine, run.id, "completed");
   }, 20_000);
 
+  it("replay is silent: pre-suspend console output is not duplicated on resume", async () => {
+    const { engine } = createEngine();
+    engine.deployWorkflow({
+      program: `
+        import { humanInput, output } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "logged", triggers: [{ kind: "manual" }] };
+        console.log("BEFORE-GATE");
+        const note = await humanInput({ key: "note", prompt: "Note", input: { kind: "text" } });
+        console.log("AFTER-GATE");
+        output(note);
+      `,
+    });
+
+    const run = engine.startRun("logged");
+    await waitForStatus(engine, run.id, "awaiting_input");
+    engine.respondToInput(run.id, "note", { value: "ok" });
+    await waitForStatus(engine, run.id, "completed");
+
+    // The program re-ran from the top on resume, but BEFORE-GATE (emitted pre-suspend) must appear
+    // exactly once; AFTER-GATE (new, post-resume) appears once.
+    const stdout = engine.store
+      .listEvents(run.id)
+      .filter((row) => row.event.kind === "program_output")
+      .map((row) => (row.event.kind === "program_output" ? row.event.text : ""))
+      .join("");
+    expect(stdout.match(/BEFORE-GATE/g) ?? []).toHaveLength(1);
+    expect(stdout.match(/AFTER-GATE/g) ?? []).toHaveLength(1);
+  }, 20_000);
+
   it("free text via a text gate round-trips", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({

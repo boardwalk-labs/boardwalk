@@ -93,10 +93,28 @@ export interface ChildHost {
   host: WorkflowHost;
   /** The run process's one redactor — the child entry scrubs failure reports with it too. */
   redactor: Redactor;
+  /**
+   * True while the program is REPLAYING journaled seams on a resume/restart (before the frontier).
+   * The child entry uses it to drop console output that was already emitted last segment — so a
+   * resumed run's stream isn't littered with duplicate pre-suspend logs.
+   */
+  isReplaying(): boolean;
 }
 
-export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): ChildHost {
+/**
+ * @param replayFrontier the highest journaled seq; 0 on a fresh run. While re-running seams up to
+ * the frontier, the host is "replaying" and observability (console output, phase markers) is
+ * suppressed — those lines were emitted in the prior segment.
+ */
+export function createChildHost(
+  io: ChildHostIo,
+  capabilities: ToolSetContext,
+  replayFrontier = 0,
+): ChildHost {
   let phaseCount = 0;
+  // Replaying until a seam at/after the frontier is reached. A fresh run (frontier 0) is live
+  // immediately; a resume starts suppressed and goes live as it crosses the suspending seam.
+  let live = replayFrontier === 0;
   // One counter per run → a stable, run-unique id for each agent() call. The author's optional
   // name rides alongside as the display label; concurrent agents stay distinguishable either way.
   let agentCount = 0;
@@ -111,6 +129,13 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   // returns the stored result (a fingerprint mismatch is a determinism error). The counter
   // resets per child process, so a re-executed run re-derives the identical keys from the top.
   let seamCount = 0;
+  /** Advance the seam counter and, on a resume, go live once we reach the suspending seam (the
+   *  frontier) — output after it is new; output before it was already emitted. */
+  function nextSeam(): number {
+    const seq = ++seamCount;
+    if (seq >= replayFrontier) live = true;
+    return seq;
+  }
   async function journalGet(seq: number): Promise<JournalLookup> {
     return journalEntryResultSchema.parse(await io.request("journal_get", { seq }));
   }
@@ -274,11 +299,13 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
+      // Suppressed during replay: the marker was already emitted in the prior segment.
+      if (!live) return;
       io.emit({ kind: "phase", name, id: opts?.id ?? `phase-${String(phaseCount)}` });
     },
 
     async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
-      const seq = ++seamCount;
+      const seq = nextSeam();
       const fingerprint = seamFingerprint([
         "agent",
         opts?.provider ?? null,
@@ -305,7 +332,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async step(name: string, fn: () => unknown): Promise<unknown> {
-      const seq = ++seamCount;
+      const seq = nextSeam();
       const fingerprint = seamFingerprint(["step", name]);
       const existing = await journalGet(seq);
       if (existing !== null) {
@@ -319,7 +346,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async humanInput(opts: HumanInputOptions): Promise<HumanInputResult> {
-      const seq = ++seamCount;
+      const seq = nextSeam();
       const key = opts.key ?? `seam-${String(seq)}`;
       const fingerprint = seamFingerprint(["human_input", key, opts.prompt, opts.input]);
       const existing = await journalGet(seq);
@@ -365,7 +392,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async sleep(arg: SleepArg): Promise<void> {
-      const seq = ++seamCount;
+      const seq = nextSeam();
       const fingerprint = seamFingerprint(["sleep"]);
       const existing = await journalGet(seq);
       if (existing !== null) {
@@ -417,7 +444,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       return artifactRefSchema.parse(value);
     },
   };
-  return { host, redactor };
+  return { host, redactor, isReplaying: () => !live };
 }
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer sleeps are chunked. */

@@ -67,6 +67,7 @@ process.on("message", (raw: unknown) => {
     msg.skillsDir,
     msg.input,
     msg.config,
+    msg.replayFrontier,
   );
 });
 
@@ -77,6 +78,7 @@ async function runProgram(
   skillsDir: string | null,
   input: unknown,
   config: Record<string, unknown>,
+  replayFrontier: number,
 ): Promise<void> {
   let redactor: Redactor | undefined;
   // Per-run, engine-native LSP: spawns a language server in the workspace on first relevant edit,
@@ -110,8 +112,14 @@ async function runProgram(
         },
       },
       { workspaceDir, skillsDir, lspService, ...(programDir !== null ? { programDir } : {}) },
+      replayFrontier,
     );
     redactor = childHost.redactor;
+    // Drop console output while the program replays journaled seams on a resume/restart — those
+    // lines were emitted in the prior segment. Once execution crosses the suspending seam the host
+    // goes live and output flows again. (Direct process.stdout.write bypasses this; console.* is
+    // the program's normal logging path and what the run stream shows.)
+    installConsoleSuppression(() => childHost.isReplaying());
     installHost(childHost.host);
     installInput(input);
     installConfig(narrowConfig(config));
@@ -158,6 +166,23 @@ async function runProgram(
     // the channel so the final message is never lost to an immediate exit.
     process.disconnect();
     process.exit(0);
+  }
+}
+
+/**
+ * Suppress the program's console output while `isReplaying()` is true. On a resume/restart the
+ * program re-runs from the top; output before the suspending seam was already streamed last
+ * segment, so re-emitting it would litter the run's log with duplicates. Each console method is
+ * wrapped once; the wrapper consults the predicate per call, so output resumes the instant the
+ * host goes live. Not restored — the run process is single-use and exits after the run.
+ */
+function installConsoleSuppression(isReplaying: () => boolean): void {
+  for (const method of ["log", "info", "warn", "error", "debug"] as const) {
+    const original = console[method].bind(console);
+    console[method] = (...args: unknown[]): void => {
+      if (isReplaying()) return;
+      original(...args);
+    };
   }
 }
 

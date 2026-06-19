@@ -47,6 +47,9 @@ export interface InitMessage {
   input: unknown;
   config: Record<string, JsonValue>;
   manifest: WorkflowManifest;
+  /** The replay frontier: the highest journaled seq (0 on a fresh run). On a resume/restart the
+   *  child replays seams ≤ this and SUPPRESSES their observability (already emitted last segment). */
+  replayFrontier: number;
 }
 
 export interface HostResultMessage {
@@ -68,6 +71,7 @@ export const parentToChildSchema = z.union([
     input: z.unknown(),
     config: z.record(z.string(), z.unknown()),
     manifest: z.record(z.string(), z.unknown()),
+    replayFrontier: z.number().int().nonnegative(),
   }),
   z.object({
     type: z.literal("host_result"),

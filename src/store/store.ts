@@ -963,6 +963,19 @@ export class Store {
       .map(mapJournal);
   }
 
+  /**
+   * The highest journaled seq for a run, or 0 if none. This is the REPLAY FRONTIER: on a resume
+   * (or crash-restart) the child suppresses observability while re-running seams ≤ this, since
+   * they (and the output around them) were already emitted in the prior segment.
+   */
+  maxJournalSeq(runId: string): number {
+    const row = this.prepare(
+      "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM run_journal WHERE run_id = ?",
+    ).get(runId);
+    if (row === undefined) throw new EngineError("INTERNAL", "MAX(seq) returned no row");
+    return readInteger(row, "run_journal", "max_seq");
+  }
+
   // --------------------------------------------------------------------------
   // Human-input requests (human-in-the-loop gates)
   // --------------------------------------------------------------------------

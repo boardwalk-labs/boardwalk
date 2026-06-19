@@ -382,7 +382,7 @@ describe("agent() through the full run path", () => {
       "overspender",
       `import { agent, sleep } from "@boardwalk-labs/workflow";
                 await agent("burn tokens", { model: "test-model" });
-         await sleep(30_000); // the budget kill lands here, not at process exit`,
+         await sleep(25_000); // the budget kill lands here, not at process exit`,
       { budget: { max_usd: 0.01 } },
     );
 
@@ -399,7 +399,7 @@ describe("agent() through the full run path", () => {
       "token-hog",
       `import { agent, sleep } from "@boardwalk-labs/workflow";
                 await agent("talk a lot", { model: "test-model" });
-         await sleep(30_000);`,
+         await sleep(25_000);`,
       { budget: { max_tokens: 1000 } },
     );
 

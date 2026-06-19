@@ -364,7 +364,19 @@ export class RunSupervisor {
     this.stampAndStore(runId, envelope, { kind: "resumed" });
     // execute() re-spawns the child, which replays the journal and returns the now-resolved
     // answer at the suspending seam, then continues to the next suspend point or completion.
-    void this.supervise(runId);
+    //
+    // Race guard: a wake can land between status→awaiting_input (visible to the caller) and the
+    // suspending execute() clearing its active entry. supervise() would then return that stale
+    // promise and never re-dispatch, stranding the run at `pending`. If an entry is still in
+    // flight, supervise AFTER it settles (its own finally deletes the entry first).
+    const existing = this.active.get(runId);
+    if (existing !== undefined) {
+      void existing.promise.finally(() => {
+        void this.supervise(runId);
+      });
+    } else {
+      void this.supervise(runId);
+    }
   }
 
   /**
@@ -675,6 +687,9 @@ export class RunSupervisor {
         input: run.input,
         config: workflow.config,
         manifest: workflow.manifest,
+        // Re-runs (resume / crash-restart) replay journaled seams up to here with observability
+        // suppressed; a fresh run has no journal (frontier 0) and emits everything.
+        replayFrontier: this.store.maxJournalSeq(run.id),
       };
       if (child.connected) child.send(init);
     });

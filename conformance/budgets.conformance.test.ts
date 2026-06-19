@@ -39,7 +39,7 @@ describe("conformance: budgets terminate the run", () => {
           triggers: [{ kind: "manual" }],
           budget: { max_duration_seconds: 1 },
         };
-        await sleep(5_000);
+        await sleep(25_000);
       `,
     });
 
@@ -63,7 +63,7 @@ describe("conformance: budgets terminate the run", () => {
           budget: { max_usd: 0.01 },
         };
         await agent("burn money", { model: "test-model" });
-        await sleep(5_000);
+        await sleep(25_000);
       `,
     });
 
@@ -85,7 +85,7 @@ describe("conformance: budgets terminate the run", () => {
           budget: { max_tokens: 1000 },
         };
         await agent("talk a lot", { model: "test-model" });
-        await sleep(5_000);
+        await sleep(25_000);
       `,
     });
 
