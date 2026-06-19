@@ -10,7 +10,14 @@
 
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import type { AgentOptions, PhaseOptions, SleepArg, TokenUsage } from "@boardwalk-labs/workflow";
+import type {
+  AgentOptions,
+  HumanInputOptions,
+  HumanInputResult,
+  PhaseOptions,
+  SleepArg,
+  TokenUsage,
+} from "@boardwalk-labs/workflow";
 import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
 import type { ChatMessage } from "../agent/conversation.js";
@@ -46,9 +53,25 @@ import {
 /** Cap on a webfetch response body (the local backend's default); the model can ask for less. */
 const DEFAULT_FETCH_MAX_BYTES = 256 * 1024;
 
+/** What the child tells the supervisor when a seam suspends the run (releases the process). */
+export interface SuspendSignal {
+  reason: "human_input" | "sleep";
+  seq: number;
+  fingerprint: string;
+  humanInput?: {
+    key: string;
+    prompt: string;
+    inputSpec: unknown;
+    assignees?: string[];
+  };
+  wakeAt?: number;
+}
+
 export interface ChildHostIo {
   /** Broker a host call to the supervisor; resolves with its result. */
   request(method: HostMethod, args: Record<string, unknown>): Promise<unknown>;
+  /** Signal a durable suspension; the supervisor records it and kills this process. */
+  suspend(signal: SuspendSignal): void;
   /** Emit a run-event body (the supervisor stamps the envelope). turnId scopes leaf frames. */
   emit(body: RunEventBody, turnId?: string): void;
   /** Tell the supervisor to open a new turn block (it emits turn_started naming the leaf). */
@@ -292,6 +315,35 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       const result = await fn();
       await journalPut({ seq, kind: "step", fingerprint, label: name, result });
       return result;
+    },
+
+    async humanInput(opts: HumanInputOptions): Promise<HumanInputResult> {
+      const seq = ++seamCount;
+      const key = opts.key ?? `seam-${String(seq)}`;
+      const fingerprint = seamFingerprint(["human_input", key, opts.prompt, opts.input]);
+      const existing = await journalGet(seq);
+      if (existing !== null) {
+        if (existing.fingerprint !== fingerprint) {
+          throw determinismError(seq, "human_input", existing.kind);
+        }
+        // The resolved result is the human's validated response; a still-`pending` entry means a
+        // spurious wake without an answer, so fall through to re-suspend.
+        if (existing.state === "resolved") return existing.result as HumanInputResult;
+      }
+      io.suspend({
+        reason: "human_input",
+        seq,
+        fingerprint,
+        humanInput: {
+          key,
+          prompt: opts.prompt,
+          inputSpec: opts.input,
+          ...(opts.assignees !== undefined ? { assignees: [...opts.assignees] } : {}),
+        },
+      });
+      // Park: the run is now suspended and the supervisor will kill this process. Never resolves;
+      // a fresh process resumes the run and this seam returns the journaled answer above.
+      return new Promise<never>(() => {});
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {

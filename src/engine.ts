@@ -23,11 +23,14 @@ import { Scheduler } from "./scheduler/scheduler.js";
 import {
   Store,
   type EventRow,
+  type HumanInputRequestRow,
+  type HumanInputStatus,
   type RunRow,
   type TriggerKind,
   type WorkflowRow,
 } from "./store/store.js";
 import { isTerminal, RunSupervisor } from "./run/supervisor.js";
+import { validateHumanInputResponse } from "./run/human_input.js";
 import { writePackage } from "./run/run_dir.js";
 
 export interface EngineOptions {
@@ -212,6 +215,54 @@ export class Engine {
   cancelRun(runId: string): Promise<void> {
     this.assertOpen();
     return this.supervisor.cancel(runId);
+  }
+
+  /** Pending (or filtered) human-input gates — the inbox a responder picks from. */
+  listInputRequests(
+    filter: { runId?: string; statuses?: readonly HumanInputStatus[] } = {},
+  ): HumanInputRequestRow[] {
+    this.assertOpen();
+    return this.store.listHumanInputRequests(filter);
+  }
+
+  /**
+   * Answer a run's pending human-input gate, validating the response against its input spec, then
+   * resume the run. Atomic: the first responder wins (a second gets CONFLICT). Throws NOT_FOUND
+   * when no pending gate matches `key`, VALIDATION when the response doesn't fit the spec.
+   */
+  respondToInput(
+    runId: string,
+    key: string,
+    value: unknown,
+    opts: { respondedBy?: string } = {},
+  ): HumanInputRequestRow {
+    this.assertOpen();
+    if (this.store.getRun(runId) === null) {
+      throw new EngineError("NOT_FOUND", `Unknown run: ${runId}`);
+    }
+    const request = this.store.findPendingHumanInputRequest(runId, key);
+    if (request === null) {
+      throw new EngineError(
+        "NOT_FOUND",
+        `No pending human-input request "${key}" for run ${runId}.`,
+      );
+    }
+    const validated = validateHumanInputResponse(request.inputSpec, value);
+    const resolved = this.store.transaction(() => {
+      const r = this.store.resolveHumanInputRequest(
+        request.id,
+        validated,
+        opts.respondedBy ?? null,
+      );
+      if (r === null) return null;
+      this.store.resolveJournalEntry(runId, request.seq, validated);
+      return r;
+    });
+    if (resolved === null) {
+      throw new EngineError("CONFLICT", `Human-input request "${key}" was already answered.`);
+    }
+    this.supervisor.onInputResolved(runId, request.id, key);
+    return resolved;
   }
 
   /**

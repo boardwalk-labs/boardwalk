@@ -978,8 +978,10 @@ export class Store {
     expiresAt?: number | null;
   }): HumanInputRequestRow {
     const specJson = serializeJson(args.inputSpec, "human-input spec");
+    // undefined (not null) ⇒ serializeJson stores SQL NULL; the text "null" would fail the array
+    // schema on read. Only a real array is serialized.
     const assigneesJson = serializeJson(
-      args.assignees == null ? null : [...args.assignees],
+      args.assignees == null ? undefined : [...args.assignees],
       "human-input assignees",
     );
     const t = this.now();

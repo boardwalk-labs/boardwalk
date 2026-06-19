@@ -141,6 +141,28 @@ export const childToParentSchema = z.union([
     dir: z.string().min(1),
   }),
   z.object({
+    // Durable suspension: the program reached a seam that releases the process until an external
+    // event (a human answer; a timer). The supervisor persists the wake condition + a pending
+    // journal entry, then kills this child; resume re-spawns and replays from the journal.
+    type: z.literal("suspend"),
+    reason: z.enum(["human_input", "sleep"]),
+    /** The suspending seam's synchronous seq (the journal key). */
+    seq: z.number().int().positive(),
+    fingerprint: z.string().min(1),
+    /** Present for reason "human_input": the gate to open. */
+    humanInput: z
+      .object({
+        key: z.string().min(1),
+        prompt: z.string(),
+        /** The input form (text | choice | multiselect); validated when a response is submitted. */
+        inputSpec: z.unknown(),
+        assignees: z.array(z.string()).optional(),
+      })
+      .optional(),
+    /** Present for reason "sleep": when the timed wake is due (ms since epoch). */
+    wakeAt: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
     type: z.literal("done"),
     output: z.unknown(),
     outputDeclared: z.boolean(),

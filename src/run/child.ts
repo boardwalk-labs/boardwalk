@@ -93,6 +93,9 @@ async function runProgram(
             send({ type: "host_call", callId, method, args });
           });
         },
+        suspend(signal) {
+          send({ type: "suspend", ...signal });
+        },
         emit(body: RunEventBody, turnId?: string) {
           send({ type: "emit", body, ...(turnId !== undefined ? { turnId } : {}) });
         },

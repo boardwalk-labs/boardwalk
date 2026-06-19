@@ -53,6 +53,7 @@ import {
   resolveModelArgsSchema,
   webSearchArgsSchema,
   writeArtifactArgsSchema,
+  type ChildToParent,
   type HostMethod,
   type InitMessage,
   type IpcErrorShape,
@@ -93,7 +94,8 @@ type SpawnResult =
   | { kind: "failed"; error: IpcErrorShape; output: unknown; outputDeclared: boolean }
   | { kind: "crashed" }
   | { kind: "cancelled" }
-  | { kind: "budget" };
+  | { kind: "budget" }
+  | { kind: "suspended" };
 
 interface ActiveRun {
   promise: Promise<RunRow>;
@@ -101,12 +103,24 @@ interface ActiveRun {
   cancelRequested: boolean;
   /** Set when a budget kill is in flight — names which budget, for the failure message. */
   budgetReason: string | null;
+  /** Set when the child signaled a durable suspension — the exit is a park, not a crash. */
+  suspendRequested: boolean;
   /** Memory dirs agent() calls used this run — auto-persisted at successful run end. */
   memoryDirs: Set<string>;
   envelope: { turn: number; seq: number };
 }
 
 const TERMINAL_STATUSES: readonly RunStatus[] = ["completed", "failed", "cancelled"];
+const SUSPENDED_STATUSES: readonly RunStatus[] = [
+  "sleeping",
+  "awaiting_input",
+  "waiting_for_child",
+];
+
+/** True when a run is parked (released its process), awaiting an external wake. */
+export function isSuspended(status: RunStatus): boolean {
+  return SUSPENDED_STATUSES.includes(status);
+}
 
 /** Treat an MCP access token expiring this soon as already expired — a token that dies
  *  between the broker reply and the server call would burn the child's whole 401 retry. */
@@ -165,6 +179,10 @@ export class RunSupervisor {
       return Promise.reject(new EngineError("NOT_FOUND", `Unknown run: ${runId}`));
     }
     if (isTerminal(run.status)) return Promise.resolve(run);
+    // A parked run is driven only by resume() (a wake or a submitted answer), never by a bare
+    // supervise() — returning it as-is keeps a parent's workflows.call hold pending across the
+    // child's suspend+resume instead of re-spawning it here.
+    if (isSuspended(run.status)) return Promise.resolve(run);
     if (run.status === "cancelling") {
       // An interrupted cancellation (the killer died mid-kill). The process is gone — the
       // orphan exits on IPC disconnect — so finalize instead of re-executing.
@@ -181,6 +199,7 @@ export class RunSupervisor {
       child: null,
       cancelRequested: false,
       budgetReason: null,
+      suspendRequested: false,
       memoryDirs: new Set(),
       envelope: this.resumeEnvelope(runId),
     };
@@ -220,9 +239,12 @@ export class RunSupervisor {
 
     const entry = this.active.get(runId);
     if (entry === undefined) {
-      // Nothing is executing it right now (queued, or left over from a dead engine).
+      // Nothing is executing it right now (queued, parked/suspended, or left over from a dead
+      // engine). A suspended run has no process to signal, so finalize directly and close any
+      // pending human-input gates so they can't strand.
       const envelope = this.resumeEnvelope(runId);
-      this.store.updateRunStatus(runId, "cancelled", { endedAt: this.clock.now() });
+      if (isSuspended(run.status)) this.store.cancelPendingHumanInputRequests(runId);
+      this.store.updateRunStatus(runId, "cancelled", { endedAt: this.clock.now(), wakeAt: null });
       this.stampAndStore(runId, envelope, { kind: "run_status", status: "cancelled" });
       return;
     }
@@ -241,6 +263,91 @@ export class RunSupervisor {
       }
     }
     await entry.promise;
+  }
+
+  // --------------------------------------------------------------------------
+  // Suspension + resume
+  // --------------------------------------------------------------------------
+
+  /**
+   * Persist a durable suspension the child signaled: a pending journal entry at the seam's seq
+   * plus (for a human-input gate) the request row, then flip the run to its suspended status.
+   * Re-suspend (a spurious wake) reuses the existing pending request instead of creating another.
+   */
+  private handleSuspend(
+    run: RunRow,
+    entry: ActiveRun,
+    msg: Extract<ChildToParent, { type: "suspend" }>,
+  ): void {
+    if (msg.reason !== "human_input" || msg.humanInput === undefined) {
+      // sleep-release lands in a follow-up; anything else is a protocol bug.
+      throw new EngineError("INTERNAL", `unsupported suspend reason "${msg.reason}"`);
+    }
+    const hi = msg.humanInput;
+    const inputSpec = asJsonValue(hi.inputSpec, "human_input input spec");
+    const result = this.store.transaction(() => {
+      this.store.putJournalEntry({
+        runId: run.id,
+        seq: msg.seq,
+        kind: "human_input",
+        fingerprint: msg.fingerprint,
+        state: "pending",
+      });
+      const existing = this.store.findPendingHumanInputRequest(run.id, hi.key);
+      const request =
+        existing ??
+        this.store.createHumanInputRequest({
+          runId: run.id,
+          seq: msg.seq,
+          key: hi.key,
+          prompt: hi.prompt,
+          inputSpec,
+          ...(hi.assignees !== undefined ? { assignees: hi.assignees } : {}),
+        });
+      this.store.updateRunStatus(run.id, "awaiting_input", { wakeAt: null });
+      return { request, isNew: existing === null };
+    });
+    // Emit BOTH the run_status transition (so status-tracking consumers see awaiting_input) and
+    // the richer `suspended` marker (carrying the reason).
+    this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "awaiting_input" });
+    this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "human_input" });
+    if (result.isNew) {
+      this.stampAndStore(run.id, entry.envelope, {
+        kind: "human_input_requested",
+        requestId: result.request.id,
+        key: hi.key,
+        prompt: hi.prompt,
+      });
+    }
+  }
+
+  /** Re-dispatch a parked run (a timed wake — long sleep / human-input timeout). Idempotent. */
+  resume(runId: string): void {
+    const run = this.store.getRun(runId);
+    if (run === null || !isSuspended(run.status)) return;
+    this.doResume(runId, this.resumeEnvelope(runId), []);
+  }
+
+  /** A human answered a pending gate: emit the resolution, then re-dispatch the run. */
+  onInputResolved(runId: string, requestId: string, key: string): void {
+    const run = this.store.getRun(runId);
+    if (run === null || run.status !== "awaiting_input") return;
+    this.doResume(runId, this.resumeEnvelope(runId), [
+      { kind: "human_input_resolved", requestId, key },
+    ]);
+  }
+
+  private doResume(
+    runId: string,
+    envelope: { turn: number; seq: number },
+    preEvents: readonly RunEventBody[],
+  ): void {
+    for (const event of preEvents) this.stampAndStore(runId, envelope, event);
+    this.store.updateRunStatus(runId, "pending", { wakeAt: null });
+    this.stampAndStore(runId, envelope, { kind: "resumed" });
+    // execute() re-spawns the child, which replays the journal and returns the now-resolved
+    // answer at the suspending seam, then continues to the next suspend point or completion.
+    void this.supervise(runId);
   }
 
   /**
@@ -344,6 +451,11 @@ export class RunSupervisor {
         }
         case "cancelled":
           return this.finishRun(run.id, entry, "cancelled", {});
+        case "suspended":
+          // Parked: handleSuspend already persisted the status + a pending journal entry + the
+          // wake condition. Do NOT restart or finalize — return the suspended row as-is; resume()
+          // re-dispatches it when the wake condition is met (an answer, or — later — a timer).
+          return this.mustGetRun(run.id);
         case "budget":
           return this.finishRun(run.id, entry, "failed", {
             error: {
@@ -493,6 +605,24 @@ export class RunSupervisor {
               console.error(`run ${run.id}: ignored malformed memory dir from child`);
             }
             break;
+          case "suspend":
+            // The program reached a seam that releases the process. Persist the suspension
+            // (status + pending journal entry + any request), then kill the child; its exit
+            // settles as "suspended" (below), so execute() neither restarts nor finalizes.
+            try {
+              this.handleSuspend(run, entry, msg);
+              entry.suspendRequested = true;
+              child.kill("SIGKILL");
+            } catch (err) {
+              // A malformed suspend (e.g. a corrupt spec) fails the run rather than parking it.
+              settle({
+                kind: "failed",
+                error: toErrorShape(err),
+                output: null,
+                outputDeclared: false,
+              });
+            }
+            break;
           case "done":
             settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
             break;
@@ -510,7 +640,8 @@ export class RunSupervisor {
       child.on("error", () => settle({ kind: "crashed" }));
       child.on("exit", () => {
         entry.child = null;
-        if (entry.budgetReason !== null) settle({ kind: "budget" });
+        if (entry.suspendRequested) settle({ kind: "suspended" });
+        else if (entry.budgetReason !== null) settle({ kind: "budget" });
         else if (entry.cancelRequested) settle({ kind: "cancelled" });
         else settle({ kind: "crashed" });
       });

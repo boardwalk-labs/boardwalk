@@ -783,6 +783,22 @@ describe("Store: human-input requests", () => {
     expect(store.findPendingHumanInputRequest(run.id, "nope")).toBeNull();
   });
 
+  it('round-trips a request with NO assignees as SQL NULL (not the text "null")', () => {
+    const store = openStore();
+    const wf = seedWorkflow(store, "wf");
+    const run = seedRun(store, wf.id);
+    const req = store.createHumanInputRequest({
+      runId: run.id,
+      seq: 1,
+      key: "note",
+      prompt: "note?",
+      inputSpec: { kind: "text" },
+    });
+    expect(req.assignees).toBeNull();
+    // The read path must not choke on the column (the bug stored "null" → array-schema failure).
+    expect(store.getHumanInputRequest(req.id)?.assignees).toBeNull();
+  });
+
   it("resolves atomically: the first responder wins, a second gets null", () => {
     const store = openStore();
     const wf = seedWorkflow(store, "wf");
