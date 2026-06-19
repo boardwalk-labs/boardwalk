@@ -159,8 +159,9 @@ export const childToParentSchema = z.union([
         assignees: z.array(z.string()).optional(),
       })
       .optional(),
-    /** Present for reason "sleep": when the timed wake is due (ms since epoch). */
-    wakeAt: z.number().int().nonnegative().optional(),
+    /** Present for reason "sleep": the relative wait in ms. The supervisor computes the absolute
+     *  wake time with ITS clock, so the wake is consistent with the scheduler (and test clocks). */
+    durationMs: z.number().int().positive().optional(),
   }),
   z.object({
     type: z.literal("done"),

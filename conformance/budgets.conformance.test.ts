@@ -5,6 +5,10 @@
 // Breaching budget.* FAILS the run with BUDGET_EXCEEDED and a message naming the breached
 // budget — never a silent truncation. Duration is wall-clock; tokens/USD come from the usage
 // each agent() leaf reports, so the fake provider scripts the breach.
+//
+// The sleeps here are sub-threshold (they HOLD the process, representing active compute) so the
+// budget kill lands on a live process. A supra-threshold sleep would SUSPEND (release the
+// process) — correct behavior, but not what these cases exercise.
 
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
@@ -35,7 +39,7 @@ describe("conformance: budgets terminate the run", () => {
           triggers: [{ kind: "manual" }],
           budget: { max_duration_seconds: 1 },
         };
-        await sleep(30_000);
+        await sleep(5_000);
       `,
     });
 
@@ -59,7 +63,7 @@ describe("conformance: budgets terminate the run", () => {
           budget: { max_usd: 0.01 },
         };
         await agent("burn money", { model: "test-model" });
-        await sleep(30_000);
+        await sleep(5_000);
       `,
     });
 
@@ -81,7 +85,7 @@ describe("conformance: budgets terminate the run", () => {
           budget: { max_tokens: 1000 },
         };
         await agent("talk a lot", { model: "test-model" });
-        await sleep(30_000);
+        await sleep(5_000);
       `,
     });
 

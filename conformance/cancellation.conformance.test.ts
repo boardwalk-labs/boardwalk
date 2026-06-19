@@ -19,7 +19,7 @@ describe("conformance: cancellation", () => {
       program: `
         import { sleep } from "@boardwalk-labs/workflow";
         export const meta = { slug: "long-sleeper", triggers: [{ kind: "manual" }] };
-        await sleep(60_000);
+        await sleep(5_000);
       `,
     });
 

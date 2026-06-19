@@ -308,7 +308,7 @@ describe("RunSupervisor", () => {
     f.deploy(
       "long-sleeper",
       `import { sleep } from "@boardwalk-labs/workflow";
-       await sleep(60_000);`,
+       await sleep(5_000);`,
     );
     const runId = f.startRun("long-sleeper");
     const done = f.supervisor.supervise(runId);
@@ -332,7 +332,7 @@ describe("RunSupervisor", () => {
     f.deploy(
       "overruns",
       `import { sleep } from "@boardwalk-labs/workflow";
-       await sleep(30_000);`,
+       await sleep(5_000);`,
       { budget: { max_duration_seconds: 1 } },
     );
     const row = await f.supervisor.supervise(f.startRun("overruns"));

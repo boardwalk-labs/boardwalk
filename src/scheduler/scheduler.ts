@@ -25,6 +25,8 @@ export interface SchedulerOptions {
   store: Store;
   /** Start executing a queued run (the engine wires supervisor.supervise here). */
   dispatch: (runId: string) => void;
+  /** Re-dispatch a parked run whose timed wake is due (the engine wires supervisor.resume here). */
+  wake: (runId: string) => void;
   /** Emit the `queued` lifecycle event for a run this scheduler created. */
   emitQueued: (runId: string) => void;
   clock?: Clock;
@@ -44,6 +46,7 @@ const ACTIVE_STATUSES = ["pending", "running", "cancelling"] as const;
 export class Scheduler {
   private readonly store: Store;
   private readonly dispatch: (runId: string) => void;
+  private readonly wake: (runId: string) => void;
   private readonly emitQueued: (runId: string) => void;
   private readonly clock: Clock;
   private readonly log: (line: string) => void;
@@ -60,6 +63,7 @@ export class Scheduler {
   constructor(opts: SchedulerOptions) {
     this.store = opts.store;
     this.dispatch = opts.dispatch;
+    this.wake = opts.wake;
     this.emitQueued = opts.emitQueued;
     this.clock = opts.clock ?? systemClock;
     this.log = opts.log ?? ((line: string): void => console.error(line));
@@ -100,6 +104,7 @@ export class Scheduler {
     for (const workflow of this.store.listWorkflows()) {
       this.fireDueTriggers(workflow);
     }
+    this.wakeDueRuns();
     this.dispatchQueued();
     const elapsed = this.clock.now() - started;
     if (elapsed > this.tickBudgetMs) {
@@ -193,6 +198,13 @@ export class Scheduler {
     }
     this.anchors.set(key, anchor);
     return anchor;
+  }
+
+  /** Re-dispatch parked runs whose timed wake (long sleep / human-input timeout) is now due. */
+  private wakeDueRuns(): void {
+    for (const run of this.store.listRunsToWake(this.clock.now())) {
+      this.wake(run.id);
+    }
   }
 
   // --------------------------------------------------------------------------

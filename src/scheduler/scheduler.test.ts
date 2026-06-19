@@ -27,6 +27,7 @@ interface Fixture {
   clock: ReturnType<typeof fakeClock>;
   scheduler: Scheduler;
   dispatched: string[];
+  woken: string[];
   queuedEvents: string[];
   notices: string[];
   deploy: (
@@ -40,12 +41,14 @@ function fixture(startMs = T0): Fixture {
   const store = new Store(":memory:");
   const clock = fakeClock(startMs);
   const dispatched: string[] = [];
+  const woken: string[] = [];
   const queuedEvents: string[] = [];
   const notices: string[] = [];
   const scheduler = new Scheduler({
     store,
     clock,
     dispatch: (id) => dispatched.push(id),
+    wake: (id) => woken.push(id),
     emitQueued: (id) => queuedEvents.push(id),
     log: (line) => notices.push(line),
   });
@@ -66,7 +69,7 @@ function fixture(startMs = T0): Fixture {
       ...(config !== undefined ? { config } : {}),
     }).id;
   };
-  return { store, clock, scheduler, dispatched, queuedEvents, notices, deploy };
+  return { store, clock, scheduler, dispatched, woken, queuedEvents, notices, deploy };
 }
 
 describe("Scheduler firing", () => {
@@ -131,16 +134,18 @@ describe("Scheduler catch-up on restart", () => {
     // Session 2: a NEW scheduler over the same store, hours later.
     const clock = fakeClock(T0 + 121 * MINUTE);
     const dispatched: string[] = [];
+    const woken: string[] = [];
     const queuedEvents: string[] = [];
     const notices: string[] = [];
     const scheduler = new Scheduler({
       store: first.store,
       clock,
       dispatch: (id) => dispatched.push(id),
+      wake: (id) => woken.push(id),
       emitQueued: (id) => queuedEvents.push(id),
       log: (line) => notices.push(line),
     });
-    return { ...first, clock, scheduler, dispatched, queuedEvents, notices };
+    return { ...first, clock, scheduler, dispatched, woken, queuedEvents, notices };
   }
 
   it("default: skips missed fires with a logged notice, then resumes normally", () => {

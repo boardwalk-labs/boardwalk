@@ -112,6 +112,7 @@ export class Engine {
     this.scheduler = new Scheduler({
       store: this.store,
       dispatch: (runId) => void this.supervisor.supervise(runId),
+      wake: (runId) => this.supervisor.resume(runId),
       emitQueued: (runId) => this.supervisor.emitQueued(runId),
       ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
       ...(opts.log !== undefined ? { log: opts.log } : {}),

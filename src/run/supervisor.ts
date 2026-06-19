@@ -279,9 +279,26 @@ export class RunSupervisor {
     entry: ActiveRun,
     msg: Extract<ChildToParent, { type: "suspend" }>,
   ): void {
-    if (msg.reason !== "human_input" || msg.humanInput === undefined) {
-      // sleep-release lands in a follow-up; anything else is a protocol bug.
-      throw new EngineError("INTERNAL", `unsupported suspend reason "${msg.reason}"`);
+    if (msg.reason === "sleep") {
+      // Compute the absolute wake time with THIS clock so it agrees with the wake sweep.
+      const wakeAt = this.clock.now() + (msg.durationMs ?? 0);
+      this.store.transaction(() => {
+        this.store.putJournalEntry({
+          runId: run.id,
+          seq: msg.seq,
+          kind: "sleep",
+          fingerprint: msg.fingerprint,
+          state: "pending",
+          result: { wakeAt },
+        });
+        this.store.updateRunStatus(run.id, "sleeping", { wakeAt });
+      });
+      this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "sleeping" });
+      this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "sleep", wakeAt });
+      return;
+    }
+    if (msg.humanInput === undefined) {
+      throw new EngineError("INTERNAL", `human_input suspend missing its request payload`);
     }
     const hi = msg.humanInput;
     const inputSpec = asJsonValue(hi.inputSpec, "human_input input spec");

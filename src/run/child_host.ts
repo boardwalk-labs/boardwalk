@@ -64,7 +64,8 @@ export interface SuspendSignal {
     inputSpec: unknown;
     assignees?: string[];
   };
-  wakeAt?: number;
+  /** Relative wait (ms) for reason "sleep"; the supervisor computes the absolute wake time. */
+  durationMs?: number;
 }
 
 export interface ChildHostIo {
@@ -364,17 +365,34 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
 
     async sleep(arg: SleepArg): Promise<void> {
-      // Hold-and-pay: the process just waits. Locals stay in memory; nothing is checkpointed.
-      // Chunked so a multi-week sleep({ until }) doesn't overflow setTimeout's 2^31-1 ms cap
-      // (~24.8 days), which would otherwise fire ~immediately — there is no hard duration cap.
-      let remaining = sleepMs(arg);
-      while (remaining > 0) {
-        const slice = Math.min(remaining, MAX_TIMEOUT_MS);
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, slice);
-        });
-        remaining -= slice;
+      const seq = ++seamCount;
+      const fingerprint = seamFingerprint(["sleep"]);
+      const existing = await journalGet(seq);
+      if (existing !== null) {
+        if (existing.fingerprint !== fingerprint)
+          throw determinismError(seq, "sleep", existing.kind);
+        // A journaled sleep already elapsed in a prior segment — the run only progresses past a
+        // sleep once it is due, so on replay this returns immediately.
+        return;
       }
+      const durationMs = sleepMs(arg);
+      if (durationMs <= 0) return;
+      if (durationMs < SUSPEND_THRESHOLD_MS) {
+        // Short wait: hold the process (cheaper than a release + replay round-trip). Chunked so a
+        // multi-week sleep({ until }) doesn't overflow setTimeout's ~24.8-day cap.
+        let remaining = durationMs;
+        while (remaining > 0) {
+          const slice = Math.min(remaining, MAX_TIMEOUT_MS);
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, slice);
+          });
+          remaining -= slice;
+        }
+        return;
+      }
+      // Long wait: suspend — release the process; a timer resumes the run when it is due.
+      io.suspend({ reason: "sleep", seq, fingerprint, durationMs });
+      return new Promise<never>(() => {});
     },
 
     async getSecret(name: string): Promise<string> {
@@ -404,6 +422,10 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer sleeps are chunked. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Sleeps at or above this hold-vs-release boundary SUSPEND (release the process + resume on a
+ *  timer); shorter ones hold in-process, where a release + replay would cost more than it saves. */
+const SUSPEND_THRESHOLD_MS = 30_000;
 
 // Supervisor responses are validated like any other boundary input — the channel being ours
 // doesn't exempt it.
