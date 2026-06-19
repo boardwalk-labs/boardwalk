@@ -681,7 +681,13 @@ export class RunSupervisor {
             }
             break;
           case "done":
-            settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
+            // A budget breach detected mid-run (recordUsage set budgetReason) is AUTHORITATIVE even
+            // if the program then ran to completion: IPC is FIFO, so the breaching report_usage was
+            // handled before this `done`, and the verdict must not depend on the SIGKILL winning the
+            // race against the program's natural completion. The kill is an optimization to stop work
+            // early; correctness lives here.
+            if (entry.budgetReason !== null) settle({ kind: "budget" });
+            else settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
             break;
           case "failed":
             settle({
