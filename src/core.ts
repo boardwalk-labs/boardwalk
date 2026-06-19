@@ -24,6 +24,14 @@ export type {
   AgentIdentity,
 } from "./agent/leaf.js";
 
+// ---- Tool-level human input (the in-leaf `human_input` tool, docs/SUSPENSION.md §4.6). A leaf
+//      parks by THROWING LeafParked carrying its transcript checkpoint + the gate; the host catches
+//      it, suspends the run, and on wake calls runAgentLeaf again with a LeafResume (the checkpoint +
+//      the answers keyed by tool-call id) so the loop re-enters exactly where it paused. Shared so the
+//      single-node engine and the hosted platform drive the SAME leaf identically. ----
+export { LeafParked, HUMAN_INPUT_TOOL_NAME } from "./agent/leaf.js";
+export type { HumanInputRequest, LeafCheckpoint, LeafResume } from "./agent/leaf.js";
+
 // ---- The provider-neutral conversation model (referenced by LeafIo / streamModel) ----
 export type {
   ChatMessage,
