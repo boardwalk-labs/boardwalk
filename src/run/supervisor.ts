@@ -504,6 +504,9 @@ export class RunSupervisor {
     this.setStatus(run.id, entry, "pending");
 
     let firstStartedAt = run.startedAt;
+    // Cumulative ON-CPU time across segments (the max_duration_seconds basis). Seeded from the row so
+    // a resume / engine-restart continues the tally instead of granting a fresh compute budget.
+    let activeMs = run.activeMs;
     // Hydrate persistent dirs only into a NEVER-started workspace: a crash-restart (and an
     // engine-restart resume) must keep the workspace as the crashed pass left it.
     let hydrated = run.startedAt !== null;
@@ -521,10 +524,37 @@ export class RunSupervisor {
       this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "running" });
       firstStartedAt = startedAt;
 
-      const maxSeconds = manifest.budget?.max_duration_seconds;
-      const deadline = maxSeconds === undefined ? null : startedAt + maxSeconds * 1000;
+      // Two budget caps (docs/SUSPENSION.md): max_duration_seconds is ACTIVE COMPUTE (suspended idle
+      // never burns it) — applied as remaining-compute from this segment's start; deadline_seconds is
+      // WALL-CLOCK from the original start (idle counts). The binding deadline is the sooner of the
+      // two, and which one fires drives the failure message.
+      const maxComputeMs =
+        manifest.budget?.max_duration_seconds !== undefined
+          ? manifest.budget.max_duration_seconds * 1000
+          : null;
+      const deadlineMs =
+        manifest.budget?.deadline_seconds !== undefined
+          ? manifest.budget.deadline_seconds * 1000
+          : null;
+      const segmentStart = this.clock.now();
+      let deadline: number | null = null;
+      let budgetMessage = durationBudgetMessage(manifest);
+      if (maxComputeMs !== null) {
+        deadline = segmentStart + Math.max(0, maxComputeMs - activeMs);
+      }
+      if (deadlineMs !== null) {
+        const wallDeadline = startedAt + deadlineMs;
+        if (deadline === null || wallDeadline < deadline) {
+          deadline = wallDeadline;
+          budgetMessage = deadlineBudgetMessage(manifest);
+        }
+      }
 
-      const result = await this.spawnOnce(run, entry, workflow, dirs, deadline);
+      const result = await this.spawnOnce(run, entry, workflow, dirs, deadline, budgetMessage);
+      // Accrue this segment's ON-CPU time (every result kind) + persist, so the tally survives a
+      // suspend/resume and an engine restart (active compute, not wall-clock).
+      activeMs += this.clock.now() - segmentStart;
+      this.store.recordActiveMs(run.id, activeMs);
 
       switch (result.kind) {
         case "done": {
@@ -569,9 +599,7 @@ export class RunSupervisor {
           return this.finishRun(run.id, entry, "failed", {
             error: {
               code: "BUDGET_EXCEEDED",
-              message:
-                entry.budgetReason ??
-                `Run exceeded budget.max_duration_seconds (${String(maxSeconds)}s) and was terminated.`,
+              message: entry.budgetReason ?? durationBudgetMessage(manifest),
             },
           });
         case "crashed": {
@@ -598,6 +626,7 @@ export class RunSupervisor {
     workflow: WorkflowRow,
     dirs: RunDirs,
     deadline: number | null,
+    budgetMessage: string,
   ): Promise<SpawnResult> {
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
@@ -610,7 +639,7 @@ export class RunSupervisor {
       };
 
       if (deadline !== null && deadline - this.clock.now() <= 0) {
-        entry.budgetReason ??= durationBudgetMessage(workflow.manifest);
+        entry.budgetReason ??= budgetMessage;
         settle({ kind: "budget" });
         return;
       }
@@ -631,7 +660,7 @@ export class RunSupervisor {
 
       if (deadline !== null) {
         budgetTimer = setTimeout(() => {
-          entry.budgetReason ??= durationBudgetMessage(workflow.manifest);
+          entry.budgetReason ??= budgetMessage;
           // Budget breach terminates immediately — enforced, not advisory.
           child.kill("SIGKILL");
         }, deadline - this.clock.now());
@@ -1211,5 +1240,10 @@ export class RunSupervisor {
 
 function durationBudgetMessage(manifest: WorkflowManifest): string {
   const seconds = manifest.budget?.max_duration_seconds;
-  return `Run exceeded budget.max_duration_seconds (${String(seconds)}s) and was terminated.`;
+  return `Run exceeded budget.max_duration_seconds (${String(seconds)}s of active compute) and was terminated.`;
+}
+
+function deadlineBudgetMessage(manifest: WorkflowManifest): string {
+  const seconds = manifest.budget?.deadline_seconds;
+  return `Run exceeded budget.deadline_seconds (${String(seconds)}s wall-clock) and was terminated.`;
 }

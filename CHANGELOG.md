@@ -3,6 +3,23 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.23
+
+### Fixed
+
+- `budget.max_duration_seconds` now caps ACTIVE COMPUTE only — a long sleep, human-input gate, or
+  child-wait that SUSPENDS (releases the process) no longer burns it. Previously the engine measured
+  wall-clock from the original start, so a run that slept past its cap was budget-killed on wake
+  (it now completes). This matches the hosted runtime (full parity): cumulative on-CPU time is
+  tracked in a new `runs.active_ms` (migration v3) across segments + engine restarts.
+
+### Added
+
+- `budget.deadline_seconds` enforcement — the orthogonal WALL-CLOCK cap (start → now, suspended idle
+  INCLUDED). Use it for "give up if the whole run isn't done within N real seconds" (e.g. an
+  approval that legitimately waits but is stale after a day). The binding cap (sooner of compute vs
+  deadline) drives the failure message. Requires `@boardwalk-labs/workflow@^0.1.13`.
+
 ## 0.1.22
 
 ### Added

@@ -65,6 +65,9 @@ export interface RunRow {
   endedAt: number | null;
   /** Due time for a timed suspension (long sleep / human-input timeout); null otherwise. */
   wakeAt: number | null;
+  /** Cumulative ON-CPU execution time (ms) across all segments — what `max_duration_seconds`
+   *  (active compute) is checked against. Suspended idle does NOT accrue here. */
+  activeMs: number;
 }
 
 /**
@@ -314,6 +317,7 @@ function mapRun(row: SqlRow): RunRow {
     startedAt: readIntegerOrNull(row, "runs", "started_at"),
     endedAt: readIntegerOrNull(row, "runs", "ended_at"),
     wakeAt: readIntegerOrNull(row, "runs", "wake_at"),
+    activeMs: readInteger(row, "runs", "active_ms"),
   };
 }
 
@@ -699,6 +703,17 @@ export class Store {
     ).get(id);
     if (row === undefined) throw new EngineError("NOT_FOUND", `run ${id} not found`);
     return readInteger(row, "runs", "restarts");
+  }
+
+  /** Persist the run's cumulative ON-CPU time (the `max_duration_seconds` budget basis), so it
+   *  survives across segments (suspend/resume) + engine restarts. Set, not add — the supervisor
+   *  holds the running total and writes the absolute value after each segment. */
+  recordActiveMs(id: string, activeMs: number): void {
+    const result = this.prepare("UPDATE runs SET active_ms = ? WHERE id = ?").run(
+      Math.max(0, Math.round(activeMs)),
+      id,
+    );
+    if (Number(result.changes) === 0) throw new EngineError("NOT_FOUND", `run ${id} not found`);
   }
 
   /**

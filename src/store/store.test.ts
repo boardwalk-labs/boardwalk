@@ -187,6 +187,7 @@ describe("Store: runs", () => {
       startedAt: null,
       endedAt: null,
       wakeAt: null,
+      activeMs: 0,
     });
     expect(store.getRun(run.id)).toEqual(run);
   });

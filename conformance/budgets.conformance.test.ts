@@ -15,7 +15,9 @@ import {
   createEngine,
   disposeEngines,
   localInference,
+  manualClock,
   startFakeProvider,
+  waitForStatus,
   type FakeProvider,
 } from "./harness.js";
 
@@ -47,6 +49,61 @@ describe("conformance: budgets terminate the run", () => {
     expect(done.status).toBe("failed");
     expect(done.error?.code).toBe("BUDGET_EXCEEDED");
     expect(done.error?.message).toContain("max_duration_seconds");
+  }, 20_000);
+
+  it("a SUSPENDED sleep does NOT burn max_duration_seconds (active compute only)", async () => {
+    // The parity contract: max_duration_seconds caps ACTIVE COMPUTE, so a long sleep that RELEASES
+    // the process (supra-threshold) must not consume it. This run sleeps 60s — far past a 1s cap —
+    // yet completes, because the suspended interval is idle, not compute.
+    const mc = manualClock(1_700_000_000_000);
+    const { engine } = createEngine({ clock: mc.clock });
+    engine.deployWorkflow({
+      program: `
+        import { sleep, output } from "@boardwalk-labs/workflow";
+        export const meta = {
+          slug: "long-napper",
+          triggers: [{ kind: "manual" }],
+          budget: { max_duration_seconds: 1 },
+        };
+        await sleep(60_000);
+        output("rested");
+      `,
+    });
+
+    const run = engine.startRun("long-napper");
+    await waitForStatus(engine, run.id, "sleeping");
+    mc.advance(60_001);
+    engine.tick();
+    await waitForStatus(engine, run.id, "completed");
+    expect(engine.store.getRun(run.id)?.output).toBe("rested");
+  }, 20_000);
+
+  it("deadline_seconds kills a run that WAITS past the wall-clock cap (idle counts)", async () => {
+    // deadline_seconds is the orthogonal cap: wall-clock from the start, INCLUDING suspended idle.
+    // The same 60s sleep that survives max_duration_seconds above breaches a 30s deadline.
+    const mc = manualClock(1_700_000_000_000);
+    const { engine } = createEngine({ clock: mc.clock });
+    engine.deployWorkflow({
+      program: `
+        import { sleep, output } from "@boardwalk-labs/workflow";
+        export const meta = {
+          slug: "stale-waiter",
+          triggers: [{ kind: "manual" }],
+          budget: { deadline_seconds: 30 },
+        };
+        await sleep(60_000);
+        output("too late");
+      `,
+    });
+
+    const run = engine.startRun("stale-waiter");
+    await waitForStatus(engine, run.id, "sleeping");
+    mc.advance(60_001);
+    engine.tick();
+    await waitForStatus(engine, run.id, "failed");
+    const done = engine.store.getRun(run.id);
+    expect(done?.error?.code).toBe("BUDGET_EXCEEDED");
+    expect(done?.error?.message).toContain("deadline_seconds");
   }, 20_000);
 
   it("max_usd kills the run from the leaf's reported usage", async () => {

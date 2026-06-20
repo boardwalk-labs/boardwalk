@@ -162,10 +162,19 @@ CREATE INDEX human_input_requests_status ON human_input_requests (status);
 CREATE INDEX runs_wake_at ON runs (wake_at) WHERE wake_at IS NOT NULL;
 `;
 
+// v3 — budget accounting for suspension. \`active_ms\` is the cumulative ON-CPU execution time a run
+// has spent across all its segments (restarts + resume-after-suspend). \`budget.max_duration_seconds\`
+// is checked against THIS (active compute), so a long sleep / human-input gate / child-wait does not
+// burn it; \`budget.deadline_seconds\` is the separate WALL-CLOCK cap (start → now, idle included).
+const V3_SQL = `
+ALTER TABLE runs ADD COLUMN active_ms INTEGER NOT NULL DEFAULT 0;
+`;
+
 /** Every migration the engine knows, ascending. Append-only — never edit a shipped entry. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1_SQL },
   { version: 2, sql: V2_SQL },
+  { version: 3, sql: V3_SQL },
 ];
 
 /**
