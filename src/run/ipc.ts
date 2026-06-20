@@ -146,13 +146,16 @@ export const childToParentSchema = z.union([
   }),
   z.object({
     // Durable suspension: the program reached a seam that releases the process until an external
-    // event (a human answer; a timer). The supervisor persists the wake condition + a pending
-    // journal entry, then kills this child; resume re-spawns and replays from the journal.
+    // event (a human answer; a timer; a child run finalizing). The supervisor persists the wake
+    // condition + a pending journal entry, then kills this child; resume re-spawns and replays.
     type: z.literal("suspend"),
-    reason: z.enum(["human_input", "sleep"]),
+    reason: z.enum(["human_input", "sleep", "workflow_call"]),
     /** The suspending seam's synchronous seq (the journal key). */
     seq: z.number().int().positive(),
     fingerprint: z.string().min(1),
+    /** Present for reason "workflow_call": the durable child run the parent is parked on. The
+     *  child's finalize wakes the parent (the parent re-attaches + reads the child's output). */
+    childRunId: z.string().min(1).optional(),
     /** Present for reason "human_input": the gate to open. */
     humanInput: z
       .object({
@@ -188,11 +191,27 @@ export type ChildToParent = z.infer<typeof childToParentSchema>;
 
 // Host-call argument schemas, validated supervisor-side before acting.
 export const getSecretArgsSchema = z.strictObject({ name: z.string().min(1) });
+/** run_workflow (fire-and-forget) args: no journal seam, so no seq/fingerprint. */
 export const callWorkflowArgsSchema = z.strictObject({
   slug: z.string().min(1),
   input: z.unknown(),
   idempotencyKey: z.string().min(1).optional(),
 });
+/** call_workflow (durable child-wait) args: carry the seam's seq + fingerprint so the supervisor
+ *  can journal the wait (pending → resolved) and the parent can suspend until the child finalizes. */
+export const callWorkflowJournaledArgsSchema = z.strictObject({
+  seq: z.number().int().positive(),
+  fingerprint: z.string().min(1),
+  slug: z.string().min(1),
+  input: z.unknown(),
+  idempotencyKey: z.string().min(1).optional(),
+});
+/** The supervisor's call_workflow reply: the child's output if it already finished, or its run id
+ *  (so the child can park `waiting_for_child`) if it is still running. Re-validated child-side. */
+export const callWorkflowReplySchema = z.discriminatedUnion("status", [
+  z.strictObject({ status: z.literal("completed"), output: z.unknown() }),
+  z.strictObject({ status: z.literal("running"), childRunId: z.string().min(1) }),
+]);
 export const writeArtifactArgsSchema = z.strictObject({
   name: z.string().min(1),
   contentType: z.string().min(1),

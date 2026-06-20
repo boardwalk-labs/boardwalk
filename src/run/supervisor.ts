@@ -26,6 +26,7 @@ import {
   makeCursor,
   runEventSchema,
   TURN_CURSOR_STRIDE,
+  type JsonValue,
   type RunEvent,
   type WorkflowManifest,
 } from "@boardwalk-labs/workflow";
@@ -44,6 +45,7 @@ import type { EventRow, RunRow, Store, WorkflowRow } from "../store/store.js";
 import { defaultIdempotencyKey } from "./idempotency.js";
 import {
   callWorkflowArgsSchema,
+  callWorkflowJournaledArgsSchema,
   childToParentSchema,
   getSecretArgsSchema,
   journalGetArgsSchema,
@@ -129,6 +131,13 @@ const MCP_TOKEN_EXPIRY_SKEW_MS = 30_000;
 /** True when a run can no longer change state. */
 export function isTerminal(status: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
+}
+
+/** Read the child run id off a pending workflow_call journal entry's result ({ childRunId }). */
+function readChildRunId(result: JsonValue | null): string | null {
+  if (typeof result !== "object" || result === null || Array.isArray(result)) return null;
+  const value = result.childRunId;
+  return typeof value === "string" ? value : null;
 }
 
 export class RunSupervisor {
@@ -297,6 +306,35 @@ export class RunSupervisor {
       this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "sleep", wakeAt });
       return;
     }
+    if (msg.reason === "workflow_call") {
+      // The parent parked on a still-running child. Journal the child id (pending) + flip to
+      // `waiting_for_child`; the child's finalize wakes us (we re-attach + read its output).
+      if (msg.childRunId === undefined) {
+        throw new EngineError("INTERNAL", `workflow_call suspend missing its childRunId`);
+      }
+      const childRunId = msg.childRunId;
+      this.store.transaction(() => {
+        this.store.putJournalEntry({
+          runId: run.id,
+          seq: msg.seq,
+          kind: "workflow_call",
+          fingerprint: msg.fingerprint,
+          state: "pending",
+          result: { childRunId },
+        });
+        this.store.updateRunStatus(run.id, "waiting_for_child", { wakeAt: null });
+      });
+      this.stampAndStore(run.id, entry.envelope, {
+        kind: "run_status",
+        status: "waiting_for_child",
+      });
+      this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "child" });
+      // The child may have finalized in the window before we committed `waiting_for_child` (its
+      // finalize-wake then found us still running). Re-check and resume now so we can't strand.
+      const child = this.store.getRun(childRunId);
+      if (child !== null && isTerminal(child.status)) this.resume(run.id);
+      return;
+    }
     if (msg.humanInput === undefined) {
       throw new EngineError("INTERNAL", `human_input suspend missing its request payload`);
     }
@@ -427,6 +465,20 @@ export class RunSupervisor {
     for (const run of this.store.listRuns({ statuses: ["queued", "pending", "running"] })) {
       resumed.push(run.id);
       void this.supervise(run.id);
+    }
+    // A parent parked `waiting_for_child` whose child finalized during the downtime missed its
+    // finalize-wake. Resume it (it re-attaches + reads the child's memoized output). A parent whose
+    // child is still in flight stays parked — that child (recovered above) wakes it on its finalize.
+    for (const parent of this.store.listRuns({ statuses: ["waiting_for_child"] })) {
+      const pending = this.store
+        .listJournal(parent.id)
+        .find((e) => e.kind === "workflow_call" && e.state === "pending");
+      const childId = pending !== undefined ? readChildRunId(pending.result) : null;
+      const child = childId !== null ? this.store.getRun(childId) : null;
+      if (child !== null && isTerminal(child.status)) {
+        resumed.push(parent.id);
+        this.resume(parent.id);
+      }
     }
     return { resumed, cancelled };
   }
@@ -784,17 +836,37 @@ export class RunSupervisor {
         });
       }
       case "call_workflow": {
-        const a = callWorkflowArgsSchema.parse(args);
+        const a = callWorkflowJournaledArgsSchema.parse(args);
         const child = this.startChildRun(run.id, a.slug, a.input, a.idempotencyKey);
-        const terminal = await this.supervise(child.id);
-        if (terminal.status === "completed") return terminal.output;
-        if (terminal.status === "cancelled") {
+        // Hold for the child's first segment. A SHORT child (one that runs straight to terminal)
+        // finishes here and we return its output — cheaper than releasing + replaying this parent.
+        // A LONG child (one that itself suspends — sleeps, awaits input, waits on its OWN child)
+        // settles non-terminal, and THAT releases this parent too (`waiting_for_child`).
+        const settled = await this.supervise(child.id);
+        if (settled.status === "completed") {
+          // Memoize the output so the parent's replay (and any later restart) returns it instantly.
+          this.store.putJournalEntry({
+            runId: run.id,
+            seq: a.seq,
+            kind: "workflow_call",
+            fingerprint: a.fingerprint,
+            state: "resolved",
+            result: settled.output,
+          });
+          return { status: "completed", output: settled.output };
+        }
+        if (settled.status === "cancelled") {
           throw new EngineError("CANCELLED", `Child workflow "${a.slug}" was cancelled.`);
         }
-        throw new EngineError(
-          "PROGRAM_ERROR",
-          `Child workflow "${a.slug}" failed: ${terminal.error?.message ?? "unknown error"}`,
-        );
+        if (settled.status === "failed") {
+          throw new EngineError(
+            "PROGRAM_ERROR",
+            `Child workflow "${a.slug}" failed: ${settled.error?.message ?? "unknown error"}`,
+          );
+        }
+        // The child suspended (it is long-running): release this parent until the child finalizes.
+        // The child replies io.suspend(workflow_call) → pending journal entry + `waiting_for_child`.
+        return { status: "running", childRunId: child.id };
       }
       case "run_workflow": {
         const a = callWorkflowArgsSchema.parse(args);
@@ -1040,7 +1112,32 @@ export class RunSupervisor {
         ? { error: { code: opts.error.code, message: opts.error.message } }
         : {}),
     });
-    return this.mustGetRun(runId);
+    const finalized = this.mustGetRun(runId);
+    // A child reaching terminal wakes a parent parked on it (workflows.call child-wait release).
+    this.wakeWaitingParent(finalized);
+    return finalized;
+  }
+
+  /**
+   * A run reached terminal: if its parent is parked `waiting_for_child` on THIS exact child
+   * (its pending workflow_call journal entry names it), resume the parent — it re-attaches, reads
+   * the now-memoized output, and continues. Defensive: a wake failure must never corrupt the
+   * child's terminal transition (boot recovery is the backstop for a missed wake).
+   */
+  private wakeWaitingParent(child: RunRow): void {
+    if (child.parentRunId === null) return;
+    try {
+      const parent = this.store.getRun(child.parentRunId);
+      if (parent === null || parent.status !== "waiting_for_child") return;
+      const pending = this.store
+        .listJournal(parent.id)
+        .find((e) => e.kind === "workflow_call" && e.state === "pending");
+      if (pending === undefined) return;
+      if (readChildRunId(pending.result) !== child.id) return;
+      this.resume(parent.id);
+    } catch (err) {
+      console.error(`run ${child.parentRunId}: failed to wake waiting_for_child parent`, err);
+    }
   }
 
   /** Stamp a child-emitted body. A malformed body is dropped with a diagnostic, never fatal. */

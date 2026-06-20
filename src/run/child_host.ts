@@ -42,6 +42,7 @@ import type {
 } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
+  callWorkflowReplySchema,
   journalEntryResultSchema,
   mcpTokenResultSchema,
   readArtifactResultSchema,
@@ -57,7 +58,7 @@ const DEFAULT_FETCH_MAX_BYTES = 256 * 1024;
 
 /** What the child tells the supervisor when a seam suspends the run (releases the process). */
 export interface SuspendSignal {
-  reason: "human_input" | "sleep";
+  reason: "human_input" | "sleep" | "workflow_call";
   seq: number;
   fingerprint: string;
   humanInput?: {
@@ -70,6 +71,8 @@ export interface SuspendSignal {
   leafCheckpoint?: unknown;
   /** Relative wait (ms) for reason "sleep"; the supervisor computes the absolute wake time. */
   durationMs?: number;
+  /** The durable child run the parent is parked on, for reason "workflow_call". */
+  childRunId?: string;
 }
 
 export interface ChildHostIo {
@@ -401,11 +404,40 @@ export function createChildHost(
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
-      return await io.request("call_workflow", {
+      // Durable child-wait: journal the call so a long-running child can RELEASE the parent's
+      // process (suspend `waiting_for_child`) instead of holding it. The child's finalize wakes the
+      // parent, which re-attaches (idempotent) + reads the now-memoized output. A child that is
+      // already terminal returns immediately — no suspend round-trip.
+      const seq = nextSeam();
+      const idempotencyKey = opts?.idempotencyKey;
+      const fingerprint = seamFingerprint([
+        "workflow_call",
         slug,
-        input,
-        ...(opts?.idempotencyKey !== undefined ? { idempotencyKey: opts.idempotencyKey } : {}),
-      });
+        input ?? null,
+        idempotencyKey ?? null,
+      ]);
+      const existing = await journalGet(seq);
+      if (existing !== null) {
+        if (existing.fingerprint !== fingerprint)
+          throw determinismError(seq, "workflow_call", existing.kind);
+        // A resolved entry is the child's memoized output; a still-`pending` entry (we parked on the
+        // child last segment) falls through to re-attach + re-check whether it has finalized yet.
+        if (existing.state === "resolved") return existing.result;
+      }
+      const reply = callWorkflowReplySchema.parse(
+        await io.request("call_workflow", {
+          seq,
+          fingerprint,
+          slug,
+          input,
+          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        }),
+      );
+      if (reply.status === "completed") return reply.output;
+      // The child is still running: suspend until it finalizes. The supervisor writes the pending
+      // journal entry + flips us to `waiting_for_child`, then kills this process.
+      io.suspend({ reason: "workflow_call", seq, fingerprint, childRunId: reply.childRunId });
+      return new Promise<never>(() => {});
     },
 
     async runWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {

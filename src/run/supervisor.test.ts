@@ -395,6 +395,42 @@ describe("RunSupervisor", () => {
     expect(f.store.getRun(orphanCancelling)?.status).toBe("cancelled");
   }, 20_000);
 
+  it("boot recovery resumes a waiting_for_child parent whose child finalized during downtime", async () => {
+    const f = fixture();
+    f.deploy(
+      "slow-kid",
+      `import { sleep, output } from "@boardwalk-labs/workflow";
+       await sleep(60_000);
+       output("kid-done");`,
+    );
+    f.deploy(
+      "waiter",
+      `import { output, workflows } from "@boardwalk-labs/workflow";
+       output({ said: await workflows.call("slow-kid", {}) });`,
+    );
+
+    // Drive the parent until it RELEASES (the child is parked in its long sleep).
+    const parentId = f.startRun("waiter");
+    void f.supervisor.supervise(parentId);
+    await waitFor(() => f.store.getRun(parentId)?.status === "waiting_for_child");
+
+    const child = f.store.listRuns().find((r) => r.parentRunId === parentId);
+    if (child === undefined) throw new Error("expected the parent to have spawned a child");
+
+    // Simulate the child finishing while the engine was DOWN: mark it terminal directly, bypassing
+    // finishRun so the live finalize-wake never fires — exactly the missed wake the boot sweep covers.
+    f.store.updateRunStatus(child.id, "completed", { output: "kid-done", endedAt: Date.now() });
+
+    const { resumed } = f.supervisor.recoverOnBoot();
+    expect(resumed).toContain(parentId);
+
+    const row = await f.supervisor.supervise(parentId);
+    expect(row.status).toBe("completed");
+    expect(row.output).toEqual({ said: "kid-done" });
+    // Re-attach was idempotent: still exactly one child, no re-spawn.
+    expect(f.store.listRuns().filter((r) => r.parentRunId === parentId)).toHaveLength(1);
+  }, 30_000);
+
   it("interpolates whole-value secret refs into manifest env for the child process", async () => {
     const f = fixture({ env: { API_KEY: "secret-value-42" } });
     f.deploy(

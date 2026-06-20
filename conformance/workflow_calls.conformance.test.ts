@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { isTerminal } from "../src/index.js";
-import { createEngine, disposeEngines } from "./harness.js";
+import { createEngine, disposeEngines, kindsOf, manualClock, waitForStatus } from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -75,6 +75,55 @@ describe("conformance: workflows.call / workflows.run", () => {
     expect(done.restarts).toBe(1);
     expect(done.output).toEqual({ childSaid: "child-result" });
     expect(readFileSync(countFile, "utf8")).toBe("x"); // exactly one child execution
+    const children = engine.store.listRuns().filter((r) => r.parentRunId === run.id);
+    expect(children).toHaveLength(1);
+    expect(children[0]?.status).toBe("completed");
+  }, 30_000);
+
+  it("a LONG child releases the parent (waiting_for_child) and resumes on the child's finalize", async () => {
+    // A child that itself suspends (here, a long sleep) is "long": the parent should RELEASE its
+    // process (`waiting_for_child`) rather than hold for the whole wait, and the child's finalize
+    // wakes it. (A short child — every other test here — is held in-process; cheaper than a
+    // release + replay.)
+    const mc = manualClock(1_750_000_000_000);
+    const { engine } = createEngine({ clock: mc.clock });
+    engine.deployWorkflow({
+      program: `
+        import { output, sleep } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "slow-child", triggers: [{ kind: "manual" }] };
+        await sleep(60_000);
+        output("child-done");
+      `,
+    });
+    engine.deployWorkflow({
+      program: `
+        import { output, workflows } from "@boardwalk-labs/workflow";
+        export const meta = { slug: "waiter", triggers: [{ kind: "manual" }] };
+        output({ said: await workflows.call("slow-child", {}) });
+      `,
+    });
+
+    const run = engine.startRun("waiter");
+
+    // The parent releases its process while the child is parked in its long sleep.
+    await waitForStatus(engine, run.id, "waiting_for_child");
+    expect(kindsOf(engine, run.id)).toContain("suspended");
+    // The child itself is suspended (not finished) — proof the parent did not hold for the wait.
+    const childWhileParked = engine.store.listRuns().filter((r) => r.parentRunId === run.id);
+    expect(childWhileParked).toHaveLength(1);
+    expect(childWhileParked[0] !== undefined && isTerminal(childWhileParked[0].status)).toBe(false);
+
+    // The child's sleep comes due: the scheduler wakes the child, it finalizes, and THAT wakes the
+    // parent (event-driven, no parent timer) — which re-attaches, reads the output, and completes.
+    mc.advance(60_001);
+    engine.tick();
+    await waitForStatus(engine, run.id, "completed");
+
+    const done = engine.store.getRun(run.id);
+    expect(done?.output).toEqual({ said: "child-done" });
+    expect(done?.restarts).toBe(0); // a suspend is not a crash
+    expect(kindsOf(engine, run.id)).toContain("resumed");
+    // Re-attach is idempotent: exactly one child run, and it completed.
     const children = engine.store.listRuns().filter((r) => r.parentRunId === run.id);
     expect(children).toHaveLength(1);
     expect(children[0]?.status).toBe("completed");
