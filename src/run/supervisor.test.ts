@@ -409,10 +409,13 @@ describe("RunSupervisor", () => {
        output({ said: await workflows.call("slow-kid", {}) });`,
     );
 
-    // Drive the parent until it RELEASES (the child is parked in its long sleep).
+    // Drive the parent until it RELEASES (the child is parked in its long sleep). Await the
+    // suspending pass so its active entry is fully cleared before we recover (else recoverOnBoot's
+    // re-dispatch races the still-settling suspend — supervise() would hand back the suspended pass).
     const parentId = f.startRun("waiter");
-    void f.supervisor.supervise(parentId);
+    const firstPass = f.supervisor.supervise(parentId);
     await waitFor(() => f.store.getRun(parentId)?.status === "waiting_for_child");
+    expect((await firstPass).status).toBe("waiting_for_child");
 
     const child = f.store.listRuns().find((r) => r.parentRunId === parentId);
     if (child === undefined) throw new Error("expected the parent to have spawned a child");
@@ -424,9 +427,9 @@ describe("RunSupervisor", () => {
     const { resumed } = f.supervisor.recoverOnBoot();
     expect(resumed).toContain(parentId);
 
-    const row = await f.supervisor.supervise(parentId);
-    expect(row.status).toBe("completed");
-    expect(row.output).toEqual({ said: "kid-done" });
+    // The re-dispatched parent replays, re-attaches to the now-terminal child, and completes.
+    await waitFor(() => f.store.getRun(parentId)?.status === "completed");
+    expect(f.store.getRun(parentId)?.output).toEqual({ said: "kid-done" });
     // Re-attach was idempotent: still exactly one child, no re-spawn.
     expect(f.store.listRuns().filter((r) => r.parentRunId === parentId)).toHaveLength(1);
   }, 30_000);
