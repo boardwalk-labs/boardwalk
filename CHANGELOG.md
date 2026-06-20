@@ -3,6 +3,20 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.22
+
+### Added
+
+- Durable child-wait release: a long-running `workflows.call` now RELEASES the parent's process
+  (`waiting_for_child`) instead of holding it for the whole wait, completing the durable-suspension
+  triad alongside sleep-release and human-in-the-loop. A SHORT child (one that runs straight to
+  terminal) is still held in-process — cheaper than a release + replay; a LONG child (one that
+  itself suspends — its own sleep, human-input gate, or child-wait) releases the parent too. The
+  child's finalize wakes the parent, which re-attaches idempotently and reads the memoized output;
+  a boot-recovery pass resumes any parent whose child finalized while the engine was down. The call
+  is journaled (`workflow_call`), so the parent's restart/replay returns the child's output instead
+  of re-spawning it.
+
 ## 0.1.17
 
 ### Changed
