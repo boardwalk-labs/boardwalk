@@ -74,12 +74,14 @@ describe("conformance: budgets terminate the run", () => {
     });
 
     const run = engine.startRun("long-napper");
-    await waitForStatus(engine, run.id, "sleeping");
+    await waitForStatus(engine, run.id, "sleeping", 30_000);
     mc.advance(120_001);
     engine.tick();
-    await waitForStatus(engine, run.id, "completed");
+    // Generous wait: the resumed segment re-spawns a child, which under heavy CI process contention
+    // can be slow; the assertion is that it COMPLETES (not budget-killed), not that it's fast.
+    await waitForStatus(engine, run.id, "completed", 60_000);
     expect(engine.store.getRun(run.id)?.output).toBe("rested");
-  }, 20_000);
+  }, 75_000);
 
   it("deadline_seconds kills a run that WAITS past the wall-clock cap (idle counts)", async () => {
     // deadline_seconds is the orthogonal cap: wall-clock from the start, INCLUDING suspended idle.
@@ -100,14 +102,14 @@ describe("conformance: budgets terminate the run", () => {
     });
 
     const run = engine.startRun("stale-waiter");
-    await waitForStatus(engine, run.id, "sleeping");
+    await waitForStatus(engine, run.id, "sleeping", 30_000);
     mc.advance(60_001);
     engine.tick();
-    await waitForStatus(engine, run.id, "failed");
+    await waitForStatus(engine, run.id, "failed", 30_000);
     const done = engine.store.getRun(run.id);
     expect(done?.error?.code).toBe("BUDGET_EXCEEDED");
     expect(done?.error?.message).toContain("deadline_seconds");
-  }, 20_000);
+  }, 45_000);
 
   it("max_usd kills the run from the leaf's reported usage", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });

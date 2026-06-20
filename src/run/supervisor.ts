@@ -107,6 +107,11 @@ interface ActiveRun {
   budgetReason: string | null;
   /** Set when the child signaled a durable suspension — the exit is a park, not a crash. */
   suspendRequested: boolean;
+  /** The just-finished segment's ON-CPU duration (ms), captured at the FIRST settle-determining
+   *  event (a suspend decision, a done/failed message, a budget/crash) — NOT at child-exit, which
+   *  can lag the suspend (and, under a test clock, be advanced past it). The budget accounting adds
+   *  this to the run's cumulative active_ms. */
+  lastSegmentActiveMs: number;
   /** Memory dirs agent() calls used this run — auto-persisted at successful run end. */
   memoryDirs: Set<string>;
   envelope: { turn: number; seq: number };
@@ -209,6 +214,7 @@ export class RunSupervisor {
       cancelRequested: false,
       budgetReason: null,
       suspendRequested: false,
+      lastSegmentActiveMs: 0,
       memoryDirs: new Set(),
       envelope: this.resumeEnvelope(runId),
     };
@@ -551,9 +557,10 @@ export class RunSupervisor {
       }
 
       const result = await this.spawnOnce(run, entry, workflow, dirs, deadline, budgetMessage);
-      // Accrue this segment's ON-CPU time (every result kind) + persist, so the tally survives a
-      // suspend/resume and an engine restart (active compute, not wall-clock).
-      activeMs += this.clock.now() - segmentStart;
+      // Accrue this segment's ON-CPU time (captured by spawnOnce at the settle-determining event,
+      // so a suspend's idle tail — or a test clock advanced past it — is excluded) + persist, so the
+      // tally survives a suspend/resume and an engine restart (active compute, not wall-clock).
+      activeMs += entry.lastSegmentActiveMs;
       this.store.recordActiveMs(run.id, activeMs);
 
       switch (result.kind) {
@@ -631,9 +638,20 @@ export class RunSupervisor {
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
       let budgetTimer: NodeJS.Timeout | null = null;
+      // Capture this segment's ON-CPU duration at the FIRST settle-determining event (idempotent),
+      // so a suspend's idle tail — the gap between the suspend decision and the child's exit, which
+      // a test clock can advance past — is not miscounted as active compute.
+      const segStart = this.clock.now();
+      let activeMarked = false;
+      const markActive = (): void => {
+        if (activeMarked) return;
+        activeMarked = true;
+        entry.lastSegmentActiveMs = Math.max(0, this.clock.now() - segStart);
+      };
       const settle = (result: SpawnResult): void => {
         if (settled) return;
         settled = true;
+        markActive();
         if (budgetTimer !== null) clearTimeout(budgetTimer);
         resolve(result);
       };
@@ -748,6 +766,9 @@ export class RunSupervisor {
             // (status + pending journal entry + any request), then kill the child; its exit
             // settles as "suspended" (below), so execute() neither restarts nor finalizes.
             try {
+              // Capture active time at the SUSPEND DECISION — before the kill + the child's exit
+              // (and before a test clock advances past it). The exit's settle() then no-ops markActive.
+              markActive();
               this.handleSuspend(run, entry, msg);
               entry.suspendRequested = true;
               child.kill("SIGKILL");

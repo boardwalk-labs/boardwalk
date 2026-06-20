@@ -3,7 +3,7 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## 0.1.24
+## 0.1.25
 
 ### Fixed
 
