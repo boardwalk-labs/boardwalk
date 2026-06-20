@@ -53,8 +53,11 @@ describe("conformance: budgets terminate the run", () => {
 
   it("a SUSPENDED sleep does NOT burn max_duration_seconds (active compute only)", async () => {
     // The parity contract: max_duration_seconds caps ACTIVE COMPUTE, so a long sleep that RELEASES
-    // the process (supra-threshold) must not consume it. This run sleeps 60s — far past a 1s cap —
-    // yet completes, because the suspended interval is idle, not compute.
+    // the process (supra-threshold) must not consume it. This run sleeps 120s — far past a 30s cap —
+    // yet completes, because the suspended interval is idle, not compute. (The OLD wall-clock-from-
+    // start behavior would budget-kill it on wake: 120s elapsed > 30s.) The cap is set comfortably
+    // above each segment's real spawn time so the wall-clock budget timer never fires under the
+    // manual clock; only the active-vs-wall accounting is under test.
     const mc = manualClock(1_700_000_000_000);
     const { engine } = createEngine({ clock: mc.clock });
     engine.deployWorkflow({
@@ -63,16 +66,16 @@ describe("conformance: budgets terminate the run", () => {
         export const meta = {
           slug: "long-napper",
           triggers: [{ kind: "manual" }],
-          budget: { max_duration_seconds: 1 },
+          budget: { max_duration_seconds: 30 },
         };
-        await sleep(60_000);
+        await sleep(120_000);
         output("rested");
       `,
     });
 
     const run = engine.startRun("long-napper");
     await waitForStatus(engine, run.id, "sleeping");
-    mc.advance(60_001);
+    mc.advance(120_001);
     engine.tick();
     await waitForStatus(engine, run.id, "completed");
     expect(engine.store.getRun(run.id)?.output).toBe("rested");
