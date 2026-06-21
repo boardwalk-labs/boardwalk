@@ -3,6 +3,13 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.27
+
+### Changed
+
+- Bump `@boardwalk-labs/workflow` to ^0.1.15 (the `budget.deadline_seconds` type fix). Additive;
+  no engine behavior change.
+
 ## 0.1.26
 
 ### Changed
