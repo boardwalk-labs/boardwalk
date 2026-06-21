@@ -3,6 +3,13 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.26
+
+### Changed
+
+- Bump `@boardwalk-labs/workflow` to ^0.1.14 (the `workflow_run` trigger). Additive; the engine
+  accepts manifests declaring it.
+
 ## 0.1.25
 
 ### Fixed
