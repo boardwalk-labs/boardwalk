@@ -35,6 +35,16 @@ export interface FetchResult {
   truncated: boolean;
 }
 
+/** A general HTTP request the `http` tool makes (any method, headers, body). The `body` is sent
+ *  verbatim; the backend bounds the RESPONSE size. URL/method/headers are untrusted model input —
+ *  the backend validates the scheme and method. */
+export interface HttpRequestInput {
+  url: string;
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+}
+
 /** A stored artifact reference (mirrors the SDK ArtifactRef the host bridge returns). */
 export interface ArtifactWriteResult {
   id: string;
@@ -54,6 +64,7 @@ export interface ToolHost {
   // assembles and the tools read off the object — property syntax avoids the unbound-`this` trap.
   webSearch?: (query: string, opts?: { limit?: number }) => Promise<WebSearchResult[]>;
   fetchUrl?: (url: string, opts?: { maxBytes?: number }) => Promise<FetchResult>;
+  httpRequest?: (req: HttpRequestInput, opts?: { maxBytes?: number }) => Promise<FetchResult>;
   writeArtifact?: (
     name: string,
     contentType: string,
@@ -67,13 +78,31 @@ export interface ToolHost {
 export function hostBackedTools(host: ToolHost | undefined): Map<string, ExecutableTool> {
   const tools = new Map<string, ExecutableTool>();
   if (host?.fetchUrl !== undefined) tools.set("webfetch", webfetchTool(host));
+  if (host?.httpRequest !== undefined) tools.set("http", httpTool(host));
   if (host?.webSearch !== undefined) tools.set("web_search", webSearchTool(host));
   if (host?.writeArtifact !== undefined) tools.set("artifacts", artifactsTool(host));
   return tools;
 }
 
 /** Names of every host-backed built-in (whether or not a backend is present), for selection checks. */
-export const HOST_BACKED_TOOL_NAMES: readonly string[] = ["webfetch", "web_search", "artifacts"];
+export const HOST_BACKED_TOOL_NAMES: readonly string[] = [
+  "webfetch",
+  "http",
+  "web_search",
+  "artifacts",
+];
+
+/** Methods the `http` tool accepts. POST/PUT/PATCH/DELETE make it a MUTATING tool — which is why
+ *  `http` is NOT in the read-only set (webfetch, a GET-only reader, is). */
+const HTTP_METHODS: readonly string[] = [
+  "GET",
+  "POST",
+  "PUT",
+  "PATCH",
+  "DELETE",
+  "HEAD",
+  "OPTIONS",
+];
 
 function webfetchTool(host: ToolHost): ExecutableTool {
   const fetchUrl = host.fetchUrl;
@@ -95,6 +124,59 @@ function webfetchTool(host: ToolHost): ExecutableTool {
       const url = requireString(input, "url");
       const maxBytes = optionalPositiveInt(input["maxBytes"], "maxBytes");
       const result = await fetchUrl(url, maxBytes !== undefined ? { maxBytes } : undefined);
+      const header = `[HTTP ${String(result.status)}${result.contentType !== undefined ? ` ${result.contentType}` : ""}]`;
+      return `${header}\n${result.body}${result.truncated ? "\n…[response truncated]" : ""}`;
+    },
+  };
+}
+
+function httpTool(host: ToolHost): ExecutableTool {
+  const httpRequest = host.httpRequest;
+  if (httpRequest === undefined) throw unreachable("http");
+  return {
+    name: "http",
+    description:
+      "Make an HTTP request to an http(s) URL and return the raw response (status + body, " +
+      "size-bounded). Use this to call JSON/REST APIs with any method, headers, or body. For " +
+      "reading a web PAGE as text, prefer `webfetch` (it extracts readable text from HTML).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string", description: "The http(s) URL to request." },
+        method: {
+          type: "string",
+          enum: [...HTTP_METHODS],
+          description: "HTTP method (default GET).",
+        },
+        headers: {
+          type: "object",
+          description: "Request headers as a string→string map.",
+          additionalProperties: { type: "string" },
+        },
+        body: { type: "string", description: "Request body (for POST/PUT/PATCH)." },
+        maxBytes: { type: "number", description: "Optional cap on response bytes returned." },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+    execute: async (input) => {
+      const url = requireString(input, "url");
+      const method = normalizeMethod(input["method"]);
+      const headers = optionalStringMap(input["headers"], "headers");
+      const body = input["body"];
+      if (body !== undefined && typeof body !== "string") {
+        throw new EngineError("VALIDATION", `Tool input "body" must be a string.`);
+      }
+      const maxBytes = optionalPositiveInt(input["maxBytes"], "maxBytes");
+      const result = await httpRequest(
+        {
+          url,
+          ...(method !== undefined ? { method } : {}),
+          ...(headers !== undefined ? { headers } : {}),
+          ...(typeof body === "string" ? { body } : {}),
+        },
+        maxBytes !== undefined ? { maxBytes } : undefined,
+      );
       const header = `[HTTP ${String(result.status)}${result.contentType !== undefined ? ` ${result.contentType}` : ""}]`;
       return `${header}\n${result.body}${result.truncated ? "\n…[response truncated]" : ""}`;
     },
@@ -207,4 +289,36 @@ function optionalPositiveInt(value: unknown, key: string): number | undefined {
     );
   }
   return value;
+}
+
+/** Normalize + validate the `http` method (case-insensitive); undefined ⇒ the backend defaults GET. */
+function normalizeMethod(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") {
+    throw new EngineError("VALIDATION", `Tool input "method" must be a string.`);
+  }
+  const upper = value.toUpperCase();
+  if (!HTTP_METHODS.includes(upper)) {
+    throw new EngineError(
+      "VALIDATION",
+      `http: unsupported method "${value}" (use ${HTTP_METHODS.join(", ")}).`,
+    );
+  }
+  return upper;
+}
+
+/** Validate an optional string→string map (the `http` headers); a non-string value fails loudly. */
+function optionalStringMap(value: unknown, key: string): Record<string, string> | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new EngineError("VALIDATION", `Tool input "${key}" must be an object of strings.`);
+  }
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(value)) {
+    if (typeof v !== "string") {
+      throw new EngineError("VALIDATION", `Tool input "${key}.${k}" must be a string.`);
+    }
+    out[k] = v;
+  }
+  return out;
 }

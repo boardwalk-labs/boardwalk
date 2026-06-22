@@ -15,6 +15,8 @@ const WS = "/tmp/ws-not-touched"; // selection never touches the filesystem
 const fullHost: ToolHost = {
   fetchUrl: () =>
     Promise.resolve({ status: 200, contentType: undefined, body: "", truncated: false }),
+  httpRequest: () =>
+    Promise.resolve({ status: 200, contentType: undefined, body: "", truncated: false }),
   webSearch: () => Promise.resolve([]),
   writeArtifact: () => Promise.resolve({ id: "1", name: "n", url: "u" }),
 };
@@ -41,7 +43,19 @@ function namesNoLsp(builtins: Parameters<typeof selectBuiltins>[0]): string[] {
 describe("selectBuiltins", () => {
   it('defaults to "all" — sandbox built-ins + engine-native diagnostics (no host ⇒ no host-backed tools)', () => {
     expect(names(undefined, undefined)).toEqual(
-      ["apply_patch", "bash", "diagnostics", "edit", "glob", "grep", "ls", "read", "write"].sort(),
+      [
+        "apply_patch",
+        "bash",
+        "clock",
+        "diagnostics",
+        "edit",
+        "glob",
+        "grep",
+        "ls",
+        "read",
+        "todo",
+        "write",
+      ].sort(),
     );
   });
 
@@ -52,7 +66,18 @@ describe("selectBuiltins", () => {
   it("the engine-native diagnostics tool is omitted when the run has no LspService", () => {
     expect(namesNoLsp("all")).not.toContain("diagnostics");
     expect(namesNoLsp("all")).toEqual(
-      ["apply_patch", "bash", "edit", "glob", "grep", "ls", "read", "write"].sort(),
+      [
+        "apply_patch",
+        "bash",
+        "clock",
+        "edit",
+        "glob",
+        "grep",
+        "ls",
+        "read",
+        "todo",
+        "write",
+      ].sort(),
     );
   });
 
@@ -66,10 +91,10 @@ describe("selectBuiltins", () => {
     // Without a host (but with the LSP service), the host-backed read-only tools drop out; the
     // sandbox ones plus the engine-native diagnostics remain.
     expect(names("read-only", undefined)).toEqual(
-      ["diagnostics", "glob", "grep", "ls", "read"].sort(),
+      ["clock", "diagnostics", "glob", "grep", "ls", "read", "todo"].sort(),
     );
-    // It never includes a mutating tool.
-    for (const mutating of ["write", "edit", "apply_patch", "bash", "artifacts"]) {
+    // It never includes a mutating tool (http can POST/DELETE, so it's excluded too).
+    for (const mutating of ["write", "edit", "apply_patch", "bash", "artifacts", "http"]) {
       expect(names("read-only", fullHost)).not.toContain(mutating);
     }
   });

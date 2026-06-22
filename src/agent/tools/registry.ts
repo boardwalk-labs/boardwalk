@@ -7,7 +7,7 @@
 // set:
 //   - "all"        → every built-in this engine provides (sandbox tools, the engine-native
 //                    `diagnostics`, and whichever host-backed tools have a backend).
-//   - "read-only"  → the non-mutating set: read, ls, grep, glob, diagnostics, webfetch, web_search.
+//   - "read-only"  → the non-mutating set: read, ls, grep, glob, diagnostics, clock, todo, webfetch, web_search.
 //   - "none"       → no built-ins; the leaf has only its inline ToolDefs.
 //   - string[]     → exactly those built-in names; an UNKNOWN name fails loudly (UNSUPPORTED),
 //                    because an explicit selection naming a tool the engine doesn't have is a bug
@@ -25,7 +25,9 @@ import type { LspService } from "../lsp/index.js";
 import type { ExecutableTool } from "../tools.js";
 import { applyPatchTool } from "./apply_patch.js";
 import { bashTool } from "./bash.js";
+import { clockTool } from "./clock.js";
 import { diagnosticsTool } from "./diagnostics.js";
+import { todoTool } from "./todo.js";
 import { editTool, globTool, grepTool, lsTool, readTool, writeTool } from "./fs_tools.js";
 import { hostBackedTools, HOST_BACKED_TOOL_NAMES, type ToolHost } from "./host_tools.js";
 
@@ -36,6 +38,8 @@ export const READ_ONLY_BUILTIN_NAMES: readonly string[] = [
   "grep",
   "glob",
   "diagnostics",
+  "clock",
+  "todo",
   "webfetch",
   "web_search",
 ];
@@ -59,6 +63,8 @@ export const ALL_BUILTIN_NAMES: readonly string[] = [
   "bash",
   "apply_patch",
   "diagnostics",
+  "clock",
+  "todo",
   ...HOST_BACKED_TOOL_NAMES,
 ];
 
@@ -87,6 +93,9 @@ function registry(ctx: BuiltinContext): Map<string, ExecutableTool> {
     globTool(ctx.workspaceDir),
     bashTool({ workspaceDir: ctx.workspaceDir }),
     applyPatchTool(ctx.workspaceDir),
+    // Engine-native + pure: no host, no workspace, no language server — always available.
+    clockTool(),
+    todoTool(),
   ]) {
     tools.set(tool.name, tool);
   }

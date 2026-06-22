@@ -36,6 +36,7 @@ import { BOARDWALK_PROVIDER, type ResolvedModel } from "../agent/resolve.js";
 import type {
   ArtifactWriteResult,
   FetchResult,
+  HttpRequestInput,
   ToolHost,
   ToolSetContext,
   WebSearchResult,
@@ -242,6 +243,7 @@ export function createChildHost(
   // `capabilities.lspService`, not this host seam.
   const toolHost: ToolHost = {
     fetchUrl: (url, fetchOpts): Promise<FetchResult> => localFetch(url, fetchOpts?.maxBytes),
+    httpRequest: (req, httpOpts): Promise<FetchResult> => localHttpRequest(req, httpOpts?.maxBytes),
     webSearch: async (query, searchOpts): Promise<WebSearchResult[]> => {
       const result = webSearchResultSchema.parse(
         await io.request("web_search", {
@@ -601,6 +603,37 @@ async function localFetch(url: string, maxBytes: number | undefined): Promise<Fe
   }
   const cap = maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
   const response = await fetch(url, { redirect: "follow" });
+  const full = Buffer.from(await response.arrayBuffer());
+  const truncated = full.length > cap;
+  const body = (truncated ? full.subarray(0, cap) : full).toString("utf8");
+  return {
+    status: response.status,
+    contentType: response.headers.get("content-type") ?? undefined,
+    body,
+    truncated,
+  };
+}
+
+/**
+ * The local `http` backend: a plain `fetch` with the model's method/headers/body, RAW response body
+ * capped. Like localFetch it runs in the run process, so Node's NODE_USE_ENV_PROXY routes it through
+ * any configured egress proxy with no code here. http(s)-only (the URL is untrusted input); unlike
+ * webfetch it does NOT extract text from HTML — `http` returns the response verbatim (for APIs).
+ */
+async function localHttpRequest(
+  req: HttpRequestInput,
+  maxBytes: number | undefined,
+): Promise<FetchResult> {
+  if (!/^https?:\/\//i.test(req.url)) {
+    throw new EngineError("VALIDATION", `http only supports http(s) URLs (got "${req.url}").`);
+  }
+  const cap = maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
+  const response = await fetch(req.url, {
+    method: req.method ?? "GET",
+    redirect: "follow",
+    ...(req.headers !== undefined ? { headers: req.headers } : {}),
+    ...(req.body !== undefined ? { body: req.body } : {}),
+  });
   const full = Buffer.from(await response.arrayBuffer());
   const truncated = full.length > cap;
   const body = (truncated ? full.subarray(0, cap) : full).toString("utf8");

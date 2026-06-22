@@ -14,6 +14,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
+import { buildEnvContext } from "./env_context.js";
 import {
   listSkillFiles,
   loadSkillBody,
@@ -62,6 +63,7 @@ export type {
   ToolHost,
   WebSearchResult,
   FetchResult,
+  HttpRequestInput,
   ArtifactWriteResult,
 } from "./tools/host_tools.js";
 
@@ -99,7 +101,7 @@ export interface ToolSet {
  * spawns a process or opens a connection; the async MCP step is `connectMcpServers`.
  *
  * The engine's built-in coding tools are ON BY DEFAULT (read/write/edit/ls/grep/glob/bash/
- * apply_patch + the engine-native `diagnostics` + the host-backed webfetch/web_search/artifacts),
+ * apply_patch + the engine-native `diagnostics`/`clock`/`todo` + the host-backed webfetch/http/web_search/artifacts),
  * scoped by `opts.builtins` (default "all"). The call's inline ToolDefs are added ON TOP — an inline
  * tool may not shadow a built-in (assertUniqueToolNames catches the collision with a clear error).
  */
@@ -142,6 +144,10 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     preamble.push(memoryIndex(memory.absoluteDir, opts.memory));
     memoryDir = opts.memory;
   }
+
+  // Ambient date goes LAST (adjacent to the prompt) so the stable content above stays a cacheable
+  // prefix — see env_context.ts. Captured at run start; the `clock` tool is the live source.
+  preamble.push(buildEnvContext(new Date(), { hasClock: tools.some((t) => t.name === "clock") }));
 
   assertUniqueToolNames(tools);
   return { tools, preamble, memoryDir, mcp };

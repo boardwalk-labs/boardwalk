@@ -15,14 +15,106 @@ describe("hostBackedTools — registration follows backend presence", () => {
     expect([...hostBackedTools({ fetchUrl: () => Promise.reject(new Error()) }).keys()]).toEqual([
       "webfetch",
     ]);
+    expect([...hostBackedTools({ httpRequest: () => Promise.reject(new Error()) }).keys()]).toEqual(
+      ["http"],
+    );
     const full: ToolHost = {
       fetchUrl: () =>
+        Promise.resolve({ status: 200, contentType: "x", body: "", truncated: false }),
+      httpRequest: () =>
         Promise.resolve({ status: 200, contentType: "x", body: "", truncated: false }),
       webSearch: () => Promise.resolve([]),
       writeArtifact: () => Promise.resolve({ id: "1", name: "n", url: "u" }),
     };
     expect([...hostBackedTools(full).keys()].sort()).toEqual(
-      ["artifacts", "web_search", "webfetch"].sort(),
+      ["artifacts", "http", "web_search", "webfetch"].sort(),
+    );
+  });
+});
+
+describe("http", () => {
+  it("forwards method/headers/body to the backend and renders the response", async () => {
+    let seen: { req: unknown; maxBytes: number | undefined } | undefined;
+    const tool = get(
+      {
+        httpRequest: (req, opts) => {
+          seen = { req, maxBytes: opts?.maxBytes };
+          return Promise.resolve({
+            status: 201,
+            contentType: "application/json",
+            body: '{"ok":true}',
+            truncated: false,
+          });
+        },
+      },
+      "http",
+    );
+    const out = await tool.execute({
+      url: "https://api.example.com/things",
+      method: "post",
+      headers: { "content-type": "application/json" },
+      body: '{"name":"x"}',
+      maxBytes: 1024,
+    });
+    expect(seen?.req).toEqual({
+      url: "https://api.example.com/things",
+      method: "POST", // normalized to upper-case
+      headers: { "content-type": "application/json" },
+      body: '{"name":"x"}',
+    });
+    expect(seen?.maxBytes).toBe(1024);
+    expect(out).toContain("[HTTP 201 application/json]");
+    expect(out).toContain('{"ok":true}');
+  });
+
+  it("defaults to GET (no method passed to the backend) and notes truncation", async () => {
+    let method: string | undefined = "UNSET";
+    const tool = get(
+      {
+        httpRequest: (req) => {
+          method = req.method;
+          return Promise.resolve({
+            status: 200,
+            contentType: undefined,
+            body: "hi",
+            truncated: true,
+          });
+        },
+      },
+      "http",
+    );
+    const out = await tool.execute({ url: "https://x" });
+    expect(method).toBeUndefined(); // omitted ⇒ the backend defaults GET
+    expect(out).toContain("[HTTP 200]");
+    expect(out).toContain("response truncated");
+  });
+
+  it("rejects an unsupported method before calling the backend", async () => {
+    let called = false;
+    const tool = get(
+      {
+        httpRequest: () => {
+          called = true;
+          return Promise.resolve({
+            status: 200,
+            contentType: undefined,
+            body: "",
+            truncated: false,
+          });
+        },
+      },
+      "http",
+    );
+    await expect(tool.execute({ url: "https://x", method: "TRACE" })).rejects.toThrow(
+      /unsupported method/,
+    );
+    expect(called).toBe(false);
+  });
+
+  it("rejects non-string header values", async () => {
+    const tool = get({ httpRequest: () => Promise.reject(new Error("should not run")) }, "http");
+    await expect(tool.execute({ url: "https://x", headers: { a: 1 } })).rejects.toThrow(
+      /must be a string/,
     );
   });
 });

@@ -733,7 +733,18 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
     await runAgentLeaf("do something", undefined, rec.io);
     const body = rec.requests[0]?.body ?? "";
-    for (const name of ["read", "write", "edit", "ls", "grep", "glob", "bash", "apply_patch"]) {
+    for (const name of [
+      "read",
+      "write",
+      "edit",
+      "ls",
+      "grep",
+      "glob",
+      "bash",
+      "apply_patch",
+      "clock",
+      "todo",
+    ]) {
       expect(body).toContain(`"${name}"`);
     }
   });
