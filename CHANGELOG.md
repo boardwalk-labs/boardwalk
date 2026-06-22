@@ -3,6 +3,19 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.28
+
+### Changed
+
+- Agent-loop token-efficiency + performance pass. `read` now caps an unbounded read
+  (2000 lines / 100K chars; page with `offset`/`limit`), applied at read time so it
+  never rewrites history. Context compaction dedupes stale duplicate file reads (no
+  model call) before summarizing, and the summary call reuses the loop's prefix so it
+  reads the prompt cache instead of reprocessing the transcript (with a minimum-reclaim
+  gate, a shrink guard, and a structured digest). `agent({ schema })` recovers JSON
+  wrapped in code fences or prose before failing. A repetition guard ends a run that
+  loops on identical tool calls instead of burning every iteration.
+
 ## 0.1.27
 
 ### Changed
