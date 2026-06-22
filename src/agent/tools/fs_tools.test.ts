@@ -46,6 +46,35 @@ describe("read", () => {
     expect(rich(await tool.execute({ path: "f.txt", offset: 2, limit: 2 })).llmText).toBe("l2\nl3");
   });
 
+  it("caps an unbounded read at the default line count with a steering note", async () => {
+    const dir = ws();
+    const lines = Array.from({ length: 2100 }, (_, i) => `line ${String(i + 1)}`);
+    writeFileSync(join(dir, "big.txt"), lines.join("\n"));
+    const out = rich(await readTool(dir).execute({ path: "big.txt" })).llmText;
+    const shown = out.split("\n");
+    // 2000 content lines + one trailing note line.
+    expect(shown).toHaveLength(2001);
+    expect(shown[1999]).toBe("line 2000");
+    expect(out).toContain("100 more lines not shown");
+    expect(out).toContain("offset/limit");
+  });
+
+  it("honors an explicit limit larger than the file with no note", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.txt"), "a\nb\nc");
+    const out = rich(await readTool(dir).execute({ path: "f.txt", limit: 9000 })).llmText;
+    expect(out).toBe("a\nb\nc");
+  });
+
+  it("caps a huge single line at the char limit", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "wide.txt"), "x".repeat(250_000));
+    const out = rich(await readTool(dir).execute({ path: "wide.txt" })).llmText;
+    expect(out).toContain("capped at 100000 chars");
+    // The content portion (before the note) is exactly the cap.
+    expect(out.slice(0, 100_000)).toBe("x".repeat(100_000));
+  });
+
   it("rejects a path escaping the workspace and a missing file", async () => {
     const tool = readTool(ws());
     await expect(tool.execute({ path: "../escape" })).rejects.toThrow(/escapes the workspace/);

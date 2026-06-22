@@ -6,7 +6,13 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
 import { startFakeMcpServer } from "../testing/fake_mcp.js";
-import { runAgentLeaf, type LeafEventBody, type LeafIo, type ModelTurnRequest } from "./leaf.js";
+import {
+  extractJsonCandidate,
+  runAgentLeaf,
+  type LeafEventBody,
+  type LeafIo,
+  type ModelTurnRequest,
+} from "./leaf.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
 import { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
@@ -309,16 +315,38 @@ describe("runAgentLeaf — plain inference", () => {
     expect(thrownMessage).not.toContain("sk-test-key-12345");
   });
 
-  it("schema mode parses JSON (stripping fences) and fails loudly on prose", async () => {
+  it("schema mode parses JSON (stripping fences), recovers prose-wrapped JSON, fails on real prose", async () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText('```json\n{"groups": [1, 2]}\n```')]);
     const parsed = await runAgentLeaf("group these", { schema: { type: "object" } }, rec.io);
     expect(parsed).toEqual({ groups: [1, 2] });
     expect(rec.requests[0]?.body).toContain("JSON Schema");
 
+    // A model that wraps valid JSON in commentary is recovered, not failed.
+    const wrapped = recordedIo(OPENAI_MODEL, [
+      () => openAiText('Sure, here you go:\n{"groups": [3, 4]}\nLet me know if you need more.'),
+    ]);
+    expect(await runAgentLeaf("p", { schema: { type: "object" } }, wrapped.io)).toEqual({
+      groups: [3, 4],
+    });
+
+    // Genuinely non-JSON prose still fails the run loudly.
     const prose = recordedIo(OPENAI_MODEL, [() => openAiText("Sure! Here are the groups…")]);
     await expect(runAgentLeaf("p", { schema: { type: "object" } }, prose.io)).rejects.toThrow(
       /not valid JSON/,
     );
+  });
+
+  it("extractJsonCandidate recovers JSON from fences, prose, and nested structures", () => {
+    expect(extractJsonCandidate('{"a":1}')).toBe('{"a":1}');
+    expect(extractJsonCandidate('```json\n{"a":1}\n```')).toBe('{"a":1}');
+    expect(extractJsonCandidate('Here you go: {"a": {"b": [1,2]}} done')).toBe(
+      '{"a": {"b": [1,2]}}',
+    );
+    expect(extractJsonCandidate("result: [1, 2, 3].")).toBe("[1, 2, 3]");
+    // A brace inside a string literal must not end the carve early.
+    expect(extractJsonCandidate('x {"a": "}"} y')).toBe('{"a": "}"}');
+    // No JSON at all → returned as-is (the caller's parse then fails loudly).
+    expect(extractJsonCandidate("just prose")).toBe("just prose");
   });
 
   it("rejects malformed MCP refs and duplicate server names before anything connects", async () => {
@@ -656,9 +684,14 @@ describe("runAgentLeaf — tool loop", () => {
   });
 
   it("fails with a runaway error when the model never stops calling tools", async () => {
-    const rec = recordedIo(OPENAI_MODEL, [
-      () => openAiToolCalls([{ id: "c", name: "double", args: { n: 1 } }]),
-    ]);
+    // Distinct args each turn so the repetition guard does NOT fire first — this exercises the hard
+    // iteration cap specifically (identical-call stalls are covered by the repetition-guard tests).
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      Array.from({ length: 26 }, (_, i) => () => {
+        return openAiToolCalls([{ id: `c${String(i)}`, name: "double", args: { n: i } }]);
+      }),
+    );
     await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).rejects.toThrow(
       /exceeded 25 tool iterations/,
     );
@@ -1033,11 +1066,13 @@ describe("runAgentLeaf — context compaction", () => {
 
     // Six model calls total: four tool turns + ONE summarization call + the final answer turn.
     expect(rec.requests).toHaveLength(6);
-    // The summarization call (request index 4) was a fresh single-message prompt — the digest
-    // instruction over the compressed transcript, with NO tools advertised.
+    // The summarization call (request index 4) REUSES the loop's prefix — the same messages +
+    // tools — with the digest instruction appended, so it reads the prompt cache instead of
+    // reprocessing a fresh transcript. It therefore carries the task, the tool, and the instruction.
     const summaryReq = rec.requests[4]?.body ?? "";
-    expect(summaryReq).toContain("compacting the middle of a longer agent transcript");
-    expect(summaryReq).not.toContain('"read_big"');
+    expect(summaryReq).toContain("Compact the conversation so far into a concise digest");
+    expect(summaryReq).toContain("THE-ORIGINAL-TASK");
+    expect(summaryReq).toContain('"read_big"'); // tools advertised for cache-prefix parity
     // The final turn's request carries: the ORIGINAL task (head preserved), the summary text
     // (middle replaced), and the most-recent tool result (recent tail preserved).
     const finalReq = rec.requests[5]?.body ?? "";
@@ -1066,7 +1101,9 @@ describe("runAgentLeaf — context compaction", () => {
     await runAgentLeaf("double 21", { tools: [doubler] }, rec.io);
     // Exactly two model calls: a short run never trips summarization.
     expect(rec.requests).toHaveLength(2);
-    expect(rec.requests.some((r) => r.body.includes("compacting the middle"))).toBe(false);
+    expect(rec.requests.some((r) => r.body.includes("Compact the conversation so far"))).toBe(
+      false,
+    );
   });
 
   it("redacts secret values out of the summary before it re-enters model context", async () => {
@@ -1089,6 +1126,51 @@ describe("runAgentLeaf — context compaction", () => {
     const finalReq = rec.requests[5]?.body ?? "";
     expect(finalReq).not.toContain("sk-leaky-secret-value");
     expect(finalReq).toContain("[redacted:API_SECRET]");
+  });
+});
+
+describe("runAgentLeaf — repetition guard", () => {
+  const spin = {
+    name: "spin",
+    description: "no-op",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("still spinning"),
+  };
+
+  it("ends a run that repeats the identical tool call without progress", async () => {
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      Array.from(
+        { length: 5 },
+        () => () => openAiToolCalls([{ id: "c", name: "spin", args: { n: 1 } }]),
+      ),
+    );
+    await expect(runAgentLeaf("go", { tools: [spin] }, rec.io)).rejects.toThrow(
+      /repeating the same tool call/,
+    );
+  });
+
+  it("does NOT trip when each turn issues a different tool call (real progress)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "spin", args: { n: 1 } }]),
+      () => openAiToolCalls([{ id: "c2", name: "spin", args: { n: 2 } }]),
+      () => openAiToolCalls([{ id: "c3", name: "spin", args: { n: 3 } }]),
+      () => openAiToolCalls([{ id: "c4", name: "spin", args: { n: 4 } }]),
+      () => openAiText("done"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [spin] }, rec.io)).toBe("done");
+  });
+
+  it("nudges once at the soft threshold, then recovers if the model changes course", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c", name: "spin", args: { n: 1 } }]),
+      () => openAiToolCalls([{ id: "c", name: "spin", args: { n: 1 } }]),
+      () => openAiToolCalls([{ id: "c", name: "spin", args: { n: 1 } }]), // 3rd repeat → nudge
+      () => openAiText("ok, changing course"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [spin] }, rec.io)).toBe("ok, changing course");
+    // The nudge rode as an appended message on the 4th request.
+    expect(rec.requests[3]?.body).toContain("No progress");
   });
 });
 

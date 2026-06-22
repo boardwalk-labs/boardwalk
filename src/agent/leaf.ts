@@ -20,7 +20,14 @@ import type {
   TokenUsage,
   ToolReturn,
 } from "@boardwalk-labs/workflow";
-import { DEFAULT_COMPACTION_BUDGET_CHARS, planCompaction } from "./compaction.js";
+import {
+  DEFAULT_COMPACTION_BUDGET_CHARS,
+  MIN_COMPACTION_RECLAIM_CHARS,
+  dedupeFileReads,
+  estimateChars,
+  estimateConversationChars,
+  planCompaction,
+} from "./compaction.js";
 import { EngineError, type EngineErrorCode } from "../errors.js";
 import type {
   ChatMessage,
@@ -45,6 +52,30 @@ import { makeSubagentTool } from "./tools/subagent.js";
 
 /** Tool iterations per agent() call before the loop is declared runaway. */
 const MAX_TOOL_ITERATIONS = 25;
+
+/**
+ * Repetition guard. A model that re-issues the SAME tool call(s) is stuck (a loop the 25-iteration
+ * cap would only catch after burning every iteration + its tokens). We count how many of the last
+ * STALL_WINDOW turns issued the current turn's signature: at STALL_SOFT_NUDGE we inject a one-time
+ * nudge to change approach (catches plain repeats AND A/B/A/B oscillation, since the window counts
+ * occurrences, not just consecutive ones); at STALL_HARD_STOP we end the run before the next call.
+ * A turn whose tool-call SET differs (any real progress) resets the count, so legitimate retries
+ * with changed inputs never trip it.
+ */
+const STALL_WINDOW = 6;
+const STALL_SOFT_NUDGE = 3;
+const STALL_HARD_STOP = 5;
+const STALL_NUDGE_TEXT =
+  "[No progress: you have issued the same tool call(s) repeatedly with no new result. Change your " +
+  "approach — use different inputs or a different tool — or produce your final answer now.]";
+
+/** A canonical, order-independent signature of a turn's tool calls, for repetition detection. */
+function turnSignature(toolCalls: readonly ToolCallRequest[]): string {
+  return toolCalls
+    .map((call) => `${call.name}:${JSON.stringify(call.input)}`)
+    .sort()
+    .join("|");
+}
 
 /**
  * Error codes that are RUN-FATAL even when they surface through a tool call: a budget breach or a
@@ -372,12 +403,16 @@ async function runToolLoop(
   answers: Readonly<Record<string, unknown>>,
   startIteration: number,
 ): Promise<string> {
+  // Signatures of each tool-using turn, for the repetition guard (see turnSignature + STALL_*).
+  const recentSignatures: string[] = [];
   // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
   for (let iteration = startIteration + 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
     // Bound the context BEFORE each model call: a long loop (or one fat tool result) grows
-    // `messages` until the provider rejects it. Compaction summarizes the oldest middle in place,
-    // keeping the task framing + the latest exchanges verbatim. Its own model call is metered.
-    await compactIfNeeded(messages, opts, io);
+    // `messages` until the provider rejects it. Reclaim cheaply first (drop stale duplicate reads,
+    // no model call), then — only if still over budget — summarize the oldest middle, reusing the
+    // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
+    // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
+    await reduceContextIfNeeded(messages, tools, opts, io);
 
     const { turn, modelRef } = await modelTurn(messages, tools, opts, io, turnId, iteration);
 
@@ -387,6 +422,19 @@ async function runToolLoop(
 
     if (!turn.wantsTools || turn.toolCalls.length === 0) {
       return turn.text;
+    }
+
+    // Repetition guard: count how many of the recent turns issued THIS turn's tool-call signature.
+    // A sustained stall ends the run before it burns every iteration; a first crossing only nudges.
+    const signature = turnSignature(turn.toolCalls);
+    recentSignatures.push(signature);
+    const repeats = recentSignatures.slice(-STALL_WINDOW).filter((s) => s === signature).length;
+    if (repeats >= STALL_HARD_STOP) {
+      throw new EngineError(
+        "PROGRAM_ERROR",
+        "agent() is stuck repeating the same tool call(s) without making progress.",
+        "Tighten the prompt, give the model a way to make progress, or split the work across calls.",
+      );
     }
 
     messages.push({ role: "assistant", text: turn.text, toolCalls: turn.toolCalls });
@@ -401,6 +449,13 @@ async function runToolLoop(
       totals,
     );
     messages.push({ role: "tool_results", results });
+
+    // Nudge ONCE, when the stall first crosses the soft threshold (an appended message, so the
+    // cache-stable prefix is untouched). If the model keeps repeating, `repeats` climbs to the hard
+    // stop above on a later turn.
+    if (repeats === STALL_SOFT_NUDGE) {
+      messages.push({ role: "user", text: io.redactor.redact(STALL_NUDGE_TEXT) });
+    }
   }
   throw new EngineError(
     "PROGRAM_ERROR",
@@ -410,93 +465,82 @@ async function runToolLoop(
 }
 
 /**
- * If the conversation has outgrown the budget, replace its oldest compressible middle with one
- * model-written summary message, IN PLACE. Pure boundary math (planCompaction) decides the range;
- * a focused model call produces the summary; the result re-enters context as a `user` message
- * clearly marked as a digest of earlier turns (subject to the seam's redaction like any other
- * model-bound message). No-op when already within budget or when there is no compressible middle.
+ * Keep the conversation within budget, cheaply first. Runs ONLY when over budget (a normal run is
+ * untouched and stays append-only, which is what keeps the prompt cache warm). Two passes:
  *
- * Loop safety: this runs the conversation through `planCompaction` ONCE per iteration. If a single
- * giant message still leaves the result over budget, we do not re-compress in a tight loop — we
- * proceed with what we compressed and let the provider speak (a too-large request surfaces as a
- * normal PROVIDER_ERROR). The next iteration gets a fresh shot once the loop adds new turns.
+ *  1. dedupeFileReads — a pure, no-model reclaim that drops stale duplicate `read` results. Often
+ *     enough on its own to get back under budget, skipping the summary call entirely.
+ *  2. summarizeForCompaction — only if still over. It replaces the oldest compressible middle
+ *     (planCompaction's pure boundary math) with ONE model-written digest, preserving the task
+ *     message + recent tail verbatim. Gated by a minimum-reclaim threshold (don't pay for a model
+ *     call to free a little) and a shrink guard (discard a digest that isn't materially smaller).
+ *
+ * Loop safety: this runs at most once per iteration. If a single giant message still leaves the
+ * result over budget, we proceed and let the provider speak (a too-large request surfaces as a
+ * normal PROVIDER_ERROR); the next iteration gets a fresh shot once the loop adds new turns.
  */
-async function compactIfNeeded(
+async function reduceContextIfNeeded(
   messages: ChatMessage[],
+  tools: readonly ExecutableTool[],
   opts: AgentOptions | undefined,
   io: LeafIo,
 ): Promise<void> {
+  if (estimateConversationChars(messages) <= DEFAULT_COMPACTION_BUDGET_CHARS) return;
+
+  // Cheap pass: drop stale duplicate file reads (no model call). Re-check before summarizing.
+  dedupeFileReads(messages);
+  if (estimateConversationChars(messages) <= DEFAULT_COMPACTION_BUDGET_CHARS) return;
+
   const plan = planCompaction(messages, DEFAULT_COMPACTION_BUDGET_CHARS);
   if (plan === null) return;
+  const rangeChars = messages
+    .slice(plan.start, plan.end + 1)
+    .reduce((sum, message) => sum + estimateChars(message), 0);
+  if (rangeChars < MIN_COMPACTION_RECLAIM_CHARS) return; // not worth a model call
 
-  const compressed = messages.slice(plan.start, plan.end + 1);
-  const summary = await summarizeRange(compressed, opts, io);
-  // Splice the compressed range out, drop ONE summary message in its place. The first message and
-  // the recent tail (everything outside [start, end]) are untouched — preserved verbatim.
-  messages.splice(plan.start, compressed.length, {
+  const summary = await summarizeForCompaction(messages, tools, opts, io);
+  // Shrink guard: a digest no smaller than what it replaces is churn (and covers a model that
+  // ignored the instruction and echoed the transcript) — skip the splice.
+  if (summary.length >= rangeChars) return;
+  messages.splice(plan.start, plan.end - plan.start + 1, {
     role: "user",
     text: io.redactor.redact(summary),
   });
 }
 
-/** The instruction that turns a slice of transcript into a forward-useful digest. */
+/** The instruction that turns the conversation so far into a forward-useful digest. */
 const SUMMARIZATION_PROMPT =
-  "You are compacting the middle of a longer agent transcript to fit a context window. " +
-  "Write a faithful summary of the conversation below so the agent can continue without it. " +
-  "Preserve: decisions made, facts and values learned, tool outputs that still matter, and any " +
-  "open threads or next steps. Drop only redundancy. Output the summary text only, no preamble.";
+  "Compact the conversation so far into a concise digest the agent can continue from. The digest " +
+  "will REPLACE the earlier turns (the most recent turns stay verbatim), so preserve, in terse " +
+  "bullets: the goal/task; decisions made; facts and values learned; files touched (with exact " +
+  "paths); tool outputs that still matter; errors encountered and their fixes; and the next steps. " +
+  "Drop only redundancy. Output ONLY the digest text — no preamble — and do not call any tools.";
 
 /**
- * Summarize a slice of the transcript via the SAME model seam the loop uses, so the call routes
- * and meters exactly like a normal turn (its usage is real spend — reported to the budget
- * authority). Tools are advertised as none: this is a read-then-write turn, not an agentic step.
+ * Produce a compaction digest via the SAME model seam the loop uses (so it routes + meters like a
+ * real turn). Crucially it REUSES the loop's prefix — the same `messages` + `tools` the loop just
+ * sent — with the instruction appended as the final user message, so the call READS the prompt
+ * cache the loop has been writing rather than reprocessing the transcript at full price. Tools are
+ * advertised for cache parity but any tool call the model makes is ignored (we take the text).
+ * Reasoning is deliberately omitted: this is overhead, not the author's work.
  */
-async function summarizeRange(
-  compressed: readonly ChatMessage[],
+async function summarizeForCompaction(
+  messages: readonly ChatMessage[],
+  tools: readonly ExecutableTool[],
   opts: AgentOptions | undefined,
   io: LeafIo,
 ): Promise<string> {
-  const transcript = serializeForSummary(compressed);
   const req: ModelTurnRequest = {
     model: opts?.model,
     provider: opts?.provider,
-    messages: [
-      { role: "user", text: io.redactor.redact(`${SUMMARIZATION_PROMPT}\n\n${transcript}`) },
-    ],
-    tools: [],
+    messages: [...messages, { role: "user", text: io.redactor.redact(SUMMARIZATION_PROMPT) }],
+    tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   };
-  // No streaming hooks: summary deltas aren't this leaf's user-visible text. providerIo still
+  // No streaming hooks: digest deltas aren't this leaf's user-visible text. providerIo still
   // carries the loop's fetch/sleep impls so the call goes out exactly as a real turn does.
   const { turn, modelRef } = await io.streamModel(req, { ...io.provider });
   io.reportUsage(modelRef, turn.usage);
   return turn.text;
-}
-
-/** Flatten a transcript slice into plain text for the summarizer — roles labeled, tool I/O inline. */
-function serializeForSummary(messages: readonly ChatMessage[]): string {
-  const parts: string[] = [];
-  for (const message of messages) {
-    switch (message.role) {
-      case "user":
-        parts.push(`User: ${message.text}`);
-        break;
-      case "assistant": {
-        const calls = message.toolCalls
-          .map((call) => `${call.name}(${JSON.stringify(call.input)})`)
-          .join(", ");
-        parts.push(
-          `Assistant: ${message.text}${calls.length > 0 ? `\n[tool calls: ${calls}]` : ""}`,
-        );
-        break;
-      }
-      case "tool_results":
-        for (const result of message.results) {
-          parts.push(`Tool result (${result.isError ? "error" : "ok"}): ${result.content}`);
-        }
-        break;
-    }
-  }
-  return parts.join("\n\n");
 }
 
 /** One model call with streamed text events (block ids are unique per iteration). */
@@ -677,23 +721,60 @@ function redactToolReturn(redactor: Redactor, event: ToolReturn): ToolReturn {
 }
 
 /**
- * Schema mode: parse the model's final text as JSON; a non-JSON answer fails the run (the
- * documented contract). Code fences are stripped first — models add them despite instructions.
- * v0 parity note: like the hosted platform today, the schema drives the PROMPT and the JSON
- * parse; structural validation against the schema itself is a later, cross-engine decision.
+ * Schema mode: recover the JSON value from the model's final text and parse it. Models routinely
+ * wrap valid JSON in prose ("Sure, here you go: {...}") or markdown fences despite instructions, so
+ * before parsing we (1) strip a surrounding code fence and (2) carve out the first balanced object
+ * or array. This turns the most common "schema mode failed" cases into successes WITHOUT a model
+ * round-trip. A truly non-JSON answer still fails the run (the documented contract). Structural
+ * validation against the schema itself is a later, cross-engine decision; this recovers + parses.
  */
 function parseSchemaOutput(text: string): unknown {
-  const stripped = text
-    .trim()
-    .replace(/^```(?:json)?\s*\n?/i, "")
-    .replace(/\n?```\s*$/, "");
+  const candidate = extractJsonCandidate(text);
   try {
-    return JSON.parse(stripped);
+    return JSON.parse(candidate);
   } catch {
     throw new EngineError(
       "VALIDATION",
       "agent() was called with a schema but the model's answer was not valid JSON.",
-      `Answer started with: ${JSON.stringify(stripped.slice(0, 80))}`,
+      `Answer started with: ${JSON.stringify(candidate.slice(0, 80))}`,
     );
   }
+}
+
+/**
+ * Best-effort extraction of the JSON payload from a model's final text: strip a surrounding markdown
+ * code fence, and if the remainder isn't already a bare JSON value, carve out the first balanced
+ * {...} or [...]. The returned candidate may still be invalid JSON — the caller does the parse.
+ * Exported for unit testing.
+ */
+export function extractJsonCandidate(text: string): string {
+  let s = text.trim();
+  const fence = /^```(?:json|jsonc)?\s*\n?([\s\S]*?)\n?```$/i.exec(s);
+  if (fence?.[1] !== undefined) s = fence[1].trim();
+  if (s.startsWith("{") || s.startsWith("[")) return s;
+  return carveFirstJsonValue(s) ?? s;
+}
+
+/** Scan for the first balanced object/array, honoring string literals + escapes; null if none. */
+function carveFirstJsonValue(s: string): string | null {
+  const startIdx = s.search(/[[{]/);
+  if (startIdx === -1) return null;
+  const open = s[startIdx];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = startIdx; i < s.length; i++) {
+    const ch = s[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === open) depth++;
+    else if (ch === close && --depth === 0) return s.slice(startIdx, i + 1);
+  }
+  return null; // unbalanced — let the caller's parse surface a clear error
 }

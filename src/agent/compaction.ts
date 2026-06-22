@@ -118,3 +118,67 @@ export function planCompaction(
 function isAssistantWithTools(message: ChatMessage | undefined): boolean {
   return message?.role === "assistant" && message.toolCalls.length > 0;
 }
+
+/**
+ * Minimum estimated chars a summary compaction must reclaim to be worth its own model call. Below
+ * this, the cheap dedupe pass (or just proceeding) is preferable to paying for a summarization turn.
+ */
+export const MIN_COMPACTION_RECLAIM_CHARS = 50_000;
+
+/**
+ * Replace all-but-the-newest `read` of each file path with a short pointer, IN PLACE, and return the
+ * estimated chars reclaimed. Pure (NO model call): an agent that reads a file, edits it, and reads
+ * again accumulates stale full-content copies, but only the latest reflects the current bytes — the
+ * earlier ones are dead weight. This is the cheap first move when the conversation overflows; it
+ * often drops the size back under budget without any summary call. It rewrites history (so it costs
+ * prompt cache), which is why the leaf runs it only on overflow, in one pass — never per turn.
+ *
+ * Only `read` is deduped: write/edit/apply_patch results are diffs+summaries (already small), and
+ * grep/ls/glob are searches, not file snapshots. The tool-call id on each result is matched back to
+ * its `read` call's `path`; the result's structure (id/isError) is untouched, so the tool_use ↔
+ * tool_result pairing every provider requires stays valid — only the `content` string shrinks.
+ */
+export function dedupeFileReads(messages: ChatMessage[]): number {
+  // result.id → the read path, for `read` calls only (the tool that returns whole-file bytes).
+  const readPathById = new Map<string, string>();
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.toolCalls) {
+      const path = call.input["path"];
+      if (call.name === "read" && typeof path === "string") readPathById.set(call.id, path);
+    }
+  }
+  if (readPathById.size === 0) return 0;
+
+  // Every read-result location (message index + result index), grouped by path, in order.
+  const locsByPath = new Map<string, { mi: number; ri: number }[]>();
+  messages.forEach((message, mi) => {
+    if (message.role !== "tool_results") return;
+    message.results.forEach((result, ri) => {
+      const path = readPathById.get(result.id);
+      if (path === undefined) return;
+      const locs = locsByPath.get(path) ?? [];
+      locs.push({ mi, ri });
+      locsByPath.set(path, locs);
+    });
+  });
+
+  let reclaimed = 0;
+  for (const [path, locs] of locsByPath) {
+    if (locs.length < 2) continue; // a single read of this file — nothing stale to drop
+    // Keep the newest read verbatim; replace every earlier one with a pointer.
+    for (const { mi, ri } of locs.slice(0, -1)) {
+      const message = messages[mi];
+      if (message?.role !== "tool_results") continue;
+      const old = message.results[ri];
+      if (old === undefined) continue;
+      const pointer = `[earlier read of "${path}" elided to save context — a newer read of this file appears later; re-read it if you need the current contents.]`;
+      if (pointer.length >= old.content.length) continue; // never grow a result
+      reclaimed += old.content.length - pointer.length;
+      // results is readonly: rebuild the message with the one result's content swapped.
+      const results = message.results.map((r, i) => (i === ri ? { ...r, content: pointer } : r));
+      messages[mi] = { role: "tool_results", results };
+    }
+  }
+  return reclaimed;
+}

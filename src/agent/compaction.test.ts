@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_COMPACTION_BUDGET_CHARS,
+  dedupeFileReads,
   estimateChars,
   estimateConversationChars,
   planCompaction,
@@ -111,6 +112,74 @@ describe("planCompaction", () => {
     expect(plan).toEqual({ start: 1, end: 4 });
     expect(msgs[plan!.start]?.role).toBe("assistant");
     expect(msgs[plan!.end]?.role).toBe("tool_results");
+  });
+});
+
+describe("dedupeFileReads", () => {
+  const readCall = (id: string, path: string): ChatMessage => ({
+    role: "assistant",
+    text: "",
+    toolCalls: [{ id, name: "read", input: { path } }],
+  });
+
+  it("replaces all but the newest read of a path with a pointer, keeping the newest verbatim", () => {
+    const msgs: ChatMessage[] = [
+      user("task"),
+      readCall("r1", "a.ts"),
+      toolResults("r1", FAT),
+      readCall("r2", "a.ts"),
+      toolResults("r2", "NEWEST-CONTENT"),
+    ];
+    const reclaimed = dedupeFileReads(msgs);
+    expect(reclaimed).toBeGreaterThan(0);
+    const first = msgs[2];
+    const second = msgs[4];
+    expect(first?.role === "tool_results" && first.results[0]?.content).toContain(
+      'earlier read of "a.ts" elided',
+    );
+    // The newest read is untouched; the result id/isError survive (tool_use ↔ tool_result intact).
+    expect(second?.role === "tool_results" && second.results[0]?.content).toBe("NEWEST-CONTENT");
+    expect(first?.role === "tool_results" && first.results[0]?.id).toBe("r1");
+  });
+
+  it("treats different paths independently and leaves a single read of a path alone", () => {
+    const msgs: ChatMessage[] = [
+      user("task"),
+      readCall("r1", "a.ts"),
+      toolResults("r1", FAT),
+      readCall("r2", "b.ts"),
+      toolResults("r2", FAT),
+    ];
+    expect(dedupeFileReads(msgs)).toBe(0); // one read each — nothing stale
+    expect(msgs[2]?.role === "tool_results" && msgs[2].results[0]?.content).toBe(FAT);
+  });
+
+  it("only dedupes `read` — write/edit/grep results are left intact", () => {
+    const editCall = (id: string, path: string): ChatMessage => ({
+      role: "assistant",
+      text: "",
+      toolCalls: [{ id, name: "edit", input: { path } }],
+    });
+    const msgs: ChatMessage[] = [
+      user("task"),
+      editCall("e1", "a.ts"),
+      toolResults("e1", FAT),
+      editCall("e2", "a.ts"),
+      toolResults("e2", FAT),
+    ];
+    expect(dedupeFileReads(msgs)).toBe(0);
+  });
+
+  it("never grows a result (a pointer longer than the original content is skipped)", () => {
+    const msgs: ChatMessage[] = [
+      user("task"),
+      readCall("r1", "a.ts"),
+      toolResults("r1", "tiny"), // shorter than the pointer → must be left as-is
+      readCall("r2", "a.ts"),
+      toolResults("r2", "also-newest"),
+    ];
+    expect(dedupeFileReads(msgs)).toBe(0);
+    expect(msgs[2]?.role === "tool_results" && msgs[2].results[0]?.content).toBe("tiny");
   });
 });
 

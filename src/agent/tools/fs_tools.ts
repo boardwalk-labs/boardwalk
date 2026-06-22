@@ -87,6 +87,15 @@ function fileEditResult(
 const MAX_GREP_MATCHES = 100;
 const MAX_GLOB_RESULTS = 500;
 const MAX_LS_ENTRIES = 1000;
+/**
+ * `read` returns at most this many lines when the caller gives no explicit `limit`, and at most
+ * MAX_READ_CHARS characters regardless. A whole large file dumped into context is the single
+ * biggest source of wasted tokens (and it then rides in context for the rest of the loop); the
+ * model can page with `offset`/`limit` or locate with `grep`. The cap is applied at READ time, so
+ * it never rewrites history — it is prompt-cache-safe, unlike retroactive pruning.
+ */
+const DEFAULT_READ_LINES = 2000;
+const MAX_READ_CHARS = 100_000;
 /** Directories never worth scanning in grep/glob fallbacks — they bloat results and slow scans. */
 const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".cache"]);
 
@@ -94,8 +103,9 @@ export function readTool(workspaceDir: string): ExecutableTool {
   return {
     name: "read",
     description:
-      "Read a UTF-8 text file from the workspace. Optional 1-based `offset` line and `limit` " +
-      "line count return a slice of a large file.",
+      `Read a UTF-8 text file from the workspace. Returns at most ${String(DEFAULT_READ_LINES)} ` +
+      "lines by default; pass 1-based `offset` and `limit` to page a large file (or `grep` to " +
+      "locate the relevant span first).",
     inputSchema: {
       type: "object",
       properties: {
@@ -116,17 +126,29 @@ export function readTool(workspaceDir: string): ExecutableTool {
         const whole = readFileSync(file, "utf8");
         const offset = optionalPositiveInt(input["offset"], "offset");
         const limit = optionalPositiveInt(input["limit"], "limit");
-        let content = whole;
-        if (offset !== undefined || limit !== undefined) {
-          const lines = whole.split("\n");
-          const start = (offset ?? 1) - 1;
-          const end = limit === undefined ? lines.length : start + limit;
-          content = lines.slice(start, end).join("\n");
+        const lines = whole.split("\n");
+        const start = (offset ?? 1) - 1;
+        // Cap the slice: an explicit `limit` is honored as-is; otherwise default to
+        // DEFAULT_READ_LINES so a whole large file never floods context (an `offset` with no
+        // `limit` still gets the default cap).
+        const end = start + (limit ?? DEFAULT_READ_LINES);
+        let content = lines.slice(start, end).join("\n");
+        const notes: string[] = [];
+        const remaining = lines.length - end;
+        if (limit === undefined && remaining > 0) {
+          notes.push(
+            `${String(remaining)} more line${remaining === 1 ? "" : "s"} not shown — pass offset/limit to page, or grep to locate`,
+          );
         }
+        if (content.length > MAX_READ_CHARS) {
+          content = content.slice(0, MAX_READ_CHARS);
+          notes.push(`capped at ${String(MAX_READ_CHARS)} chars — pass offset/limit to page`);
+        }
+        const body = notes.length > 0 ? `${content}\n…[${notes.join("; ")}]` : content;
         return outputResult(
           "file_read",
           `read ${path} (${String(lineCount(content))} lines)`,
-          content,
+          body,
           {
             path,
           },
