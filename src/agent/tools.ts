@@ -357,7 +357,13 @@ function transportFor(ref: McpServerRef, io: McpConnectIo): HttpTransport | Stdi
 // Skills (folder-per-skill, progressive disclosure — see ./skills.ts)
 // ----------------------------------------------------------------------------
 
-const skillToolInput = z.object({ name: z.string().min(1), file: z.string().min(1).optional() });
+const skillToolInput = z.object({
+  name: z.string().min(1),
+  // Treat an empty `file` as omitted. Models routinely send "" for an optional string field (and the
+  // tool's advertised JSON Schema puts no minimum on it), so without this `skill({ name, file: "" })`
+  // throws a "too_small" validation error instead of loading the skill's body — the model's intent.
+  file: z.preprocess((v) => (v === "" ? undefined : v), z.string().min(1).optional()),
+});
 
 /** The catalog block prepended to the leaf's preamble: every pinned skill's name + description, plus
  *  how to load one. Validates each pinned skill resolves NOW so a missing/misnamed skill fails before

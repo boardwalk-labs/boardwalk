@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildToolSet } from "./tools.js";
+import { buildToolSet, type ExecutableTool } from "./tools.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -45,5 +45,39 @@ describe("buildToolSet — ambient <env> date", () => {
     expect(env).toBeDefined();
     expect(env).toContain("Today's date is");
     expect(env).not.toContain("clock");
+  });
+});
+
+describe("buildToolSet — skill tool", () => {
+  function skillsDirWith(name: string, body: string): string {
+    const root = mkdtempSync(join(tmpdir(), "bw-skills-"));
+    cleanups.push(() => rmSync(root, { recursive: true, force: true }));
+    const dir = join(root, name);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "SKILL.md"), body, "utf8");
+    return root;
+  }
+
+  function skillTool(skillsDir: string): ExecutableTool {
+    const set = buildToolSet({ skills: ["reviewer"] }, { workspaceDir: workspace(), skillsDir });
+    const tool = set.tools.find((t) => t.name === "skill");
+    if (tool === undefined) throw new Error("expected a `skill` tool");
+    return tool;
+  }
+
+  const SKILL = "---\ndescription: how to review\n---\nTHE RUBRIC";
+
+  async function loadBody(input: Record<string, unknown>): Promise<string> {
+    const out = await skillTool(skillsDirWith("reviewer", SKILL)).execute(input);
+    if (typeof out !== "string") throw new Error("expected a string tool result");
+    return out;
+  }
+
+  it("loads the body when `file` is omitted", async () => {
+    expect(await loadBody({ name: "reviewer" })).toContain("THE RUBRIC");
+  });
+
+  it("treats an empty `file` as omitted, not a validation error (the LLM-empty-string case)", async () => {
+    expect(await loadBody({ name: "reviewer", file: "" })).toContain("THE RUBRIC");
   });
 });
