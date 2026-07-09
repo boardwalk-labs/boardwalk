@@ -438,6 +438,25 @@ describe("runAgentLeaf — MCP", () => {
     expect(rec.requests[1]?.body).toContain("upstream exploded");
   });
 
+  it("excludeTools hides named tools from the model (the program keeps them via its own client)", async () => {
+    const mcp = await startFakeMcpServer({
+      tools: [
+        { name: "read", description: "safe read", handler: () => ({ text: "ok" }) },
+        { name: "eval", description: "arbitrary code", handler: () => ({ text: "danger" }) },
+      ],
+    });
+    cleanups.push(() => void mcp.close());
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf(
+      "go",
+      { mcp: [{ name: "srv", transport: "http", url: mcp.url, excludeTools: ["eval"] }] },
+      rec.io,
+    );
+    // The safe tool is advertised to the model; the excluded one never reaches its tool set.
+    expect(rec.requests[0]?.body).toContain('"srv__read"');
+    expect(rec.requests[0]?.body).not.toContain("srv__eval");
+  });
+
   it("disconnects (DELETEs the session) on completion AND on a model error", async () => {
     const completed = await startFakeMcpServer({
       tools: [{ name: "noop", handler: () => ({ text: "ok" }) }],

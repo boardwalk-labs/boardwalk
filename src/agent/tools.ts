@@ -217,6 +217,7 @@ const mcpServerRefSchema = z.discriminatedUnion("transport", [
     command: z.string().min(1),
     args: z.array(z.string()).optional(),
     env: z.record(z.string(), z.string()).optional(),
+    excludeTools: z.array(z.string()).optional(),
   }),
   z.strictObject({
     name: z.string().regex(MCP_NAME_RE),
@@ -226,6 +227,7 @@ const mcpServerRefSchema = z.discriminatedUnion("transport", [
       .min(1)
       .refine((value) => /^https?:\/\//.test(value), { error: "must be an http(s) URL" }),
     headers: z.record(z.string(), z.string()).optional(),
+    excludeTools: z.array(z.string()).optional(),
   }),
 ]);
 
@@ -301,7 +303,11 @@ export async function connectMcpServers(
       const connection = new McpConnection(transportFor(ref, io), { serverName: ref.name });
       connections.push(connection);
       await connection.initialize();
+      // Tools the ref hides from the agent (e.g. a browser session's arbitrary-JS tools). They are
+      // still callable by the trusted program via its own client — this only prunes the model's set.
+      const excluded = new Set(ref.excludeTools ?? []);
       for (const tool of await connection.listTools()) {
+        if (excluded.has(tool.name)) continue;
         tools.push({
           name: `${ref.name}__${tool.name}`,
           description: tool.description,
