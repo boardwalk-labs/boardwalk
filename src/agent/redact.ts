@@ -7,6 +7,8 @@
 // known secret value first, so prompt injection has nothing to exfiltrate. "Known" means every
 // value the run has actually been handed: secrets.get results and provider API keys.
 
+import type { ContentPart } from "./conversation.js";
+
 export class Redactor {
   private readonly values = new Map<string, string>(); // value → label
 
@@ -26,6 +28,17 @@ export class Redactor {
       out = out.split(value).join(`[redacted:${label}]`);
     }
     return out;
+  }
+
+  /** Scrub secrets from message content that may be a bare string OR content parts (text + image):
+   *  text parts are redacted; image parts pass through unchanged. The secrets contract is over TEXT
+   *  (that is where an injected value can be exfiltrated); image bytes are covered by the separate
+   *  run-visibility posture, not this scrub. A bare string redacts exactly as `redact`. */
+  redactContent(content: string | readonly ContentPart[]): string | readonly ContentPart[] {
+    if (typeof content === "string") return this.redact(content);
+    return content.map((part) =>
+      part.type === "text" ? { type: "text", text: this.redact(part.text) } : part,
+    );
   }
 
   /** Deep-redact a structured value carried to OBSERVERS (a tool result's `data`): scrub every

@@ -572,7 +572,7 @@ function redactMessages(
   return messages.map((message) => {
     switch (message.role) {
       case "user":
-        return { role: "user", text: redactor.redact(message.text) };
+        return { role: "user", content: redactor.redactContent(message.content) };
       case "assistant":
         return {
           role: "assistant",
@@ -584,7 +584,7 @@ function redactMessages(
           role: "tool_results",
           results: message.results.map((result) => ({
             ...result,
-            content: redactor.redact(result.content),
+            content: redactor.redactContent(result.content),
           })),
         };
     }

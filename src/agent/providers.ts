@@ -14,7 +14,13 @@ import { z } from "zod";
 import type { NormalizedReasoning } from "@boardwalk-labs/workflow";
 import { EngineError } from "../errors.js";
 import { isJsonValue, isPlainObject } from "../json_value.js";
-import type { ChatMessage, ChatTurn, ToolCallRequest, ToolSpec } from "./conversation.js";
+import type {
+  ChatMessage,
+  ChatTurn,
+  ContentPart,
+  ToolCallRequest,
+  ToolSpec,
+} from "./conversation.js";
 import {
   reasoningToAnthropicThinking,
   reasoningToOpenAiEffort,
@@ -110,11 +116,26 @@ export function anthropicMessagesBody(args: {
   };
 }
 
+/** Neutral content → Anthropic content blocks. Images ride natively as a base64 `source`, valid in
+ *  both a user message and a `tool_result` (Anthropic accepts image blocks inside tool results). A
+ *  bare string is a single text block. */
+function anthropicContentBlocks(content: string | readonly ContentPart[]): unknown[] {
+  const parts = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
+  return parts.map((part) =>
+    part.type === "text"
+      ? { type: "text", text: part.text }
+      : {
+          type: "image",
+          source: { type: "base64", media_type: part.image.mimeType, data: part.image.data },
+        },
+  );
+}
+
 function anthropicMessages(messages: readonly ChatMessage[]): unknown[] {
   return messages.map((message) => {
     switch (message.role) {
       case "user":
-        return { role: "user", content: [{ type: "text", text: message.text }] };
+        return { role: "user", content: anthropicContentBlocks(message.content) };
       case "assistant": {
         const content: unknown[] = [];
         if (message.text.length > 0) content.push({ type: "text", text: message.text });
@@ -129,7 +150,10 @@ function anthropicMessages(messages: readonly ChatMessage[]): unknown[] {
           content: message.results.map((result) => ({
             type: "tool_result",
             tool_use_id: result.id,
-            content: result.content,
+            content:
+              typeof result.content === "string"
+                ? result.content
+                : anthropicContentBlocks(result.content),
             is_error: result.isError,
           })),
         };
@@ -269,12 +293,29 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
 // `stream_options.include_usage`.
 // ----------------------------------------------------------------------------
 
+/** Neutral content part → an OpenAI-compatible content item (for USER messages; `tool` messages are
+ *  text-only and handled by the tool-result split below). Image = a base64 data URL. */
+function openAiContentItem(part: ContentPart): unknown {
+  return part.type === "text"
+    ? { type: "text", text: part.text }
+    : {
+        type: "image_url",
+        image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
+      };
+}
+
 function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
   const out: unknown[] = [];
   for (const message of messages) {
     switch (message.role) {
       case "user":
-        out.push({ role: "user", content: message.text });
+        out.push({
+          role: "user",
+          content:
+            typeof message.content === "string"
+              ? message.content
+              : message.content.map(openAiContentItem),
+        });
         break;
       case "assistant":
         out.push({
@@ -291,11 +332,35 @@ function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
             : {}),
         });
         break;
-      case "tool_results":
+      case "tool_results": {
+        // Emit every tool message FIRST (each answers its tool_call_id), then any images as one
+        // trailing user message. OpenAI-compatible `tool` messages are TEXT-ONLY (an image on a tool
+        // message is rejected: "Image URLs are only allowed for messages with role 'user'"), and the
+        // tool block must stay contiguous after the assistant's tool_calls — so images can't be
+        // interleaved between tool messages. This keeps the tool_call ↔ tool_result pairing intact
+        // while still delivering the pixels (the portable pattern).
+        const images: ContentPart[] = [];
         for (const result of message.results) {
-          out.push({ role: "tool", tool_call_id: result.id, content: result.content });
+          if (typeof result.content === "string") {
+            out.push({ role: "tool", tool_call_id: result.id, content: result.content });
+            continue;
+          }
+          const text = result.content
+            .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+            .map((p) => p.text)
+            .join("\n");
+          images.push(...result.content.filter((p) => p.type === "image"));
+          out.push({
+            role: "tool",
+            tool_call_id: result.id,
+            content: text.length > 0 ? text : "[see image in the following message]",
+          });
+        }
+        if (images.length > 0) {
+          out.push({ role: "user", content: images.map(openAiContentItem) });
         }
         break;
+      }
     }
   }
   return out;

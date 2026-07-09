@@ -124,7 +124,7 @@ function localStreamModel(model: ResolvedModel, redactor: Redactor) {
       messages: req.messages.map((message) => {
         switch (message.role) {
           case "user":
-            return { role: "user", text: redactor.redact(message.text) };
+            return { role: "user", content: redactor.redactContent(message.content) };
           case "assistant":
             return {
               role: "assistant",
@@ -136,7 +136,7 @@ function localStreamModel(model: ResolvedModel, redactor: Redactor) {
               role: "tool_results",
               results: message.results.map((result) => ({
                 ...result,
-                content: redactor.redact(result.content),
+                content: redactor.redactContent(result.content),
               })),
             };
         }

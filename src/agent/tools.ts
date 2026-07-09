@@ -26,7 +26,7 @@ import { EngineError } from "../errors.js";
 import { McpConnection } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";
 import { StdioTransport } from "../mcp/transport_stdio.js";
-import type { ToolSpec } from "./conversation.js";
+import type { ContentPart, ToolSpec } from "./conversation.js";
 import type { LspService } from "./lsp/index.js";
 import type { Redactor } from "./redact.js";
 import { selectBuiltins } from "./tools/registry.js";
@@ -39,6 +39,10 @@ import type { ToolHost } from "./tools/host_tools.js";
  */
 export interface RichToolResult {
   llmText: string;
+  /** Optional structured content (text + image parts) that becomes the ToolResultMessage.content the
+   *  model sees when set — lets a tool (e.g. `screenshot`) feed the model an image, not just
+   *  `llmText`. Omitted for text-only tools, where `llmText` IS the content. */
+  content?: readonly ContentPart[];
   event: ToolReturn;
 }
 

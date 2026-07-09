@@ -9,7 +9,7 @@ function baseArgs(overrides: Partial<ChatArgs> = {}): ChatArgs {
     apiKey: "sk-test",
     headers: {},
     model: "some-model",
-    messages: [{ role: "user", text: "hello" }],
+    messages: [{ role: "user", content: "hello" }],
     tools: [],
     ...overrides,
   };
@@ -143,7 +143,7 @@ describe("chatOpenAi reasoning encoding", () => {
 describe("anthropicMessagesBody reasoning encoding", () => {
   it("derives a `thinking` budget from an effort level", () => {
     const body = anthropicMessagesBody({
-      messages: [{ role: "user", text: "hi" }],
+      messages: [{ role: "user", content: "hi" }],
       tools: [],
       maxTokens: 8192,
       reasoning: { effort: "high" },
@@ -154,7 +154,7 @@ describe("anthropicMessagesBody reasoning encoding", () => {
 
   it("grows max_tokens to stay above an explicit budget", () => {
     const body = anthropicMessagesBody({
-      messages: [{ role: "user", text: "hi" }],
+      messages: [{ role: "user", content: "hi" }],
       tools: [],
       maxTokens: 8192,
       reasoning: { maxTokens: 10000 },
@@ -165,9 +165,101 @@ describe("anthropicMessagesBody reasoning encoding", () => {
 
   it("omits `thinking` when no reasoning is requested", () => {
     const body = anthropicMessagesBody({
-      messages: [{ role: "user", text: "hi" }],
+      messages: [{ role: "user", content: "hi" }],
       tools: [],
     });
     expect(body.thinking).toBeUndefined();
+  });
+});
+
+describe("multimodal content", () => {
+  const imagePart = { type: "image" as const, image: { data: "AAAA", mimeType: "image/png" } };
+  const imageBlockAnthropic = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: "AAAA" },
+  };
+  const imageItemOpenAi = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
+
+  it("anthropic renders an image in a user message as a base64 source block", () => {
+    const body = anthropicMessagesBody({
+      messages: [{ role: "user", content: [{ type: "text", text: "look" }, imagePart] }],
+      tools: [],
+    });
+    const messages = body.messages as { role: string; content: unknown[] }[];
+    expect(messages[0]?.content).toEqual([{ type: "text", text: "look" }, imageBlockAnthropic]);
+  });
+
+  it("anthropic carries an image INSIDE a tool_result natively", () => {
+    const body = anthropicMessagesBody({
+      messages: [
+        {
+          role: "tool_results",
+          results: [
+            { id: "c1", content: [{ type: "text", text: "shot" }, imagePart], isError: false },
+          ],
+        },
+      ],
+      tools: [],
+    });
+    const messages = body.messages as { content: { type: string; content: unknown }[] }[];
+    const toolResult = messages[0]?.content[0];
+    expect(toolResult?.type).toBe("tool_result");
+    expect(toolResult?.content).toEqual([{ type: "text", text: "shot" }, imageBlockAnthropic]);
+  });
+
+  it("openai renders a user image as an image_url data URL", async () => {
+    const { io, body } = recordingFetch();
+    await chatOpenAi(
+      baseArgs({
+        messages: [{ role: "user", content: [{ type: "text", text: "look" }, imagePart] }],
+      }),
+      io,
+    );
+    const messages = body().messages as { role: string; content: unknown }[];
+    expect(messages[0]).toEqual({
+      role: "user",
+      content: [{ type: "text", text: "look" }, imageItemOpenAi],
+    });
+  });
+
+  it("openai splits a tool_result image into a text tool message + a following user image message", async () => {
+    const { io, body } = recordingFetch();
+    await chatOpenAi(
+      baseArgs({
+        messages: [
+          {
+            role: "tool_results",
+            results: [
+              { id: "c1", content: [{ type: "text", text: "shot" }, imagePart], isError: false },
+            ],
+          },
+        ],
+      }),
+      io,
+    );
+    const messages = body().messages as { role: string; content: unknown; tool_call_id?: string }[];
+    // The tool message keeps the tool_call pairing and carries ONLY text; the image follows as a user
+    // message (an image on a `tool` message is rejected by OpenAI-compatible endpoints).
+    expect(messages[0]).toEqual({ role: "tool", tool_call_id: "c1", content: "shot" });
+    expect(messages[1]).toEqual({ role: "user", content: [imageItemOpenAi] });
+  });
+
+  it("openai falls back to a placeholder when a tool_result image has no text part", async () => {
+    const { io, body } = recordingFetch();
+    await chatOpenAi(
+      baseArgs({
+        messages: [
+          { role: "tool_results", results: [{ id: "c1", content: [imagePart], isError: false }] },
+        ],
+      }),
+      io,
+    );
+    const messages = body().messages as { role: string; content: unknown; tool_call_id?: string }[];
+    expect(messages[0]).toEqual({
+      role: "tool",
+      tool_call_id: "c1",
+      content: "[see image in the following message]",
+    });
+    expect(messages[1]).toEqual({ role: "user", content: [imageItemOpenAi] });
   });
 });

@@ -16,7 +16,7 @@
 //    dangling tool_use (results dropped) or orphaned tool_results would be a malformed request to
 //    every provider. The range is snapped outward to a clean turn boundary.
 
-import type { ChatMessage } from "./conversation.js";
+import type { ChatMessage, ContentPart } from "./conversation.js";
 
 /**
  * Default compaction budget, in CHARACTERS of serialized message text (see estimateChars).
@@ -36,6 +36,20 @@ export const RECENT_TURNS_KEPT = 6;
 /** Per-message serialization overhead added to the char estimate (role tag, JSON punctuation). */
 const PER_MESSAGE_OVERHEAD_CHARS = 16;
 
+/** Estimated char cost of an image part in the size guardrail. A screenshot has no character length
+ *  but does occupy real model context (hundreds+ of vision tokens); count it as a fixed chunk so an
+ *  image-heavy loop compacts SOONER, never later (the safe direction). ~1.5k tokens at 4 chars/token. */
+const IMAGE_ESTIMATE_CHARS = 6_000;
+
+/** Char estimate for message content that may be a bare string or content parts (text + image). */
+function contentChars(content: string | readonly ContentPart[]): number {
+  if (typeof content === "string") return content.length;
+  return content.reduce(
+    (sum, part) => sum + (part.type === "text" ? part.text.length : IMAGE_ESTIMATE_CHARS),
+    0,
+  );
+}
+
 /** The contiguous, inclusive range of message indices to replace with one summary message. */
 export interface CompactionPlan {
   /** First index to compress (always ≥ 1 — index 0, the task message, is never touched). */
@@ -53,7 +67,7 @@ export interface CompactionPlan {
 export function estimateChars(message: ChatMessage): number {
   switch (message.role) {
     case "user":
-      return message.text.length + PER_MESSAGE_OVERHEAD_CHARS;
+      return contentChars(message.content) + PER_MESSAGE_OVERHEAD_CHARS;
     case "assistant": {
       let chars = message.text.length;
       for (const call of message.toolCalls) {
@@ -63,7 +77,7 @@ export function estimateChars(message: ChatMessage): number {
     }
     case "tool_results": {
       let chars = 0;
-      for (const result of message.results) chars += result.content.length;
+      for (const result of message.results) chars += contentChars(result.content);
       return chars + PER_MESSAGE_OVERHEAD_CHARS;
     }
   }
@@ -172,6 +186,7 @@ export function dedupeFileReads(messages: ChatMessage[]): number {
       if (message?.role !== "tool_results") continue;
       const old = message.results[ri];
       if (old === undefined) continue;
+      if (typeof old.content !== "string") continue; // a `read` result is always text; skip content parts
       const pointer = `[earlier read of "${path}" elided to save context — a newer read of this file appears later; re-read it if you need the current contents.]`;
       if (pointer.length >= old.content.length) continue; // never grow a result
       reclaimed += old.content.length - pointer.length;

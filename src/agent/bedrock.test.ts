@@ -17,7 +17,7 @@ function baseArgs(overrides: Partial<ChatArgs> = {}): ChatArgs {
     apiKey: null,
     headers: {},
     model: "anthropic.claude-sonnet-4-5-v1:0",
-    messages: [{ role: "user", text: "hello" }],
+    messages: [{ role: "user", content: "hello" }],
     tools: [],
     aws: AWS,
     ...overrides,

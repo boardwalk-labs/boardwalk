@@ -404,7 +404,7 @@ async function runLeafWithTools(
             `Respond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`,
           ];
     const firstMessage = [...preamble, prompt, ...schemaInstruction].join("\n\n");
-    messages = [{ role: "user", text: io.redactor.redact(firstMessage) }];
+    messages = [{ role: "user", content: io.redactor.redact(firstMessage) }];
     startIteration = 0;
   }
 
@@ -538,10 +538,10 @@ async function runToolLoop(
     // cache-stable prefix is untouched). If the model keeps repeating, `repeats` climbs to the hard
     // stop above on a later turn.
     if (repeats === STALL_SOFT_NUDGE) {
-      messages.push({ role: "user", text: io.redactor.redact(STALL_NUDGE_TEXT) });
+      messages.push({ role: "user", content: io.redactor.redact(STALL_NUDGE_TEXT) });
     }
     if (consecutiveErrorTurns === CONSECUTIVE_ERROR_SOFT) {
-      messages.push({ role: "user", text: io.redactor.redact(CONSECUTIVE_ERROR_NUDGE_TEXT) });
+      messages.push({ role: "user", content: io.redactor.redact(CONSECUTIVE_ERROR_NUDGE_TEXT) });
     }
 
     // Wrap-up hint: as tool-calling turns pile up, remind the model to conclude (append-only, so the
@@ -549,7 +549,7 @@ async function runToolLoop(
     // unbounded loop gets a periodic reminder. Never forces a stop (see wrapUpHint).
     const hint = wrapUpHint(iteration, cap);
     if (hint !== null) {
-      messages.push({ role: "user", text: io.redactor.redact(hint) });
+      messages.push({ role: "user", content: io.redactor.redact(hint) });
     }
   }
   // Unreachable: an unbounded loop only exits via a return above, and a capped loop returns on its
@@ -597,7 +597,7 @@ async function reduceContextIfNeeded(
   if (summary.length >= rangeChars) return;
   messages.splice(plan.start, plan.end - plan.start + 1, {
     role: "user",
-    text: io.redactor.redact(summary),
+    content: io.redactor.redact(summary),
   });
 }
 
@@ -629,7 +629,7 @@ async function summarizeForCompaction(
   const req: ModelTurnRequest = {
     model: opts?.model,
     provider: opts?.provider,
-    messages: [...messages, { role: "user", text: io.redactor.redact(SUMMARIZATION_PROMPT) }],
+    messages: [...messages, { role: "user", content: io.redactor.redact(SUMMARIZATION_PROMPT) }],
     tools: tools.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })),
   };
   // No streaming hooks: digest deltas aren't this leaf's user-visible text. providerIo still
@@ -745,7 +745,7 @@ async function executeToolCall(
   io: LeafIo,
   turnId: string,
   answers: Readonly<Record<string, unknown>>,
-): Promise<{ id: string; content: string; isError: boolean }> {
+): Promise<ToolResultMessage> {
   io.emit(turnId, { kind: "tool_call_start", toolCallId: call.id, toolName: call.name });
   io.emit(turnId, { kind: "tool_call_input_complete", toolCallId: call.id, input: call.input });
 
@@ -783,10 +783,17 @@ async function executeToolCall(
     // event. BOTH are redacted — model-bound content AND the observer payload (defense-in-depth: a
     // tool result that inadvertently carries a known secret must reach neither).
     const llmText = typeof raw === "string" ? raw : raw.llmText;
-    const content = io.redactor.redact(llmText);
+    const redactedText = io.redactor.redact(llmText);
+    // A tool that returns structured `content` (e.g. `screenshot`) carries text + image parts through
+    // to the model: text parts are redacted, image bytes pass through. Otherwise the model-bound text
+    // IS the content.
+    const content =
+      typeof raw === "string" || raw.content === undefined
+        ? redactedText
+        : io.redactor.redactContent(raw.content);
     const result: ToolReturn =
       typeof raw === "string"
-        ? { humanSummary: summarize(content) }
+        ? { humanSummary: summarize(redactedText) }
         : redactToolReturn(io.redactor, raw.event);
     io.emit(turnId, { kind: "tool_call_result", toolCallId: call.id, result });
     return { id: call.id, content, isError: false };

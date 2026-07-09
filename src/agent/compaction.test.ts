@@ -10,7 +10,7 @@ import {
 } from "./compaction.js";
 import type { ChatMessage } from "./conversation.js";
 
-const user = (text: string): ChatMessage => ({ role: "user", text });
+const user = (text: string): ChatMessage => ({ role: "user", content: text });
 const assistantText = (text: string): ChatMessage => ({ role: "assistant", text, toolCalls: [] });
 const assistantCall = (id: string, name = "t"): ChatMessage => ({
   role: "assistant",

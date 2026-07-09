@@ -19,16 +19,28 @@ export interface ToolCallRequest {
   input: Record<string, unknown>;
 }
 
+/**
+ * A single piece of user- or tool-result content. Images travel UP to the model only (user prompts
+ * and tool results); a model never EMITS an image, so assistant content stays text-only. The neutral
+ * form is inline base64 (`data`) + a MIME type — both provider adapters accept it, whereas a signed
+ * URL would expire and isn't uniformly supported.
+ */
+export type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image"; image: { data: string; mimeType: string } };
+
 export type ChatMessage =
-  | { role: "user"; text: string }
+  | { role: "user"; content: string | readonly ContentPart[] }
   | { role: "assistant"; text: string; toolCalls: readonly ToolCallRequest[] }
   | { role: "tool_results"; results: readonly ToolResultMessage[] };
 
 export interface ToolResultMessage {
   /** The ToolCallRequest id this answers. */
   id: string;
-  /** Result content, already stringified (and redacted) by the loop. */
-  content: string;
+  /** Result content: a bare string (the common case — already stringified + redacted by the loop),
+   *  or content parts when a tool returns image data alongside its text. A bare string is exactly
+   *  one text part. */
+  content: string | readonly ContentPart[];
   isError: boolean;
 }
 
