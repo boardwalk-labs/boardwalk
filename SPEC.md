@@ -38,6 +38,7 @@ Layering (enforced): the scheduler knows nothing about what workflows do; run-li
 - **Restart-on-crash:** supervisor detects child death → run restarts from the top (bounded restarts, then `failed`). `workflows.call` children re-attach via idempotency key on the restarted pass.
 - **Crash-safe state:** kill the _engine_ at any moment; on boot, a recovery sweep marks orphaned `running` rows → `pending` → restart. All multi-row writes are transactional.
 - **Budgets enforced:** `max_duration_seconds` by supervisor timer; `max_tokens`/`max_usd` from leaf usage reports (USD via a bundled approximate rate table, documented as approximate).
+- **Agent loop bounds:** an `agent()` leaf runs **unbounded by default** — it ends when the model stops calling tools, bounded by the run budget (usage is reported after every model call, so the budget authority can terminate a long loop), a **repetition guard** (a model re-issuing the same tool call(s) is nudged, then hard-stopped), and cancellation. There is no fixed tool-iteration cap. `opts.maxIterations` sets an optional **soft** ceiling: the turn past it withholds tools so the model must give a final answer from the work done — a guardrail, not a hard failure. As turns pile up the model gets a periodic wrap-up hint (a concrete countdown near a set ceiling).
 - **Cancellation:** signal child (cooperative window) → kill after grace → `cancelled`.
 
 ### 2.3 The SDK host bridge (the `WorkflowHost` implementation)

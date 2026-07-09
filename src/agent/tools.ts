@@ -15,6 +15,7 @@ import { z } from "zod";
 import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
 import { buildEnvContext } from "./env_context.js";
+import { buildToolUseGuidance } from "./tool_guidance.js";
 import {
   listSkillFiles,
   loadSkillBody,
@@ -118,6 +119,13 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   for (const def of opts?.tools ?? []) {
     tools.push(wrapProgramTool(def));
   }
+
+  // Base tool-use conventions go FIRST — the most-general, most-stable block (a cacheable prefix),
+  // ahead of AGENTS.md so the author's project rules follow and can override it. Generic tool-use
+  // hygiene only (batch parallel calls, targeted edits, verify, stop when done); gated on the leaf
+  // actually having tools, with per-tool lines. "" (adds nothing) for a pure-inference leaf.
+  const guidance = buildToolUseGuidance(tools);
+  if (guidance !== "") preamble.push(guidance);
 
   // Project context (AGENTS.md) is auto-discovered and prepended BEFORE skills: project rules frame
   // the task; skills are the procedure. Default-on per the convention — no AgentOptions field,

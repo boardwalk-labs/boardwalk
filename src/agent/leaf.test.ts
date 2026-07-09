@@ -17,6 +17,13 @@ import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./pro
 import { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
 import type { McpTokenResult } from "./tools.js";
+import type { AgentOptions } from "@boardwalk-labs/workflow";
+
+// Until the SDK build that surfaces `maxIterations` is published + the engine dep bumped, author
+// capped calls through this local intersection so the tests compile against the pinned SDK type.
+// The engine reads the knob defensively (Reflect.get), so behavior is version-agnostic; once
+// AgentOptions carries the field, the intersection is a harmless no-op.
+type LeafOpts = AgentOptions & { maxIterations?: number };
 
 const OPENAI_MODEL: ResolvedModel = {
   provider: "local",
@@ -683,18 +690,20 @@ describe("runAgentLeaf — tool loop", () => {
     expect(rec.requests[1]?.body).toContain("[redacted:DB_PASSWORD]");
   });
 
-  it("fails with a runaway error when the model never stops calling tools", async () => {
-    // Distinct args each turn so the repetition guard does NOT fire first — this exercises the hard
-    // iteration cap specifically (identical-call stalls are covered by the repetition-guard tests).
-    const rec = recordedIo(
-      OPENAI_MODEL,
-      Array.from({ length: 26 }, (_, i) => () => {
-        return openAiToolCalls([{ id: `c${String(i)}`, name: "double", args: { n: i } }]);
-      }),
+  it("runs UNBOUNDED by default — a long tool loop past the old 25-turn cap still completes", async () => {
+    // Distinct args each turn so the repetition guard does NOT fire. With no maxIterations there is
+    // no fixed ceiling: 30 tool turns (past the retired hard cap of 25) run through to a final answer.
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...Array.from(
+        { length: 30 },
+        (_, i) => () => openAiToolCalls([{ id: `c${String(i)}`, name: "double", args: { n: i } }]),
+      ),
+      () => openAiText("done after a long loop"),
+    ]);
+    await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).resolves.toBe(
+      "done after a long loop",
     );
-    await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).rejects.toThrow(
-      /exceeded 25 tool iterations/,
-    );
+    expect(rec.requests).toHaveLength(31);
   });
 
   it("rejects duplicate inline tool names and an explicit unknown built-in", async () => {
@@ -1048,6 +1057,45 @@ describe("runAgentLeaf — AGENTS.md auto-load", () => {
 });
 
 // ----------------------------------------------------------------------------
+// Base tool-use conventions (default-on preamble, most-general → first)
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — base tool-use conventions", () => {
+  it("prepends the conventions to the first message for a default (tool-bearing) leaf", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("do the task", undefined, rec.io);
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent).toContain("# Tool-use conventions");
+    expect(sent).toContain("Work in parallel");
+  });
+
+  it("orders the conventions BEFORE AGENTS.md (most-general first; author rules override)", async () => {
+    const workspaceDir = tempDir("bw-guidance-ws-");
+    writeFileSync(join(workspaceDir, "AGENTS.md"), "PROJECT-RULES-MARKER", "utf8");
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok")], { workspaceDir });
+    await runAgentLeaf("do the task", undefined, rec.io);
+    const sent = rec.requests[0]?.body ?? "";
+    expect(sent.indexOf("# Tool-use conventions")).toBeLessThan(
+      sent.indexOf("PROJECT-RULES-MARKER"),
+    );
+  });
+
+  it("omits edit/verify guidance for a read-only leaf, and everything for builtins:none", async () => {
+    const readOnly = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("look around", { builtins: "read-only" }, readOnly.io);
+    const roSent = readOnly.requests[0]?.body ?? "";
+    expect(roSent).toContain("Work in parallel");
+    expect(roSent).not.toContain("Make targeted changes");
+    expect(roSent).not.toContain("Verify your work");
+
+    // No built-ins and no inline tools ⇒ nothing to guide, no conventions block at all.
+    const none = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("just answer", { builtins: "none" }, none.io);
+    expect(none.requests[0]?.body ?? "").not.toContain("# Tool-use conventions");
+  });
+});
+
+// ----------------------------------------------------------------------------
 // Context compaction (mid-conversation summarization)
 // ----------------------------------------------------------------------------
 
@@ -1182,6 +1230,117 @@ describe("runAgentLeaf — repetition guard", () => {
     expect(await runAgentLeaf("go", { tools: [spin] }, rec.io)).toBe("ok, changing course");
     // The nudge rode as an appended message on the 4th request.
     expect(rec.requests[3]?.body).toContain("No progress");
+  });
+});
+
+// ----------------------------------------------------------------------------
+// Iteration cap (opt-in, soft landing) + wrap-up hints
+// ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — iteration cap + wrap-up hints", () => {
+  const doubler = {
+    name: "double",
+    description: "Doubles a number",
+    inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
+    execute: () => Promise.resolve(0),
+  };
+  // Distinct args each turn so the repetition guard never fires — these exercise the cap/hints only.
+  const toolTurns = (n: number) =>
+    Array.from(
+      { length: n },
+      (_, i) => () => openAiToolCalls([{ id: `c${String(i)}`, name: "double", args: { n: i } }]),
+    );
+
+  it("maxIterations forces a tools-off final answer instead of a hard failure", async () => {
+    // cap=3: turns 1–3 may call tools; turn 4 runs with tools WITHHELD, so the model must conclude.
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...toolTurns(3),
+      () => openAiText("final answer from the work so far"),
+    ]);
+    const opts: LeafOpts = { tools: [doubler], maxIterations: 3 };
+    await expect(runAgentLeaf("p", opts, rec.io)).resolves.toBe(
+      "final answer from the work so far",
+    );
+    // Exactly cap + 1 model calls: three tool turns, then the forced conclusion.
+    expect(rec.requests).toHaveLength(4);
+    // The first three turns advertised the tool; the forced final turn advertised NONE.
+    expect(rec.requests[0]?.body).toContain('"tools"');
+    expect(rec.requests[3]?.body).not.toContain('"tools"');
+  });
+
+  it("warns the model as it nears a maxIterations ceiling", async () => {
+    // cap=6, CAP_WARN_AT=3 → the countdown fires after turn 3 (3 turns remaining), so it rides the
+    // 4th request. Six tool turns + the forced conclusion = 7 model calls.
+    const rec = recordedIo(OPENAI_MODEL, [...toolTurns(6), () => openAiText("done")]);
+    const opts: LeafOpts = { tools: [doubler], maxIterations: 6 };
+    await expect(runAgentLeaf("p", opts, rec.io)).resolves.toBe("done");
+    expect(rec.requests).toHaveLength(7);
+    expect(rec.requests[3]?.body).toContain("before this agent() call must wrap up");
+  });
+
+  it("an unbounded loop gets a periodic wrap-up reminder", async () => {
+    // No cap → the reminder fires every TURN_HINT_INTERVAL (20) turns, riding the 21st request.
+    const rec = recordedIo(OPENAI_MODEL, [...toolTurns(21), () => openAiText("wrapped up")]);
+    await expect(runAgentLeaf("p", { tools: [doubler] }, rec.io)).resolves.toBe("wrapped up");
+    expect(rec.requests[20]?.body).toContain("You've now taken 20 tool-calling turns");
+  });
+
+  it("ignores a non-positive or non-integer maxIterations (treated as no cap)", async () => {
+    // A bogus cap must not silently bound the loop — 30 tool turns still run to completion.
+    const rec = recordedIo(OPENAI_MODEL, [...toolTurns(30), () => openAiText("still unbounded")]);
+    const opts: LeafOpts = { tools: [doubler], maxIterations: 0 };
+    await expect(runAgentLeaf("p", opts, rec.io)).resolves.toBe("still unbounded");
+    expect(rec.requests).toHaveLength(31);
+  });
+});
+
+describe("runAgentLeaf — consecutive-error guard", () => {
+  const boom = {
+    name: "boom",
+    description: "always fails",
+    inputSchema: { type: "object" },
+    execute: () => Promise.reject(new Error("boom")),
+  };
+  const ok = {
+    name: "ok",
+    description: "always succeeds",
+    inputSchema: { type: "object" },
+    execute: () => Promise.resolve("done-ok"),
+  };
+  // Distinct args each turn so the repetition guard (which keys on the signature) never fires — this
+  // isolates the consecutive-error guard.
+  const boomTurns = (n: number) =>
+    Array.from(
+      { length: n },
+      (_, i) => () => openAiToolCalls([{ id: `e${String(i)}`, name: "boom", args: { n: i } }]),
+    );
+
+  it("ends the run after five consecutive all-error turns", async () => {
+    const rec = recordedIo(OPENAI_MODEL, boomTurns(5));
+    await expect(runAgentLeaf("go", { tools: [boom] }, rec.io)).rejects.toThrow(
+      /consecutive tool calls that all failed/,
+    );
+    expect(rec.requests).toHaveLength(5);
+  });
+
+  it("nudges once at the third consecutive all-error turn, then lets the model recover", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...boomTurns(3),
+      () => openAiText("giving up gracefully"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [boom] }, rec.io)).toBe("giving up gracefully");
+    // The nudge rode as an appended message on the 4th request.
+    expect(rec.requests[3]?.body).toContain("last several tool calls have all failed");
+  });
+
+  it("a successful tool result resets the counter (no hard stop)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...boomTurns(4),
+      () => openAiToolCalls([{ id: "s", name: "ok", args: {} }]), // success resets the run of errors
+      ...boomTurns(4),
+      () => openAiText("survived"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [boom, ok] }, rec.io)).toBe("survived");
   });
 });
 

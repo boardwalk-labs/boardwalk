@@ -50,8 +50,19 @@ import {
 import { subagentSelected } from "./tools/registry.js";
 import { makeSubagentTool } from "./tools/subagent.js";
 
-/** Tool iterations per agent() call before the loop is declared runaway. */
-const MAX_TOOL_ITERATIONS = 25;
+/**
+ * A leaf runs UNBOUNDED by default (no fixed tool-iteration cap): the loop ends when the model stops
+ * calling tools, and is otherwise bounded by the run budget (usage is reported after every call, so
+ * the budget authority can terminate a long loop), the repetition guard below, and cancellation. An
+ * author may set `AgentOptions.maxIterations` to cap a leaf whose scope they know — and a cap is a
+ * SOFT landing, not a hard failure: the turn past the ceiling withholds tools so the model must give
+ * a final answer from the work it has done. See {@link readMaxIterations} + {@link wrapUpHint}.
+ */
+
+/** When a cap is set, warn the model once when this many tool-calling turns remain before it. */
+const CAP_WARN_AT = 3;
+/** With no cap, remind the model to wrap up every this-many tool-calling turns. */
+const TURN_HINT_INTERVAL = 20;
 
 /**
  * Repetition guard. A model that re-issues the SAME tool call(s) is stuck (a loop the 25-iteration
@@ -69,12 +80,61 @@ const STALL_NUDGE_TEXT =
   "[No progress: you have issued the same tool call(s) repeatedly with no new result. Change your " +
   "approach — use different inputs or a different tool — or produce your final answer now.]";
 
+/**
+ * Consecutive-error guard. A turn in which EVERY tool call failed makes no progress even when each
+ * call differs (so the repetition guard, which keys on the tool-call signature, never fires). We
+ * count consecutive all-error turns: at SOFT we nudge once to change approach; at HARD we end the
+ * run rather than let it spin on failing calls until the budget. Any successful tool result in a
+ * turn resets the count. Complements STALL_* (identical-call loops) — this catches error loops.
+ */
+const CONSECUTIVE_ERROR_SOFT = 3;
+const CONSECUTIVE_ERROR_HARD = 5;
+const CONSECUTIVE_ERROR_NUDGE_TEXT =
+  "[Your last several tool calls have all failed. Step back and reconsider — try a different tool " +
+  "or corrected inputs, re-read the current state to get your bearings, or produce your final " +
+  "answer with what you have.]";
+
 /** A canonical, order-independent signature of a turn's tool calls, for repetition detection. */
 function turnSignature(toolCalls: readonly ToolCallRequest[]): string {
   return toolCalls
     .map((call) => `${call.name}:${JSON.stringify(call.input)}`)
     .sort()
     .join("|");
+}
+
+/**
+ * The optional per-call tool-iteration ceiling. Read DEFENSIVELY (via Reflect, not a typed field):
+ * the engine may run a program compiled against a newer SDK that surfaced this knob after the engine
+ * pinned its `@boardwalk-labs/workflow`, so we never assume the option is present on the type. A
+ * finite integer `>= 1` caps the loop; anything else (absent, non-number, `< 1`, non-finite) means
+ * unbounded — matching the SDK contract that only a positive integer sets a cap.
+ */
+function readMaxIterations(opts: AgentOptions | undefined): number | undefined {
+  if (opts === undefined) return undefined;
+  const raw: unknown = Reflect.get(opts, "maxIterations");
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : undefined;
+}
+
+/**
+ * A wrap-up nudge to append after a completed tool-calling turn, or null for no nudge this turn.
+ * Capped: a concrete countdown as the ceiling nears (`CAP_WARN_AT` turns out). Unbounded: a periodic
+ * reminder every `TURN_HINT_INTERVAL` turns so a long loop is prompted to conclude if it already
+ * can. Append-only, so the cache-stable prefix is untouched (like the STALL nudge). It never forces
+ * a stop — a capped run's hard backstop is the tools-withheld final turn; an uncapped run's is the
+ * budget + repetition guard.
+ */
+function wrapUpHint(iteration: number, cap: number | undefined): string | null {
+  if (cap !== undefined) {
+    return cap - iteration === CAP_WARN_AT
+      ? `[${String(CAP_WARN_AT)} more tool-calling turns before this agent() call must wrap up. ` +
+          `Prioritize finishing now and be ready to give your final answer.]`
+      : null;
+  }
+  return iteration % TURN_HINT_INTERVAL === 0
+    ? `[You've now taken ${String(iteration)} tool-calling turns. If you already have what you ` +
+        `need, stop calling tools and give your final answer; if you're still making real ` +
+        `progress, continue.]`
+    : null;
 }
 
 /**
@@ -405,27 +465,38 @@ async function runToolLoop(
 ): Promise<string> {
   // Signatures of each tool-using turn, for the repetition guard (see turnSignature + STALL_*).
   const recentSignatures: string[] = [];
+  // Consecutive turns whose every tool call errored (see CONSECUTIVE_ERROR_*). Reset by any success.
+  let consecutiveErrorTurns = 0;
+  // Optional per-call ceiling on tool-calling turns (undefined ⇒ unbounded; see readMaxIterations).
+  const cap = readMaxIterations(opts);
   // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
-  for (let iteration = startIteration + 1; iteration <= MAX_TOOL_ITERATIONS; iteration++) {
+  // Unbounded when `cap` is undefined; otherwise one turn PAST the cap runs to force a conclusion.
+  for (let iteration = startIteration + 1; cap === undefined || iteration <= cap + 1; iteration++) {
+    // The single turn past the ceiling withholds tools so the model MUST give a final answer — a
+    // soft landing instead of a hard "exceeded N iterations" failure that discards the work done.
+    const forceFinal = cap !== undefined && iteration > cap;
+    const turnTools = forceFinal ? [] : tools;
+
     // Bound the context BEFORE each model call: a long loop (or one fat tool result) grows
     // `messages` until the provider rejects it. Reclaim cheaply first (drop stale duplicate reads,
     // no model call), then — only if still over budget — summarize the oldest middle, reusing the
     // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
-    await reduceContextIfNeeded(messages, tools, opts, io);
+    await reduceContextIfNeeded(messages, turnTools, opts, io);
 
-    const { turn, modelRef } = await modelTurn(messages, tools, opts, io, turnId, iteration);
+    const { turn, modelRef } = await modelTurn(messages, turnTools, opts, io, turnId, iteration);
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
     totals.outputTokens += turn.usage.outputTokens ?? 0;
     io.reportUsage(modelRef, turn.usage);
 
-    if (!turn.wantsTools || turn.toolCalls.length === 0) {
+    // Tools withheld (forced conclusion) OR the model chose to stop ⇒ this text is the answer.
+    if (forceFinal || !turn.wantsTools || turn.toolCalls.length === 0) {
       return turn.text;
     }
 
     // Repetition guard: count how many of the recent turns issued THIS turn's tool-call signature.
-    // A sustained stall ends the run before it burns every iteration; a first crossing only nudges.
+    // A sustained stall ends the run before it burns unbounded tokens; a first crossing only nudges.
     const signature = turnSignature(turn.toolCalls);
     recentSignatures.push(signature);
     const repeats = recentSignatures.slice(-STALL_WINDOW).filter((s) => s === signature).length;
@@ -450,18 +521,40 @@ async function runToolLoop(
     );
     messages.push({ role: "tool_results", results });
 
+    // Consecutive-error guard: a turn where EVERY tool call failed made no progress. Track the run
+    // of such turns; end the run at the hard threshold (spinning on failures, distinct or not), nudge
+    // once at the soft threshold. Any success resets it. An empty result set counts as no-error.
+    const allErrored = results.length > 0 && results.every((r) => r.isError);
+    consecutiveErrorTurns = allErrored ? consecutiveErrorTurns + 1 : 0;
+    if (consecutiveErrorTurns >= CONSECUTIVE_ERROR_HARD) {
+      throw new EngineError(
+        "PROGRAM_ERROR",
+        "agent() made several consecutive tool calls that all failed without recovering.",
+        "Every recent tool call errored — check the tool inputs and permissions, or split the work.",
+      );
+    }
+
     // Nudge ONCE, when the stall first crosses the soft threshold (an appended message, so the
     // cache-stable prefix is untouched). If the model keeps repeating, `repeats` climbs to the hard
     // stop above on a later turn.
     if (repeats === STALL_SOFT_NUDGE) {
       messages.push({ role: "user", text: io.redactor.redact(STALL_NUDGE_TEXT) });
     }
+    if (consecutiveErrorTurns === CONSECUTIVE_ERROR_SOFT) {
+      messages.push({ role: "user", text: io.redactor.redact(CONSECUTIVE_ERROR_NUDGE_TEXT) });
+    }
+
+    // Wrap-up hint: as tool-calling turns pile up, remind the model to conclude (append-only, so the
+    // cache-stable prefix is untouched). A cap gives a concrete countdown near the ceiling; an
+    // unbounded loop gets a periodic reminder. Never forces a stop (see wrapUpHint).
+    const hint = wrapUpHint(iteration, cap);
+    if (hint !== null) {
+      messages.push({ role: "user", text: io.redactor.redact(hint) });
+    }
   }
-  throw new EngineError(
-    "PROGRAM_ERROR",
-    `agent() exceeded ${String(MAX_TOOL_ITERATIONS)} tool iterations without a final answer.`,
-    "The model is looping on tool calls. Tighten the prompt, or split the work across calls.",
-  );
+  // Unreachable: an unbounded loop only exits via a return above, and a capped loop returns on its
+  // forced-final turn. Kept as a defensive terminal for the type checker.
+  throw new EngineError("INTERNAL", "agent() tool loop exited without producing an answer.");
 }
 
 /**
@@ -510,11 +603,14 @@ async function reduceContextIfNeeded(
 
 /** The instruction that turns the conversation so far into a forward-useful digest. */
 const SUMMARIZATION_PROMPT =
-  "Compact the conversation so far into a concise digest the agent can continue from. The digest " +
-  "will REPLACE the earlier turns (the most recent turns stay verbatim), so preserve, in terse " +
-  "bullets: the goal/task; decisions made; facts and values learned; files touched (with exact " +
-  "paths); tool outputs that still matter; errors encountered and their fixes; and the next steps. " +
-  "Drop only redundancy. Output ONLY the digest text — no preamble — and do not call any tools.";
+  "Compact the conversation so far into a concise digest the agent can continue from with no loss " +
+  "of momentum. The digest REPLACES the earlier turns (the most recent turns stay verbatim), so " +
+  "preserve, in terse bullets: the goal/task; the plan or todo list with each item's status; " +
+  "decisions made and why; facts, values, and identifiers learned; files touched (with exact " +
+  "paths) and what changed in each; commands run and results that still matter; errors hit and " +
+  "their fixes; what has been verified vs. still unverified; what you are doing RIGHT NOW; and the " +
+  "next steps. Drop only redundancy — never drop a fact you would need to finish the task. Output " +
+  "ONLY the digest text — no preamble — and do not call any tools.";
 
 /**
  * Produce a compaction digest via the SAME model seam the loop uses (so it routes + meters like a

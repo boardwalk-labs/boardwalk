@@ -1,6 +1,6 @@
 {
   "name": "@boardwalk-labs/engine",
-  "version": "0.1.29",
+  "version": "0.1.30",
   "description": "The Boardwalk single-node engine: cron scheduling, run lifecycle, SQLite state, and the local run log. Powers `boardwalk dev` and the self-hosted server.",
   "license": "Apache-2.0",
   "repository": {

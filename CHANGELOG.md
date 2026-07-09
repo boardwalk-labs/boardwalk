@@ -3,6 +3,57 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.30
+
+### Added
+
+- **Base tool-use conventions** are now prepended to every tool-bearing `agent()` leaf — a thin,
+  generic preamble (batch independent tool calls in parallel, reuse context instead of re-reading,
+  make targeted edits and fully implement them, verify with evidence, track multi-step work, stop
+  when done). It's the most-general block, ordered ahead of `AGENTS.md` so an author's project rules
+  override it; it's tool-conditional (a read-only or pure-inference leaf only sees the lines that
+  apply); and it addresses the model behaviors — one-edit-per-turn, redundant re-reads — that no
+  prompt was previously counteracting. Synthesized from the convergent practice across OSS harnesses.
+
+### Changed
+
+- **The `agent()` loop is now unbounded by default.** The fixed 25-tool-iteration cap is gone: a
+  leaf runs until the model stops calling tools, bounded by the run budget (usage is reported after
+  every model call), the repetition guard, and cancellation. A legitimately long task (a many-file
+  edit, a multi-repo pass) no longer hard-fails with `exceeded 25 tool iterations` — the common
+  cause of failed runs that had already done real work.
+- **Optional `AgentOptions.maxIterations` (soft cap).** A leaf whose scope you know can set a
+  ceiling; it does NOT hard-fail. On the turn past the ceiling the model is asked once more with its
+  tools withheld, so it must produce a final answer from the work done. Omit for no cap; a
+  non-integer or `< 1` value is ignored. (Requires the SDK build that surfaces the field for typed
+  authoring; the engine reads it defensively, so it is honored regardless of SDK version.)
+- **Wrap-up hints.** As tool-calling turns pile up, the model gets a periodic reminder to conclude
+  if it already can (a concrete countdown as a set `maxIterations` nears). Append-only, so the
+  prompt cache stays warm.
+- **`grep` and `ls` accept multiple paths.** `path` may now be a single string OR an array of
+  strings, so a model searching/listing several paths in one call succeeds instead of failing when
+  it passes more than one. Each path is still sandbox-checked individually.
+- **`apply_patch` tolerates whitespace/indentation drift.** A hunk's context/removed lines are now
+  matched exact → ignoring trailing whitespace → ignoring a **uniform** leading-indentation
+  difference (with the replacement re-indented to match, so it never de-indents the result). Each
+  tier still requires a UNIQUE match — a tolerant tier never silently edits the wrong place, and
+  non-uniform drift still fails loudly. This recovers the most common cause of a correct patch being
+  rejected. (Whitespace-structural only; deliberately NOT similarity/edit-distance fuzzing, which
+  Aider shipped then disabled for silently mis-applying.)
+- **Richer edit-failure messages, so fewer turns are lost to recoverable mistakes.** `edit`'s
+  "text not found" now flags an **already-applied** edit (the replacement is already present) and
+  points at the **closest lines** in the file (whitespace-drift "did you mean?"); its ambiguous-match
+  error **names the distinct line numbers**. `apply_patch`'s ambiguous-hunk error names the matching
+  line numbers; `grep`'s missing-path error points at the array form. (`edit` stays strict
+  exact-unique — the hints steer the retry, they never change what matches.)
+- **Consecutive-error guard.** A run of turns whose every tool call fails now nudges the model to
+  change approach, then ends the run — instead of spinning on failing calls until the budget.
+  Complements the repetition guard (which only catches identical/alternating calls); any successful
+  tool result resets it.
+- **Compaction digest preserves more state.** The summary that replaces old turns on overflow now
+  explicitly retains the plan/todo status, per-file changes, verified-vs-unverified state, and the
+  in-progress step — so a compacted run is less likely to redo finished work.
+
 ## 0.1.28
 
 ### Changed

@@ -25,7 +25,9 @@
 //
 // Add: every body line is prefixed `+`; the file must NOT already exist.
 // Update: standard unified-diff hunks (` ` context, `-` removed, `+` added) located by matching
-//   the removed+context lines exactly once; an optional `*** Move to:` renames the file.
+//   the removed+context lines to a UNIQUE spot — exact, else tolerating trailing whitespace or a
+//   uniform leading-indent shift (the replacement is re-indented to match); an optional
+//   `*** Move to:` renames the file.
 // Delete: the file must exist; it is removed.
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -332,44 +334,152 @@ function planWrites(
 function applyHunks(original: string, hunks: readonly Hunk[], path: string): string {
   let lines = original.split("\n");
   for (const hunk of hunks) {
-    const at = locate(lines, hunk.before, path);
-    lines = [...lines.slice(0, at), ...hunk.after, ...lines.slice(at + hunk.before.length)];
+    const { at, reindent } = locate(lines, hunk.before, path);
+    // reindent re-applies the file's actual indentation to the replacement when the hunk matched a
+    // differently-indented block — so a whitespace-tolerant match never de-indents the result.
+    const after = reindent(hunk.after);
+    lines = [...lines.slice(0, at), ...after, ...lines.slice(at + hunk.before.length)];
   }
   return lines.join("\n");
 }
 
-/** Find the unique index where `before` matches; absent or ambiguous is a loud failure. */
-function locate(lines: readonly string[], before: readonly string[], path: string): number {
-  if (before.length === 0) {
-    throw new EngineError(
-      "VALIDATION",
-      `apply_patch: a hunk for "${path}" has no context or removed lines.`,
-    );
-  }
+/** A located hunk: the start index, and how to re-indent the replacement lines (identity unless a
+ *  leading-whitespace-tolerant tier matched a differently-indented block). */
+interface Located {
+  at: number;
+  reindent: (after: readonly string[]) => string[];
+}
+
+const asIs = (after: readonly string[]): string[] => [...after];
+
+/** Count of leading SPACE characters (tabs are treated as content, so tab-indented code never
+ *  matches the leading-offset tier — a safe fallback rather than a wrong-indent guess). */
+function leadSpaces(line: string): number {
+  const m = /^ */.exec(line);
+  return m ? m[0].length : 0;
+}
+
+/** Start indices where `before` matches `lines` under `normalize` (every line equal once normalized). */
+function findBlockMatches(
+  lines: readonly string[],
+  before: readonly string[],
+  normalize: (line: string) => string,
+): number[] {
+  const norm = before.map(normalize);
   const matches: number[] = [];
   for (let i = 0; i + before.length <= lines.length; i++) {
     let ok = true;
     for (let j = 0; j < before.length; j++) {
-      if (lines[i + j] !== before[j]) {
+      if (normalize(lines[i + j] ?? "") !== norm[j]) {
         ok = false;
         break;
       }
     }
     if (ok) matches.push(i);
   }
-  if (matches.length === 0) {
+  return matches;
+}
+
+/**
+ * Start indices where `before` matches `lines` ignoring a UNIFORM leading-indentation difference —
+ * every line's content agrees (after trimming leading spaces + trailing whitespace) AND the file is
+ * indented by the same delta on every line of the block. The uniform delta is returned so the
+ * replacement can be re-indented to match, never de-indenting the result.
+ */
+function findLeadingOffsetMatches(
+  lines: readonly string[],
+  before: readonly string[],
+): { at: number; delta: number }[] {
+  const out: { at: number; delta: number }[] = [];
+  for (let i = 0; i + before.length <= lines.length; i++) {
+    let ok = true;
+    let delta: number | null = null;
+    for (let j = 0; j < before.length; j++) {
+      const fLine = lines[i + j] ?? "";
+      const bLine = before[j] ?? "";
+      const fN = leadSpaces(fLine);
+      const bN = leadSpaces(bLine);
+      if (fLine.slice(fN).replace(/\s+$/, "") !== bLine.slice(bN).replace(/\s+$/, "")) {
+        ok = false;
+        break;
+      }
+      const d = fN - bN;
+      if (delta === null) delta = d;
+      else if (d !== delta) {
+        ok = false; // indentation differs non-uniformly — not a safe re-indent
+        break;
+      }
+    }
+    // delta === 0 would be a pure trailing-whitespace match, already handled by an earlier tier.
+    if (ok && delta !== null && delta !== 0) out.push({ at: i, delta });
+  }
+  return out;
+}
+
+/** Apply a uniform indent delta to a replacement line: prepend spaces (delta > 0) or drop up to
+ *  |delta| leading spaces (delta < 0), so the replacement keeps the file's real indentation. */
+function applyIndentDelta(line: string, delta: number): string {
+  if (delta > 0) return " ".repeat(delta) + line;
+  if (delta < 0) return line.slice(Math.min(-delta, leadSpaces(line)));
+  return line;
+}
+
+function ambiguousHunkError(path: string, matches: readonly number[]): EngineError {
+  // Name the matching line numbers so the model can add the surrounding context that pins the one it
+  // means — instead of guessing blindly and burning turns (or abandoning apply_patch for a slower
+  // one-edit-per-call fallback).
+  const nums = matches.map((i) => i + 1);
+  const shown = nums.slice(0, 5).map(String).join(", ");
+  const more = nums.length > 5 ? `, …(+${String(nums.length - 5)} more)` : "";
+  return new EngineError(
+    "VALIDATION",
+    `apply_patch: a hunk for "${path}" matched ${String(matches.length)} locations ` +
+      `(lines ${shown}${more}) — add enough surrounding context lines to the hunk to pin the ` +
+      "one you mean.",
+  );
+}
+
+/**
+ * Find where `before` matches. Tiers of increasing tolerance, each still requiring a UNIQUE match so
+ * a tolerant tier never silently edits the wrong place: (1) exact, (2) ignore trailing whitespace,
+ * (3) uniform leading-indent difference (with the replacement re-indented to match). Absent or
+ * ambiguous is a loud failure. Matches how Codex/Aider/Cline apply patches — content-forgiving on
+ * whitespace, never fuzzy on the actual text.
+ */
+function locate(lines: readonly string[], before: readonly string[], path: string): Located {
+  if (before.length === 0) {
     throw new EngineError(
       "VALIDATION",
-      `apply_patch: a hunk for "${path}" did not match the file's current contents.`,
+      `apply_patch: a hunk for "${path}" has no context or removed lines.`,
     );
   }
-  if (matches.length > 1) {
-    throw new EngineError(
-      "VALIDATION",
-      `apply_patch: a hunk for "${path}" matched ${String(matches.length)} locations — add more context to disambiguate.`,
-    );
+  const tiers: ((line: string) => string)[] = [
+    (line) => line, // exact
+    (line) => line.replace(/[ \t]+$/, ""), // ignore trailing whitespace
+  ];
+  for (const normalize of tiers) {
+    const matches = findBlockMatches(lines, before, normalize);
+    if (matches.length === 1) return { at: matches[0] ?? 0, reindent: asIs };
+    if (matches.length > 1) throw ambiguousHunkError(path, matches);
   }
-  return matches[0] ?? 0;
+  // Leading-indent-tolerant tier: re-indent the replacement by the matched uniform delta.
+  const lead = findLeadingOffsetMatches(lines, before);
+  if (lead.length === 1) {
+    const { at, delta } = lead[0] ?? { at: 0, delta: 0 };
+    return { at, reindent: (after) => after.map((l) => applyIndentDelta(l, delta)) };
+  }
+  if (lead.length > 1)
+    throw ambiguousHunkError(
+      path,
+      lead.map((m) => m.at),
+    );
+
+  throw new EngineError(
+    "VALIDATION",
+    `apply_patch: a hunk for "${path}" did not match the file's current contents — the context and ` +
+      "removed lines must match (ignoring only indentation and surrounding whitespace), and the " +
+      "file may already have been changed. Re-read it and rebuild the hunk from the current text.",
+  );
 }
 
 // ----------------------------------------------------------------------------

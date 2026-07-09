@@ -225,12 +225,31 @@ export function editTool(workspaceDir: string, lsp?: LspService): ExecutableTool
       const content = readFileSync(file, "utf8");
       const count = occurrences(content, oldText);
       if (count === 0) {
-        throw new EngineError("VALIDATION", `edit: \`old\` text was not found in "${path}".`);
-      }
-      if (count > 1 && !replaceAll) {
+        // Keep the match STRICT (never silently edit a near-match), but make the failure
+        // self-correcting: flag an edit that looks already-applied, and point at the closest lines
+        // in the file (the common whitespace/indent-drift case) as a HINT only.
+        let hint =
+          " It must match the file exactly, whitespace and all. The file may already have been " +
+          "changed; re-read it for the current text before retrying.";
+        if (newText.length > 0 && content.includes(newText)) {
+          hint =
+            " The `new` text is already present in the file — this edit looks like it was already " +
+            "applied. Re-read the file to confirm before retrying.";
+        } else {
+          const similar = similarLineHints(content, oldText);
+          if (similar.length > 0) hint += `\nClosest lines in the file:\n${similar.join("\n")}`;
+        }
         throw new EngineError(
           "VALIDATION",
-          `edit: \`old\` text appears ${String(count)} times in "${path}" — make it unique or pass replaceAll: true.`,
+          `edit: \`old\` text was not found in "${path}".${hint}`,
+        );
+      }
+      if (count > 1 && !replaceAll) {
+        const lines = [...new Set(matchLineNumbers(content, oldText))].slice(0, 8);
+        throw new EngineError(
+          "VALIDATION",
+          `edit: \`old\` text appears ${String(count)} times in "${path}" (lines ${lines.join(", ")}) — ` +
+            "add surrounding context to make it unique, or pass replaceAll: true.",
         );
       }
       const updated = replaceAll
@@ -270,39 +289,47 @@ export function lsTool(workspaceDir: string): ExecutableTool {
   return {
     name: "ls",
     description:
-      "List a workspace directory: each entry's name, whether it is a file or directory, and size.",
+      "List a workspace directory (or several): each entry's name, whether it is a file or " +
+      "directory, and size.",
     inputSchema: {
       type: "object",
       properties: {
         path: {
-          type: "string",
-          description: "Workspace-relative directory (defaults to the workspace root).",
+          description:
+            "Workspace-relative director(ies) — a single path OR an array of paths. Defaults to " +
+            "the workspace root.",
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
         },
       },
       additionalProperties: false,
     },
     execute: (input) =>
       sync((): RichToolResult => {
-        const rel = typeof input["path"] === "string" ? input["path"] : "";
-        const dir = containedPath(workspaceDir, rel);
-        if (!existsSync(dir) || !statSync(dir).isDirectory()) {
-          throw new EngineError("VALIDATION", `ls: no such directory "${rel || "."}".`);
+        const targets = resolvePaths(input, workspaceDir);
+        const multi = targets.length > 1;
+        const blocks: string[] = [];
+        let total = 0;
+        for (const { rel, abs } of targets) {
+          if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+            throw new EngineError("VALIDATION", `ls: no such directory "${rel || "."}".`);
+          }
+          const entries = readdirSync(abs).sort().slice(0, MAX_LS_ENTRIES);
+          total += entries.length;
+          const lines = entries.map((name) => {
+            const full = join(abs, name);
+            const st = statSync(full);
+            return st.isDirectory() ? `${name}/  (dir)` : `${name}  (${String(st.size)} bytes)`;
+          });
+          const body = lines.length > 0 ? lines.join("\n") : "(empty directory)";
+          // Multiple dirs get a `path:` header each; a single dir stays byte-identical to before.
+          blocks.push(multi ? `${rel || "."}:\n${body}` : body);
         }
-        const entries = readdirSync(dir).sort().slice(0, MAX_LS_ENTRIES);
-        const lines = entries.map((name) => {
-          const full = join(dir, name);
-          const st = statSync(full);
-          return st.isDirectory() ? `${name}/  (dir)` : `${name}  (${String(st.size)} bytes)`;
+        const label = multi
+          ? `ls ${String(targets.length)} paths (${String(total)} entries)`
+          : `ls ${targets[0]?.rel || "."} (${String(total)} entries)`;
+        return outputResult("file_list", label, blocks.join("\n\n"), {
+          path: targets.map((t) => t.rel || ".").join(", "),
         });
-        const output = lines.length > 0 ? lines.join("\n") : "(empty directory)";
-        return outputResult(
-          "file_list",
-          `ls ${rel || "."} (${String(lines.length)} entries)`,
-          output,
-          {
-            path: rel || ".",
-          },
-        );
       }),
   };
 }
@@ -318,9 +345,10 @@ export function grepTool(workspaceDir: string): ExecutableTool {
       properties: {
         pattern: { type: "string", description: "The regular expression to search for." },
         path: {
-          type: "string",
           description:
-            "Workspace-relative directory or file to search (defaults to the workspace root).",
+            "Workspace-relative director(ies) or file(s) to search — a single path OR an array of " +
+            "paths. Defaults to the whole workspace.",
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
         },
       },
       required: ["pattern"],
@@ -328,14 +356,24 @@ export function grepTool(workspaceDir: string): ExecutableTool {
     },
     execute: async (input): Promise<RichToolResult> => {
       const pattern = requireString(input, "pattern");
-      const rel = typeof input["path"] === "string" ? input["path"] : "";
-      const searchRoot = containedPath(workspaceDir, rel);
-      if (!existsSync(searchRoot)) {
-        throw new EngineError("VALIDATION", `grep: no such path "${rel || "."}".`);
+      const targets = resolvePaths(input, workspaceDir);
+      for (const { rel, abs } of targets) {
+        if (!existsSync(abs)) {
+          throw new EngineError(
+            "VALIDATION",
+            `grep: no such path "${rel || "."}". Pass a single path, or an array of paths to ` +
+              "search several at once.",
+          );
+        }
       }
-      const rgResult = await tryRipgrep(pattern, searchRoot, workspaceDir);
-      const matches = rgResult ?? nodeGrep(pattern, searchRoot, workspaceDir);
-      const extra: Record<string, unknown> = { pattern, ...(rel !== "" ? { path: rel } : {}) };
+      const roots = targets.map((t) => t.abs);
+      const rgResult = await tryRipgrep(pattern, roots, workspaceDir);
+      const matches = rgResult ?? nodeGrep(pattern, roots, workspaceDir);
+      const searched = targets.map((t) => t.rel).filter((rel) => rel !== "");
+      const extra: Record<string, unknown> = {
+        pattern,
+        ...(searched.length > 0 ? { path: searched.join(", ") } : {}),
+      };
       if (matches.length === 0) {
         return outputResult("search", `grep "${pattern}" (no matches)`, "(no matches)", extra);
       }
@@ -405,7 +443,7 @@ export function globTool(workspaceDir: string): ExecutableTool {
 /** Run ripgrep if it is on PATH; null means rg is unavailable (caller falls back to the Node scan). */
 async function tryRipgrep(
   pattern: string,
-  searchRoot: string,
+  searchRoots: readonly string[],
   workspaceDir: string,
 ): Promise<string[] | null> {
   return await new Promise<string[] | null>((resolvePromise) => {
@@ -413,7 +451,7 @@ async function tryRipgrep(
     try {
       child = spawn(
         "rg",
-        ["--line-number", "--no-heading", "--color", "never", "--", pattern, searchRoot],
+        ["--line-number", "--no-heading", "--color", "never", "--", pattern, ...searchRoots],
         {
           cwd: workspaceDir,
           stdio: ["ignore", "pipe", "ignore"],
@@ -463,8 +501,8 @@ function rewriteRgPaths(output: string, workspaceDir: string): string[] {
   return lines;
 }
 
-/** A dependency-free recursive grep — used when ripgrep isn't installed. */
-function nodeGrep(pattern: string, searchRoot: string, workspaceDir: string): string[] {
+/** A dependency-free recursive grep — used when ripgrep isn't installed. Scans every search root. */
+function nodeGrep(pattern: string, searchRoots: readonly string[], workspaceDir: string): string[] {
   let re: RegExp;
   try {
     re = new RegExp(pattern);
@@ -489,13 +527,16 @@ function nodeGrep(pattern: string, searchRoot: string, workspaceDir: string): st
       if (re.test(lines[i] ?? "")) matches.push(`${rel}:${String(i + 1)}:${lines[i] ?? ""}`);
     }
   };
-  if (statSync(searchRoot).isFile()) {
-    search(searchRoot);
-  } else {
-    walk(searchRoot, workspaceDir, (absPath) => {
-      if (statSync(absPath).isFile()) search(absPath);
-      return matches.length < MAX_GREP_MATCHES * 4;
-    });
+  for (const searchRoot of searchRoots) {
+    if (matches.length >= MAX_GREP_MATCHES * 4) break;
+    if (statSync(searchRoot).isFile()) {
+      search(searchRoot);
+    } else {
+      walk(searchRoot, workspaceDir, (absPath) => {
+        if (statSync(absPath).isFile()) search(absPath);
+        return matches.length < MAX_GREP_MATCHES * 4;
+      });
+    }
   }
   return matches;
 }
@@ -568,12 +609,108 @@ function occurrences(haystack: string, needle: string): number {
   return count;
 }
 
+/** 1-based line numbers where `needle` begins in `haystack` (for an ambiguous-edit error). */
+function matchLineNumbers(haystack: string, needle: string): number[] {
+  if (needle.length === 0) return [];
+  const nums: number[] = [];
+  let from = 0;
+  for (;;) {
+    const idx = haystack.indexOf(needle, from);
+    if (idx === -1) break;
+    // Line number = 1 + count of newlines before the match start.
+    let line = 1;
+    for (let i = 0; i < idx; i++) if (haystack[i] === "\n") line++;
+    nums.push(line);
+    from = idx + needle.length;
+  }
+  return nums;
+}
+
+/**
+ * Up to `limit` file lines most similar to the first meaningful line of `oldText`, rendered as
+ * "  L<n>: <text>" hints for a failed edit. Trimmed-exact matches win (the whitespace/indent-drift
+ * case that most edits fail on); otherwise the closest by bigram similarity above a floor. This is a
+ * HINT for the model's next attempt only — it is NEVER used to choose what actually gets edited.
+ */
+function similarLineHints(content: string, oldText: string, limit = 3): string[] {
+  const target = oldText
+    .split("\n")
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  if (target === undefined) return [];
+  const lines = content.split("\n");
+  const exact: string[] = [];
+  for (let i = 0; i < lines.length && exact.length < limit; i++) {
+    if ((lines[i] ?? "").trim() === target) exact.push(`  L${String(i + 1)}: ${lines[i] ?? ""}`);
+  }
+  if (exact.length > 0) return exact;
+  return lines
+    .map((line, i) => ({ i, line, score: diceCoefficient(target, line.trim()) }))
+    .filter((s) => s.score >= 0.6)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((s) => `  L${String(s.i + 1)}: ${s.line}`);
+}
+
+/** Sørensen–Dice similarity over character bigrams (0..1); dependency-free fuzzy string score. */
+function diceCoefficient(a: string, b: string): number {
+  if (a === b) return a.length === 0 ? 0 : 1;
+  if (a.length < 2 || b.length < 2) return 0;
+  const bigrams = (s: string): Map<string, number> => {
+    const m = new Map<string, number>();
+    for (let i = 0; i < s.length - 1; i++) {
+      const bg = s.slice(i, i + 2);
+      m.set(bg, (m.get(bg) ?? 0) + 1);
+    }
+    return m;
+  };
+  const a2 = bigrams(a);
+  const b2 = bigrams(b);
+  let overlap = 0;
+  for (const [bg, n] of a2) {
+    const m = b2.get(bg);
+    if (m !== undefined) overlap += Math.min(n, m);
+  }
+  return (2 * overlap) / (a.length - 1 + (b.length - 1));
+}
+
 function requireString(input: Record<string, unknown>, key: string): string {
   const value = input[key];
   if (typeof value !== "string") {
     throw new EngineError("VALIDATION", `Tool input "${key}" must be a string.`);
   }
   return value;
+}
+
+/**
+ * Resolve a tool's `path` input — a single workspace-relative path OR an array of them — to a list
+ * of `{ rel, abs }` pairs, each run through containedPath so the sandbox invariant holds for EVERY
+ * entry (one escaping path in an array still fails loudly). Absent/empty ⇒ the workspace root. This
+ * lets `grep`/`ls` accept the several paths a model naturally reaches for in one call instead of
+ * failing when it passes more than one.
+ */
+function resolvePaths(
+  input: Record<string, unknown>,
+  workspaceDir: string,
+): { rel: string; abs: string }[] {
+  const raw: unknown = input["path"];
+  let rels: string[];
+  if (typeof raw === "string") {
+    rels = [raw];
+  } else if (Array.isArray(raw)) {
+    rels = [];
+    for (let i = 0; i < raw.length; i++) {
+      const item: unknown = raw[i];
+      if (typeof item !== "string") {
+        throw new EngineError("VALIDATION", `Tool input "path[${String(i)}]" must be a string.`);
+      }
+      rels.push(item);
+    }
+  } else {
+    rels = [""];
+  }
+  if (rels.length === 0) rels = [""];
+  return rels.map((rel) => ({ rel, abs: containedPath(workspaceDir, rel) }));
 }
 
 function optionalPositiveInt(value: unknown, key: string): number | undefined {

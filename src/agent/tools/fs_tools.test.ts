@@ -139,6 +139,32 @@ describe("edit", () => {
     await tool.execute({ path: "f", old: "x", new: "y", replaceAll: true });
     expect(readFileSync(join(dir, "f"), "utf8")).toBe("y y y");
   });
+
+  it("ambiguous-match error names the distinct line numbers", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "const a = 1;\nconst b = 2;\nconst a = 1;\n");
+    await expect(
+      editTool(dir).execute({ path: "f.ts", old: "const a = 1;", new: "const a = 9;" }),
+    ).rejects.toThrow(/appears 2 times in "f\.ts" \(lines 1, 3\)/);
+  });
+
+  it('no-match error points at the closest line (whitespace-drift "did you mean")', async () => {
+    const dir = ws();
+    // Model over-indented its `old` — not a substring of the file, so exact match fails, but the
+    // trimmed line matches line 2. (Under-indenting would still substring-match and succeed.)
+    writeFileSync(join(dir, "f.ts"), "const x = 1;\nreturn 42;\n");
+    await expect(
+      editTool(dir).execute({ path: "f.ts", old: "    return 42;", new: "    return 43;" }),
+    ).rejects.toThrow(/Closest lines in the file:\n\s*L2:\s+return 42;/);
+  });
+
+  it("no-match error flags an already-applied edit", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "const answer = 43;\n");
+    await expect(
+      editTool(dir).execute({ path: "f.ts", old: "const answer = 42;", new: "const answer = 43;" }),
+    ).rejects.toThrow(/already present in the file — this edit looks like it was already applied/);
+  });
 });
 
 describe("ls", () => {
@@ -155,6 +181,24 @@ describe("ls", () => {
     const tool = lsTool(ws());
     await expect(tool.execute({ path: "../" })).rejects.toThrow(/escapes the workspace/);
     await expect(tool.execute({ path: "missing" })).rejects.toThrow(/no such directory/);
+  });
+
+  it("lists several directories in one call, each under its own header", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "a"));
+    mkdirSync(join(dir, "b"));
+    writeFileSync(join(dir, "a/one.txt"), "x");
+    writeFileSync(join(dir, "b/two.txt"), "yy");
+    const out = rich(await lsTool(dir).execute({ path: ["a", "b"] }));
+    expect(out.llmText).toContain("a:\none.txt  (1 bytes)");
+    expect(out.llmText).toContain("b:\ntwo.txt  (2 bytes)");
+    expect(out.event.humanSummary).toBe("ls 2 paths (2 entries)");
+  });
+
+  it("keeps the sandbox invariant for every path in an array", async () => {
+    await expect(lsTool(ws()).execute({ path: ["a", "../escape"] })).rejects.toThrow(
+      /escapes the workspace/,
+    );
   });
 });
 
@@ -180,6 +224,27 @@ describe("grep", () => {
     const out = rich(await grepTool(dir).execute({ pattern: "TARGETWORD" })).llmText;
     expect(out).toContain("real.js");
     expect(out).not.toContain("node_modules");
+  });
+
+  it("searches several paths in one call and scopes out everything else", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "src"));
+    mkdirSync(join(dir, "test"));
+    mkdirSync(join(dir, "other"));
+    writeFileSync(join(dir, "src/a.ts"), "NEEDLE here\n");
+    writeFileSync(join(dir, "test/b.ts"), "NEEDLE too\n");
+    writeFileSync(join(dir, "other/c.ts"), "NEEDLE ignored\n");
+    const out = rich(await grepTool(dir).execute({ pattern: "NEEDLE", path: ["src", "test"] }));
+    expect(out.llmText).toContain("src/a.ts:1:NEEDLE here");
+    expect(out.llmText).toContain("test/b.ts:1:NEEDLE too");
+    expect(out.llmText).not.toContain("other/c.ts"); // a path not searched is excluded
+    expect(out.event).toMatchObject({ data: { path: "src, test" } });
+  });
+
+  it("a missing path errors loudly and points at the array form", async () => {
+    await expect(grepTool(ws()).execute({ pattern: "x", path: "nope" })).rejects.toThrow(
+      /no such path "nope"\. Pass a single path, or an array of paths/,
+    );
   });
 });
 

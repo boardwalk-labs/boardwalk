@@ -167,13 +167,39 @@ describe("apply_patch — atomicity (NOTHING is written when any part fails)", (
     expect(readFileSync(join(dir, "exists.ts"), "utf8")).toBe("here");
   });
 
-  it("rejects an ambiguous hunk (matches more than once)", async () => {
+  it("rejects an ambiguous hunk and names the matching line numbers", async () => {
     const dir = ws();
     writeFileSync(join(dir, "f.ts"), "x\nx\n");
     await expect(
       applyPatchTool(dir).execute({ patch: patch("*** Update File: f.ts", "@@", "-x", "+y") }),
-    ).rejects.toThrow(/matched 2 locations/);
+    ).rejects.toThrow(/matched 2 locations \(lines 1, 2\)/);
     expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe("x\nx\n");
+  });
+
+  it("applies a uniformly under-indented hunk and preserves the file's indentation", async () => {
+    const dir = ws();
+    // File is indented 8 spaces; the model wrote the whole block at column 0 (a uniform -8 drift).
+    writeFileSync(join(dir, "f.ts"), "        first();\n        second();\n");
+    const result = rich(
+      await applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@", " first();", "-second();", "+changed();"),
+      }),
+    );
+    expect(result.event.humanSummary).toContain("1 change");
+    // The match succeeds despite the indentation drift, and the replacement keeps the 8-space indent.
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe("        first();\n        changed();\n");
+  });
+
+  it("still rejects a hunk whose indentation drift is non-uniform (no unsafe re-indent)", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "top();\n    inner();\n");
+    // Context line matches at delta 0 but the removed line would need delta 4 — not a uniform shift.
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@", " top();", "-inner();", "+changed();"),
+      }),
+    ).rejects.toThrow(/did not match/);
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe("top();\n    inner();\n");
   });
 
   it("rejects a delete/update of a missing file and an escaping path", async () => {
