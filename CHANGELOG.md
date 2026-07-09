@@ -65,9 +65,9 @@ Pre-1.0, changes ship as patch releases.
 
 ### Changed
 
-- Renamed the OpenAI-compatible reasoning encoder `reasoningToOpenRouter` to `reasoningToUnified`,
-  and the `ChatArgs.reasoningStyle` discriminant value `"openrouter"` to `"unified"` (the managed
-  lane's unified `reasoning` object). Breaking for direct callers of either symbol.
+- Renamed the OpenAI-compatible reasoning encoder to `reasoningToUnified`, and the
+  `ChatArgs.reasoningStyle` discriminant value to `"unified"` (the managed lane's unified
+  `reasoning` object). Breaking for direct callers of either symbol.
 
 ### Removed
 

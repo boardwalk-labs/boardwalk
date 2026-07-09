@@ -530,7 +530,7 @@ export class RunSupervisor {
       this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "running" });
       firstStartedAt = startedAt;
 
-      // Two budget caps (docs/SUSPENSION.md): max_duration_seconds is ACTIVE COMPUTE (suspended idle
+      // Two budget caps: max_duration_seconds is ACTIVE COMPUTE (suspended idle
       // never burns it) — applied as remaining-compute from this segment's start; deadline_seconds is
       // WALL-CLOCK from the original start (idle counts). The binding deadline is the sooner of the
       // two, and which one fires drives the failure message.
