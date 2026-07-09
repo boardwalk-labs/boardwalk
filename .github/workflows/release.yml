@@ -53,6 +53,8 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
-      # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older.
-      - run: npm install -g npm@latest
+      # Trusted Publishing needs a recent npm (>= 11.5.1); node 24's bundled npm may be older. Pin
+      # to the 11.x line: npm 12 ships a broken provenance path (`Cannot find module 'sigstore'`), so
+      # `npm@latest` (now 12.x) fails to publish. Stay on 11.x until 12's sigstore break is fixed.
+      - run: npm install -g npm@^11.5.1
       - run: npm publish --provenance --access public
