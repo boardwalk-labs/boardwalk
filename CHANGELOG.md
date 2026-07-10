@@ -3,6 +3,28 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.1.32
+
+### Added
+
+- **Multimodal image content through the managed lane.** The neutral conversation model gains a
+  `ContentPart` union (`text | image`), and user + tool-result content widen to
+  `string | ContentPart[]` — a bare string is exactly one text part, so text-only callers are
+  unchanged. Both adapters render images: Anthropic emits native `image` blocks in user messages AND
+  inside `tool_result`; the OpenAI-compatible adapter emits `image_url` data URLs in user messages
+  and, because a `tool` message is text-only there, re-emits a tool-result image as a trailing `user`
+  message (the tool block stays contiguous after the assistant's tool calls). `RichToolResult` gains
+  an optional `content` channel so a tool (e.g. a `screenshot`) can return an image, not just
+  `llmText`. Secret redaction scrubs text parts and passes image bytes through; context compaction
+  accounts for image parts. Assistant messages stay text-only (a model never emits an image).
+
+## 0.1.31
+
+### Added
+
+- **`McpServerRef.excludeTools`** is honored — named tools are pruned from what an `agent({ mcp })`
+  leaf sees, so an MCP server's arbitrary-code tools can be hidden from the model.
+
 ## 0.1.30
 
 ### Added
