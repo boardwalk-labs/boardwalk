@@ -30,10 +30,11 @@ export class Redactor {
     return out;
   }
 
-  /** Scrub secrets from message content that may be a bare string OR content parts (text + image):
-   *  text parts are redacted; image parts pass through unchanged. The secrets contract is over TEXT
-   *  (that is where an injected value can be exfiltrated); image bytes are covered by the separate
-   *  run-visibility posture, not this scrub. A bare string redacts exactly as `redact`. */
+  /** Scrub secrets from message content that may be a bare string OR content parts (text + file):
+   *  text parts are redacted; file parts (image/document bytes or a URL reference) pass through
+   *  unchanged. The secrets contract is over TEXT — that is where an injected value can be
+   *  exfiltrated — while file bytes/URLs are the trusted program's own asset references, covered by
+   *  the separate run-visibility posture, not this scrub. A bare string redacts exactly as `redact`. */
   redactContent(content: string | readonly ContentPart[]): string | readonly ContentPart[] {
     if (typeof content === "string") return this.redact(content);
     return content.map((part) =>

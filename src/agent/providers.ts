@@ -18,6 +18,7 @@ import type {
   ChatMessage,
   ChatTurn,
   ContentPart,
+  FileSource,
   ToolCallRequest,
   ToolSpec,
 } from "./conversation.js";
@@ -116,19 +117,35 @@ export function anthropicMessagesBody(args: {
   };
 }
 
-/** Neutral content → Anthropic content blocks. Images ride natively as a base64 `source`, valid in
- *  both a user message and a `tool_result` (Anthropic accepts image blocks inside tool results). A
- *  bare string is a single text block. */
+/** A file's MIME type → the modality an adapter renders it as. `image/*` is a native image block on
+ *  both providers; anything else (PDFs, office docs) is a document block. */
+function fileKind(mimeType: string): "image" | "document" {
+  return mimeType.startsWith("image/") ? "image" : "document";
+}
+
+/** Anthropic content `source` for a file part: a base64 blob, or a URL the API fetches. Exactly one
+ *  of `data`/`url` is set on the neutral `FileSource`; base64 wins if (defensively) both are. */
+function anthropicSource(file: FileSource): Record<string, unknown> {
+  return file.data !== undefined
+    ? { type: "base64", media_type: file.mimeType, data: file.data }
+    : { type: "url", url: file.url };
+}
+
+/** Neutral content → Anthropic content blocks. Files ride natively — an `image` block for `image/*`
+ *  and a `document` block otherwise — valid in both a user message and a `tool_result` (Anthropic
+ *  accepts image and document blocks inside tool results). A bare string is a single text block. */
 function anthropicContentBlocks(content: string | readonly ContentPart[]): unknown[] {
   const parts = typeof content === "string" ? [{ type: "text" as const, text: content }] : content;
-  return parts.map((part) =>
-    part.type === "text"
-      ? { type: "text", text: part.text }
-      : {
-          type: "image",
-          source: { type: "base64", media_type: part.image.mimeType, data: part.image.data },
-        },
-  );
+  return parts.map((part) => {
+    if (part.type === "text") return { type: "text", text: part.text };
+    const source = anthropicSource(part.file);
+    if (fileKind(part.file.mimeType) === "image") return { type: "image", source };
+    return {
+      type: "document",
+      source,
+      ...(part.file.filename !== undefined ? { title: part.file.filename } : {}),
+    };
+  });
 }
 
 function anthropicMessages(messages: readonly ChatMessage[]): unknown[] {
@@ -293,15 +310,28 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
 // `stream_options.include_usage`.
 // ----------------------------------------------------------------------------
 
+/** The URL an OpenAI-compatible content item uses for a file: a passed-through remote/`data:` URL, or
+ *  a base64 `data:` URI built from inline bytes. Exactly one of `data`/`url` is set; base64 wins. */
+function openAiFileUrl(file: FileSource): string {
+  return file.data !== undefined ? `data:${file.mimeType};base64,${file.data}` : (file.url ?? "");
+}
+
 /** Neutral content part → an OpenAI-compatible content item (for USER messages; `tool` messages are
- *  text-only and handled by the tool-result split below). Image = a base64 data URL. */
+ *  text-only and handled by the tool-result split below). `image/*` → an `image_url` item;
+ *  everything else → a `file` item (OpenAI's document input, e.g. PDFs). */
 function openAiContentItem(part: ContentPart): unknown {
-  return part.type === "text"
-    ? { type: "text", text: part.text }
-    : {
-        type: "image_url",
-        image_url: { url: `data:${part.image.mimeType};base64,${part.image.data}` },
-      };
+  if (part.type === "text") return { type: "text", text: part.text };
+  const url = openAiFileUrl(part.file);
+  if (fileKind(part.file.mimeType) === "image") {
+    return { type: "image_url", image_url: { url } };
+  }
+  return {
+    type: "file",
+    file: {
+      file_data: url,
+      ...(part.file.filename !== undefined ? { filename: part.file.filename } : {}),
+    },
+  };
 }
 
 function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
@@ -333,13 +363,13 @@ function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
         });
         break;
       case "tool_results": {
-        // Emit every tool message FIRST (each answers its tool_call_id), then any images as one
-        // trailing user message. OpenAI-compatible `tool` messages are TEXT-ONLY (an image on a tool
-        // message is rejected: "Image URLs are only allowed for messages with role 'user'"), and the
-        // tool block must stay contiguous after the assistant's tool_calls — so images can't be
-        // interleaved between tool messages. This keeps the tool_call ↔ tool_result pairing intact
-        // while still delivering the pixels (the portable pattern).
-        const images: ContentPart[] = [];
+        // Emit every tool message FIRST (each answers its tool_call_id), then any files (images and
+        // documents) as one trailing user message. OpenAI-compatible `tool` messages are TEXT-ONLY (a
+        // file on a tool message is rejected: "Image URLs are only allowed for messages with role
+        // 'user'"), and the tool block must stay contiguous after the assistant's tool_calls — so
+        // files can't be interleaved between tool messages. This keeps the tool_call ↔ tool_result
+        // pairing intact while still delivering the bytes (the portable pattern).
+        const files: ContentPart[] = [];
         for (const result of message.results) {
           if (typeof result.content === "string") {
             out.push({ role: "tool", tool_call_id: result.id, content: result.content });
@@ -349,15 +379,15 @@ function openAiMessages(messages: readonly ChatMessage[]): unknown[] {
             .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
             .map((p) => p.text)
             .join("\n");
-          images.push(...result.content.filter((p) => p.type === "image"));
+          files.push(...result.content.filter((p) => p.type === "file"));
           out.push({
             role: "tool",
             tool_call_id: result.id,
-            content: text.length > 0 ? text : "[see image in the following message]",
+            content: text.length > 0 ? text : "[see file in the following message]",
           });
         }
-        if (images.length > 0) {
-          out.push({ role: "user", content: images.map(openAiContentItem) });
+        if (files.length > 0) {
+          out.push({ role: "user", content: files.map(openAiContentItem) });
         }
         break;
       }

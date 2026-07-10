@@ -173,12 +173,21 @@ describe("anthropicMessagesBody reasoning encoding", () => {
 });
 
 describe("multimodal content", () => {
-  const imagePart = { type: "image" as const, image: { data: "AAAA", mimeType: "image/png" } };
+  const imagePart = { type: "file" as const, file: { data: "AAAA", mimeType: "image/png" } };
   const imageBlockAnthropic = {
     type: "image",
     source: { type: "base64", media_type: "image/png", data: "AAAA" },
   };
   const imageItemOpenAi = { type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } };
+
+  const urlImagePart = {
+    type: "file" as const,
+    file: { url: "https://example.com/y.png", mimeType: "image/png" },
+  };
+  const pdfPart = {
+    type: "file" as const,
+    file: { data: "JVBER", mimeType: "application/pdf", filename: "report.pdf" },
+  };
 
   it("anthropic renders an image in a user message as a base64 source block", () => {
     const body = anthropicMessagesBody({
@@ -258,8 +267,55 @@ describe("multimodal content", () => {
     expect(messages[0]).toEqual({
       role: "tool",
       tool_call_id: "c1",
-      content: "[see image in the following message]",
+      content: "[see file in the following message]",
     });
     expect(messages[1]).toEqual({ role: "user", content: [imageItemOpenAi] });
+  });
+
+  it("anthropic renders an image URL as a url source block", () => {
+    const body = anthropicMessagesBody({
+      messages: [{ role: "user", content: [urlImagePart] }],
+      tools: [],
+    });
+    const messages = body.messages as { content: unknown[] }[];
+    expect(messages[0]?.content).toEqual([
+      { type: "image", source: { type: "url", url: "https://example.com/y.png" } },
+    ]);
+  });
+
+  it("anthropic renders a PDF as a document block with a title", () => {
+    const body = anthropicMessagesBody({
+      messages: [{ role: "user", content: [pdfPart] }],
+      tools: [],
+    });
+    const messages = body.messages as { content: unknown[] }[];
+    expect(messages[0]?.content).toEqual([
+      {
+        type: "document",
+        source: { type: "base64", media_type: "application/pdf", data: "JVBER" },
+        title: "report.pdf",
+      },
+    ]);
+  });
+
+  it("openai passes a remote image URL through unchanged (no base64 re-encode)", async () => {
+    const { io, body } = recordingFetch();
+    await chatOpenAi(baseArgs({ messages: [{ role: "user", content: [urlImagePart] }] }), io);
+    const messages = body().messages as { content: unknown }[];
+    expect(messages[0]?.content).toEqual([
+      { type: "image_url", image_url: { url: "https://example.com/y.png" } },
+    ]);
+  });
+
+  it("openai renders a PDF as a file item with a data URL", async () => {
+    const { io, body } = recordingFetch();
+    await chatOpenAi(baseArgs({ messages: [{ role: "user", content: [pdfPart] }] }), io);
+    const messages = body().messages as { content: unknown }[];
+    expect(messages[0]?.content).toEqual([
+      {
+        type: "file",
+        file: { file_data: "data:application/pdf;base64,JVBER", filename: "report.pdf" },
+      },
+    ]);
   });
 });

@@ -7,6 +7,7 @@
 // input like any provider's.
 
 import { z } from "zod";
+import type { ContentPart } from "../agent/conversation.js";
 import { EngineError } from "../errors.js";
 import { JsonRpcClient, type McpTransport } from "./jsonrpc.js";
 
@@ -25,9 +26,11 @@ export interface McpToolInfo {
   inputSchema: Record<string, unknown>;
 }
 
-/** A tools/call outcome: flattened text for model context + the server's error flag. */
+/** A tools/call outcome + the server's error flag. `content` is flattened text in the common case;
+ *  when the server returns image blocks it becomes content parts (text + file) so the pixels reach
+ *  the model instead of being dropped to a `[image]` placeholder. */
 export interface McpCallResult {
-  content: string;
+  content: string | readonly ContentPart[];
   isError: boolean;
 }
 
@@ -45,7 +48,18 @@ const listToolsResultSchema = z.looseObject({
 });
 
 const callToolResultSchema = z.looseObject({
-  content: z.array(z.looseObject({ type: z.string(), text: z.string().optional() })).optional(),
+  // An MCP content block: `text` for text blocks, `data` (base64) + `mimeType` for image/audio blocks
+  // (the MCP `ImageContent` shape). Everything else degrades to a `[type]` placeholder.
+  content: z
+    .array(
+      z.looseObject({
+        type: z.string(),
+        text: z.string().optional(),
+        data: z.string().optional(),
+        mimeType: z.string().optional(),
+      }),
+    )
+    .optional(),
   isError: z.boolean().nullish(),
 });
 
@@ -132,7 +146,10 @@ export class McpConnection {
     );
   }
 
-  /** Invoke a server tool; content is flattened to model-bound text (non-text summarized). */
+  /** Invoke a server tool. Text blocks flatten to a model-bound string (the common case); when the
+   *  server returns an image block, the result becomes content parts so the image reaches the model
+   *  (a vision tool like a browser `screenshot` is otherwise dropped to `[image]`). Any other
+   *  non-text block still degrades to a `[type]` placeholder. */
   async callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
     const raw = await this.rpc.request("tools/call", { name, arguments: args });
     const parsed = callToolResultSchema.safeParse(raw);
@@ -142,12 +159,27 @@ export class McpConnection {
         `MCP server "${this.serverName}" returned a malformed tools/call response for "${name}".`,
       );
     }
-    const content = (parsed.data.content ?? [])
-      .map((item) =>
-        item.type === "text" && item.text !== undefined ? item.text : `[${item.type}]`,
-      )
-      .join("\n");
-    return { content, isError: parsed.data.isError ?? false };
+    const items = parsed.data.content ?? [];
+    const isError = parsed.data.isError ?? false;
+    // Only reach for content parts when an image is actually present — text-only results stay a plain
+    // string so the overwhelmingly common path and its consumers are unchanged.
+    const hasImage = items.some((item) => item.type === "image" && item.data !== undefined);
+    if (!hasImage) {
+      const content = items
+        .map((item) =>
+          item.type === "text" && item.text !== undefined ? item.text : `[${item.type}]`,
+        )
+        .join("\n");
+      return { content, isError };
+    }
+    const parts: ContentPart[] = items.map((item) => {
+      if (item.type === "text" && item.text !== undefined) return { type: "text", text: item.text };
+      if (item.type === "image" && item.data !== undefined) {
+        return { type: "file", file: { mimeType: item.mimeType ?? "image/png", data: item.data } };
+      }
+      return { type: "text", text: `[${item.type}]` };
+    });
+    return { content: parts, isError };
   }
 
   /** Tear the connection down (rejects anything in flight; kills/deletes transport state). */

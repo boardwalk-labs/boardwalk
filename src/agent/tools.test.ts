@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildToolSet, type ExecutableTool } from "./tools.js";
+import { buildToolSet, mcpResultToToolResult, type ExecutableTool } from "./tools.js";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -45,6 +45,46 @@ describe("buildToolSet — ambient <env> date", () => {
     expect(env).toBeDefined();
     expect(env).toContain("Today's date is");
     expect(env).not.toContain("clock");
+  });
+});
+
+describe("mcpResultToToolResult", () => {
+  it("returns a text-only result as a plain string", () => {
+    expect(mcpResultToToolResult("srv__tool", { content: "hello", isError: false })).toBe("hello");
+  });
+
+  it("wraps file-part content in a RichToolResult so images reach the model", () => {
+    const parts = [
+      { type: "text" as const, text: "screenshot" },
+      { type: "file" as const, file: { mimeType: "image/png", data: "AAAA" } },
+    ];
+    const result = mcpResultToToolResult("browser__screenshot", { content: parts, isError: false });
+    expect(result).toEqual({
+      llmText: "screenshot",
+      content: parts,
+      event: { kind: "mcp_tool_result", humanSummary: "browser__screenshot" },
+    });
+  });
+
+  it("falls back to a placeholder llmText when file content carries no text", () => {
+    const parts = [{ type: "file" as const, file: { mimeType: "image/png", data: "AAAA" } }];
+    const result = mcpResultToToolResult("browser__screenshot", { content: parts, isError: false });
+    expect(result).toMatchObject({
+      llmText: "[browser__screenshot returned a file]",
+      content: parts,
+    });
+  });
+
+  it("throws on the server error flag, surfacing the result text", () => {
+    expect(() => mcpResultToToolResult("srv__tool", { content: "boom", isError: true })).toThrow(
+      /boom/,
+    );
+  });
+
+  it("throws a named error when an error result has no content", () => {
+    expect(() => mcpResultToToolResult("srv__tool", { content: "", isError: true })).toThrow(
+      /MCP tool "srv__tool" reported an error with no content/,
+    );
   });
 });
 

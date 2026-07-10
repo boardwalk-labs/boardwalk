@@ -111,12 +111,11 @@ describe("McpConnection.listTools", () => {
 });
 
 describe("McpConnection.callTool", () => {
-  it("concatenates text content and summarizes non-text items", async () => {
+  it("concatenates text-only content into a plain string", async () => {
     const server = fakeServer({
       callResult: {
         content: [
           { type: "text", text: "line one" },
-          { type: "image", data: "...", mimeType: "image/png" },
           { type: "text", text: "line two" },
         ],
       },
@@ -124,7 +123,49 @@ describe("McpConnection.callTool", () => {
     const connection = new McpConnection(server.transport, { serverName: "srv" });
     await connection.initialize();
     const result = await connection.callTool("shot", {});
-    expect(result).toEqual({ content: "line one\n[image]\nline two", isError: false });
+    expect(result).toEqual({ content: "line one\nline two", isError: false });
+  });
+
+  it("carries an image block as a file content part so the model can see it", async () => {
+    const server = fakeServer({
+      callResult: {
+        content: [
+          { type: "text", text: "here" },
+          { type: "image", data: "aGk=", mimeType: "image/png" },
+        ],
+      },
+    });
+    const connection = new McpConnection(server.transport, { serverName: "srv" });
+    await connection.initialize();
+    const result = await connection.callTool("shot", {});
+    expect(result).toEqual({
+      content: [
+        { type: "text", text: "here" },
+        { type: "file", file: { mimeType: "image/png", data: "aGk=" } },
+      ],
+      isError: false,
+    });
+  });
+
+  it("defaults an image block with no mimeType to image/png", async () => {
+    const server = fakeServer({ callResult: { content: [{ type: "image", data: "aGk=" }] } });
+    const connection = new McpConnection(server.transport, { serverName: "srv" });
+    await connection.initialize();
+    const result = await connection.callTool("shot", {});
+    expect(result).toEqual({
+      content: [{ type: "file", file: { mimeType: "image/png", data: "aGk=" } }],
+      isError: false,
+    });
+  });
+
+  it("still degrades a non-text, non-image block to a [type] placeholder string", async () => {
+    const server = fakeServer({
+      callResult: { content: [{ type: "text", text: "note" }, { type: "resource" }] },
+    });
+    const connection = new McpConnection(server.transport, { serverName: "srv" });
+    await connection.initialize();
+    const result = await connection.callTool("shot", {});
+    expect(result).toEqual({ content: "note\n[resource]", isError: false });
   });
 
   it("surfaces the server's isError flag", async () => {

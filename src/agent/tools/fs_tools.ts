@@ -96,6 +96,52 @@ const MAX_LS_ENTRIES = 1000;
  */
 const DEFAULT_READ_LINES = 2000;
 const MAX_READ_CHARS = 100_000;
+
+/** File extensions `read` returns as an ATTACHMENT — a file content part the model sees directly
+ *  (image or document) — instead of UTF-8 text. Everything else is read as text. */
+const READABLE_FILE_MIME: Readonly<Record<string, string>> = {
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".pdf": "application/pdf",
+};
+
+/** Cap on an attachment `read` (raw bytes, pre-base64). A file over this is refused with guidance: a
+ *  multi-MB inline asset floods context and most providers reject oversized inline media anyway. */
+const MAX_READ_FILE_BYTES = 8 * 1024 * 1024;
+
+/** The attachment MIME for a path if `read` should return it as a file part, else undefined (text). */
+function attachmentMime(path: string): string | undefined {
+  const dot = path.lastIndexOf(".");
+  return dot < 0 ? undefined : READABLE_FILE_MIME[path.slice(dot).toLowerCase()];
+}
+
+/** Read an image/document file as a base64 file content part so the model sees the asset itself. The
+ *  model reads `llmText`; the part carries the bytes (subject to vision/document capability routing
+ *  downstream). Oversized files fail loudly rather than silently flooding context. */
+function readAttachment(file: string, path: string, mimeType: string): RichToolResult {
+  const bytes = readFileSync(file);
+  if (bytes.length > MAX_READ_FILE_BYTES) {
+    throw new EngineError(
+      "VALIDATION",
+      `read: "${path}" is ${String(bytes.length)} bytes — over the ${String(MAX_READ_FILE_BYTES)}-byte ` +
+        "attachment limit. Resize the image or extract the region you need first.",
+    );
+  }
+  const filename = path.slice(path.lastIndexOf("/") + 1);
+  const kind = mimeType.startsWith("image/") ? "image" : "document";
+  return {
+    llmText: `Read ${path} (${mimeType}, ${String(bytes.length)} bytes) — attached below.`,
+    content: [{ type: "file", file: { mimeType, data: bytes.toString("base64"), filename } }],
+    event: {
+      kind: "file_read",
+      humanSummary: `read ${path} (${kind})`,
+      data: { path, mimeType, bytes: bytes.length },
+    },
+  };
+}
 /** Directories never worth scanning in grep/glob fallbacks — they bloat results and slow scans. */
 const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".cache"]);
 
@@ -103,9 +149,10 @@ export function readTool(workspaceDir: string): ExecutableTool {
   return {
     name: "read",
     description:
-      `Read a UTF-8 text file from the workspace. Returns at most ${String(DEFAULT_READ_LINES)} ` +
+      `Read a file from the workspace. Text files return at most ${String(DEFAULT_READ_LINES)} ` +
       "lines by default; pass 1-based `offset` and `limit` to page a large file (or `grep` to " +
-      "locate the relevant span first).",
+      "locate the relevant span first). Images (png/jpg/gif/webp) and PDFs are returned as an " +
+      "attachment the model can see directly (requires a vision/document-capable model).",
     inputSchema: {
       type: "object",
       properties: {
@@ -123,6 +170,9 @@ export function readTool(workspaceDir: string): ExecutableTool {
         if (!existsSync(file) || statSync(file).isDirectory()) {
           throw new EngineError("VALIDATION", `read: no such file "${path}".`);
         }
+        // Images/PDFs come back as a file content part the model sees directly; text falls through.
+        const attachMime = attachmentMime(path);
+        if (attachMime !== undefined) return readAttachment(file, path, attachMime);
         const whole = readFileSync(file, "utf8");
         const offset = optionalPositiveInt(input["offset"], "offset");
         const limit = optionalPositiveInt(input["limit"], "limit");

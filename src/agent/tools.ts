@@ -23,7 +23,7 @@ import {
   loadSkillResource,
 } from "./skills.js";
 import { EngineError } from "../errors.js";
-import { McpConnection } from "../mcp/client.js";
+import { McpConnection, type McpCallResult } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";
 import { StdioTransport } from "../mcp/transport_stdio.js";
 import type { ContentPart, ToolSpec } from "./conversation.js";
@@ -39,9 +39,9 @@ import type { ToolHost } from "./tools/host_tools.js";
  */
 export interface RichToolResult {
   llmText: string;
-  /** Optional structured content (text + image parts) that becomes the ToolResultMessage.content the
-   *  model sees when set — lets a tool (e.g. `screenshot`) feed the model an image, not just
-   *  `llmText`. Omitted for text-only tools, where `llmText` IS the content. */
+  /** Optional structured content (text + file parts) that becomes the ToolResultMessage.content the
+   *  model sees when set — lets a tool (e.g. `read` on an image, or a browser `screenshot`) feed the
+   *  model a file, not just `llmText`. Omitted for text-only tools, where `llmText` IS the content. */
   content?: readonly ContentPart[];
   event: ToolReturn;
 }
@@ -316,20 +316,11 @@ export async function connectMcpServers(
           name: `${ref.name}__${tool.name}`,
           description: tool.description,
           inputSchema: tool.inputSchema,
-          execute: async (input: Record<string, unknown>): Promise<string> => {
-            const result = await connection.callTool(tool.name, input);
-            // isError throws so the loop's standard tool-failure path (tool_call_error event,
-            // error result back to the model) handles MCP and program tools identically.
-            if (result.isError) {
-              throw new EngineError(
-                "PROVIDER_ERROR",
-                result.content.length > 0
-                  ? result.content
-                  : `MCP tool "${tool.name}" reported an error with no content.`,
-              );
-            }
-            return result.content;
-          },
+          execute: async (input: Record<string, unknown>): Promise<ToolExecuteResult> =>
+            mcpResultToToolResult(
+              `${ref.name}__${tool.name}`,
+              await connection.callTool(tool.name, input),
+            ),
         });
       }
     }
@@ -338,6 +329,45 @@ export async function connectMcpServers(
     throw err;
   }
   return { tools, disconnect };
+}
+
+/** The model-bound text of an MCP result: the string as-is, or the joined text parts when the result
+ *  carries file content (image blocks travel as file parts, not text). */
+function mcpResultText(content: string | readonly ContentPart[]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((p): p is Extract<ContentPart, { type: "text" }> => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
+}
+
+/**
+ * An MCP tools/call outcome → a leaf tool result. A text-only result stays a plain string (the loop
+ * derives its own summary event); a result carrying file parts (e.g. a vision tool's image) becomes a
+ * RichToolResult so the parts flow to the model via the tool_result content seam (leaf.ts). The
+ * server's `isError` flag throws, so the loop's standard tool-failure path (tool_call_error event,
+ * error result back to the model) handles MCP and program tools identically.
+ */
+export function mcpResultToToolResult(
+  qualifiedName: string,
+  result: McpCallResult,
+): ToolExecuteResult {
+  if (result.isError) {
+    const errText = mcpResultText(result.content);
+    throw new EngineError(
+      "PROVIDER_ERROR",
+      errText.length > 0
+        ? errText
+        : `MCP tool "${qualifiedName}" reported an error with no content.`,
+    );
+  }
+  if (typeof result.content === "string") return result.content;
+  const text = mcpResultText(result.content);
+  return {
+    llmText: text.length > 0 ? text : `[${qualifiedName} returned a file]`,
+    content: result.content,
+    event: { kind: "mcp_tool_result", humanSummary: qualifiedName },
+  };
 }
 
 function transportFor(ref: McpServerRef, io: McpConnectIo): HttpTransport | StdioTransport {

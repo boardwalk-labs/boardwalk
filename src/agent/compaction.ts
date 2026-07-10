@@ -36,16 +36,17 @@ export const RECENT_TURNS_KEPT = 6;
 /** Per-message serialization overhead added to the char estimate (role tag, JSON punctuation). */
 const PER_MESSAGE_OVERHEAD_CHARS = 16;
 
-/** Estimated char cost of an image part in the size guardrail. A screenshot has no character length
- *  but does occupy real model context (hundreds+ of vision tokens); count it as a fixed chunk so an
- *  image-heavy loop compacts SOONER, never later (the safe direction). ~1.5k tokens at 4 chars/token. */
-const IMAGE_ESTIMATE_CHARS = 6_000;
+/** Estimated char cost of a file part (image or document) in the size guardrail. A file has no
+ *  character length but does occupy real model context (hundreds+ of vision/document tokens); count
+ *  it as a fixed chunk so a file-heavy loop compacts SOONER, never later (the safe direction).
+ *  ~1.5k tokens at 4 chars/token. */
+const FILE_ESTIMATE_CHARS = 6_000;
 
-/** Char estimate for message content that may be a bare string or content parts (text + image). */
+/** Char estimate for message content that may be a bare string or content parts (text + file). */
 function contentChars(content: string | readonly ContentPart[]): number {
   if (typeof content === "string") return content.length;
   return content.reduce(
-    (sum, part) => sum + (part.type === "text" ? part.text.length : IMAGE_ESTIMATE_CHARS),
+    (sum, part) => sum + (part.type === "text" ? part.text.length : FILE_ESTIMATE_CHARS),
     0,
   );
 }

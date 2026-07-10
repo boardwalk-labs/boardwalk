@@ -20,14 +20,27 @@ export interface ToolCallRequest {
 }
 
 /**
- * A single piece of user- or tool-result content. Images travel UP to the model only (user prompts
- * and tool results); a model never EMITS an image, so assistant content stays text-only. The neutral
- * form is inline base64 (`data`) + a MIME type — both provider adapters accept it, whereas a signed
- * URL would expire and isn't uniformly supported.
+ * A single piece of user- or tool-result content. Files (images and documents) travel UP to the
+ * model only (user prompts, attachments, and tool results); a model never EMITS a file, so assistant
+ * content stays text-only.
  */
-export type ContentPart =
-  | { type: "text"; text: string }
-  | { type: "image"; image: { data: string; mimeType: string } };
+export type ContentPart = { type: "text"; text: string } | { type: "file"; file: FileSource };
+
+/**
+ * A binary asset the model can read — an image (`image/*`) or a document (`application/pdf`, …).
+ * `mimeType` decides how each adapter renders it: `image/*` becomes a native image block, everything
+ * else a document block. The bytes are carried one of two ways, and EXACTLY ONE is set:
+ *  - `data`: inline base64 — provider-portable, the default form for locally-produced bytes.
+ *  - `url`: a `data:` URI or a remote `https:` URL the provider fetches. Remote URLs keep the wire
+ *    payload small but aren't accepted by every provider/modality (see the adapters).
+ * `filename` is an optional display/label hint, meaningful mainly for documents.
+ */
+export interface FileSource {
+  mimeType: string;
+  data?: string;
+  url?: string;
+  filename?: string;
+}
 
 export type ChatMessage =
   | { role: "user"; content: string | readonly ContentPart[] }

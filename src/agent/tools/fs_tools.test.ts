@@ -81,6 +81,45 @@ describe("read", () => {
     await expect(tool.execute({ path: "/etc/passwd" })).rejects.toThrow(/escapes the workspace/);
     await expect(tool.execute({ path: "nope.txt" })).rejects.toThrow(/no such file/);
   });
+
+  it("returns an image file as a base64 file content part the model can see", async () => {
+    const dir = ws();
+    const bytes = Buffer.from("PNGDATA");
+    writeFileSync(join(dir, "shot.png"), bytes);
+    const out = rich(await readTool(dir).execute({ path: "shot.png" }));
+    expect(out.content).toEqual([
+      {
+        type: "file",
+        file: { mimeType: "image/png", data: bytes.toString("base64"), filename: "shot.png" },
+      },
+    ]);
+    expect(out.llmText).toContain("image/png");
+    expect(out.event.kind).toBe("file_read");
+    expect(out.event.data).toMatchObject({ path: "shot.png", mimeType: "image/png" });
+  });
+
+  it("returns a PDF as an application/pdf file part", async () => {
+    const dir = ws();
+    const bytes = Buffer.from("%PDF-1.7");
+    writeFileSync(join(dir, "report.pdf"), bytes);
+    const out = rich(await readTool(dir).execute({ path: "report.pdf" }));
+    expect(out.content).toEqual([
+      {
+        type: "file",
+        file: {
+          mimeType: "application/pdf",
+          data: bytes.toString("base64"),
+          filename: "report.pdf",
+        },
+      },
+    ]);
+  });
+
+  it("refuses an oversized attachment rather than flooding context", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "huge.png"), Buffer.alloc(8 * 1024 * 1024 + 1));
+    await expect(readTool(dir).execute({ path: "huge.png" })).rejects.toThrow(/attachment limit/);
+  });
 });
 
 describe("write", () => {
