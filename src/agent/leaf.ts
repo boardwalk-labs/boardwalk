@@ -404,7 +404,31 @@ async function runLeafWithTools(
             `Respond with ONLY a JSON value matching this JSON Schema — no prose, no code fences:\n${JSON.stringify(opts.schema)}`,
           ];
     const firstMessage = [...preamble, prompt, ...schemaInstruction].join("\n\n");
-    messages = [{ role: "user", content: io.redactor.redact(firstMessage) }];
+    const promptText = io.redactor.redact(firstMessage);
+    // Attachments (images/documents from `agent({ attachments })`) ride the first user message as file
+    // content parts alongside the prompt text; with none, `content` stays a bare string (the common
+    // case, unchanged). Redaction covers the text; file bytes/URLs pass through (redactContent).
+    const attachments = opts?.attachments ?? [];
+    messages = [
+      {
+        role: "user",
+        content:
+          attachments.length === 0
+            ? promptText
+            : [
+                { type: "text", text: promptText },
+                ...attachments.map((a) => ({
+                  type: "file" as const,
+                  file: {
+                    mimeType: a.mimeType,
+                    ...(a.data !== undefined ? { data: a.data } : {}),
+                    ...(a.url !== undefined ? { url: a.url } : {}),
+                    ...(a.filename !== undefined ? { filename: a.filename } : {}),
+                  },
+                })),
+              ],
+      },
+    ];
     startIteration = 0;
   }
 

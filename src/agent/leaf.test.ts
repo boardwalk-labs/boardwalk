@@ -288,6 +288,42 @@ describe("runAgentLeaf — plain inference", () => {
     expect(sent).toContain("[redacted:api-key:local]");
   });
 
+  it("prepends agent({ attachments }) to the first user message as file content parts", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf(
+      "describe this",
+      { attachments: [{ mimeType: "image/png", data: "AAAA", filename: "shot.png" }] },
+      rec.io,
+    );
+    const body = rec.requests[0]?.body ?? "";
+    // The image reaches the model as an OpenAI image_url data URL, alongside the prompt text.
+    expect(body).toContain("image_url");
+    expect(body).toContain("data:image/png;base64,AAAA");
+    expect(body).toContain("describe this");
+  });
+
+  it("passes an attachment URL through to the model without re-encoding to base64", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf(
+      "look",
+      { attachments: [{ mimeType: "image/png", url: "https://example.com/y.png" }] },
+      rec.io,
+    );
+    const body = rec.requests[0]?.body ?? "";
+    expect(body).toContain("https://example.com/y.png");
+    expect(body).not.toContain("base64");
+  });
+
+  it("keeps the first user message a bare string when there are no attachments", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf("plain prompt", {}, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    // The user content is a bare string (the unchanged common case), not a content-part array.
+    expect(body).toContain("plain prompt");
+    expect(body).not.toContain("image_url");
+    expect(body).not.toContain('"content":[');
+  });
+
   it("retries 429 with backoff and does not retry a non-rate-limit 4xx", async () => {
     const retried = recordedIo(OPENAI_MODEL, [
       () => new Response("rate limited", { status: 429 }),
