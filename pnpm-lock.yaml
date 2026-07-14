@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@boardwalk-labs/workflow':
-        specifier: ^0.1.24
-        version: 0.1.24
+        specifier: ^0.1.29
+        version: 0.1.29
       zod:
         specifier: ^4.0.0
         version: 4.4.3
@@ -70,8 +70,8 @@ packages:
     resolution: {integrity: sha512-6zABk/ECA/QYSCQ1NGiVwwbQerUCZ+TQbp64Q3AgmfNvurHH0j8TtXa1qbShXA6qqkpAj4V5W8pP6mLe1mcMqA==}
     engines: {node: '>=18'}
 
-  '@boardwalk-labs/workflow@0.1.24':
-    resolution: {integrity: sha512-qMT1/zVADTCqIvmTeT3DKrfHEuKu4RJASNpqhiv1DZKQjlQzJC24P+cK4UZwQqVvDjwzYogO5iKodKczGMzzXg==}
+  '@boardwalk-labs/workflow@0.1.29':
+    resolution: {integrity: sha512-4MQE5I90dCG0URvT+UartWg5EljOM/DruzPwNy7sHW0IP6emDihuQdgx2oZAUyj9oq/uLBl705fHbaWg7oz+BA==}
     engines: {node: '>=24'}
 
   '@esbuild/aix-ppc64@0.27.7':
@@ -1229,7 +1229,7 @@ snapshots:
 
   '@bcoe/v8-coverage@1.0.2': {}
 
-  '@boardwalk-labs/workflow@0.1.24':
+  '@boardwalk-labs/workflow@0.1.29':
     dependencies:
       typescript: 5.9.3
       zod: 4.4.3

@@ -3,10 +3,10 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## Unreleased
+## 0.1.35
 
-Three self-correction improvements drawn from auditing a production run whose agents burned
-turns on path guessing and ambiguous patches:
+`agent({ cwd })` plus three self-correction improvements drawn from auditing a production run
+whose agents burned turns on path guessing and ambiguous patches:
 
 ### Added
 

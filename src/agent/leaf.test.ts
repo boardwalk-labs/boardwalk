@@ -871,8 +871,7 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
       ],
       { workspaceDir },
     );
-    const opts: AgentOptions & { cwd?: string } = { cwd: "checkout" };
-    const result = await runAgentLeaf("read the file", opts, rec.io);
+    const result = await runAgentLeaf("read the file", { cwd: "checkout" }, rec.io);
     expect(result).toBe("done");
     expect(rec.requests[1]?.body).toContain("repo contents");
     // The preamble orients the model with the CWD's entries, not the run root's.

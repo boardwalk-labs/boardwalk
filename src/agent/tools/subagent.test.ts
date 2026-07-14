@@ -97,8 +97,7 @@ describe("makeSubagentTool", () => {
   it("inherits the parent's cwd (the child sees the same working root)", async () => {
     const h = harness({ parentCwd: "checkout-cli" });
     await h.tool.execute({ prompt: "p" });
-    const childOpts = h.runs[0]?.opts as (AgentOptions & { cwd?: string }) | undefined;
-    expect(childOpts?.cwd).toBe("checkout-cli");
+    expect(h.runs[0]?.opts?.cwd).toBe("checkout-cli");
   });
 
   it("attenuates to a requested subset of the parent's tools", async () => {

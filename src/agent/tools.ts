@@ -195,14 +195,13 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
 
 /**
  * Extract the call's `cwd` (SDK ≥ 0.1.29): the workspace-relative directory the leaf works from.
- * Read via a narrow structural view + runtime-validated, both because AgentOptions comes straight
- * from user program code (the TS types are aspirational at runtime — same rule as the MCP refs
- * above) and because this engine may compile against SDK typings that predate the field; the
- * access tightens to `opts?.cwd` once the dependency is bumped. Empty string ⇒ omitted (the
- * LLM/author-empty-string case), matching the skill tool's treatment of optional strings.
+ * Runtime-validated despite the typed field because AgentOptions comes straight from user program
+ * code (the TS types are aspirational at runtime — same rule as the MCP refs above). Empty string
+ * ⇒ omitted (the LLM/author-empty-string case), matching the skill tool's treatment of optional
+ * strings.
  */
 export function leafCwd(opts: AgentOptions | undefined): string | undefined {
-  const raw = (opts as { cwd?: unknown } | undefined)?.cwd;
+  const raw: unknown = opts?.cwd;
   if (raw === undefined || raw === null || raw === "") return undefined;
   if (typeof raw !== "string") {
     throw new EngineError(

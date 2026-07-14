@@ -149,11 +149,8 @@ describe("buildToolSet — agent({ cwd })", () => {
     return root;
   }
 
-  /** `cwd` is typed on AgentOptions from SDK 0.1.29; the intersection keeps these tests cast-free
-   *  against older typings (it collapses to plain AgentOptions once the dependency is bumped). */
   function withCwd(cwd: string, rest: AgentOptions = {}): AgentOptions {
-    const opts: AgentOptions & { cwd?: string } = { ...rest, cwd };
-    return opts;
+    return { ...rest, cwd };
   }
 
   async function execute(

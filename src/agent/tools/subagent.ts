@@ -128,9 +128,7 @@ export function makeSubagentTool(deps: SubagentToolDeps): ExecutableTool {
 
       const model = input.model ?? deps.parentModel;
       const provider = input.provider ?? deps.parentProvider;
-      // `cwd` is typed on AgentOptions from SDK 0.1.29; the intersection keeps this cast-free
-      // against older typings and collapses to plain AgentOptions once the dependency is bumped.
-      const childOpts: AgentOptions & { cwd?: string } = {
+      const childOpts: AgentOptions = {
         builtins: childBuiltins,
         ...(deps.parentCwd !== undefined ? { cwd: deps.parentCwd } : {}),
         ...(childInline.length > 0 ? { tools: childInline } : {}),
