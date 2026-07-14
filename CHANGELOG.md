@@ -172,7 +172,7 @@ whose agents burned turns on path guessing and ambiguous patches:
 ### Changed
 
 - Renamed the OpenAI-compatible reasoning encoder to `reasoningToUnified`, and the
-  `ChatArgs.reasoningStyle` discriminant value to `"unified"` (the managed lane's unified
+  `ChatArgs.reasoningStyle` discriminant value to `"unified"` (the OpenAI-compatible unified
   `reasoning` object). Breaking for direct callers of either symbol.
 
 ### Removed
