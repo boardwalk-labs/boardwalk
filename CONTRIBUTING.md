@@ -17,6 +17,9 @@ so changes here are measured against the contract, not just the diff.
   calibration) lives in hosted Boardwalk and must never appear here — this engine _forwards_ to
   the managed gateway, it does not route. No private infrastructure details, account ids, or
   internal hostnames in code, comments, or fixtures.
+- **Commit metadata is public.** Do not include private session links, opaque session identifiers,
+  or non-public model names in commit messages or trailers. If attribution is required, use generic
+  wording such as "AI-assisted contribution" without a product or model identifier.
 - **The secrets invariant.** Secret values stay out of logs, run-event streams, error messages,
   and `agent()` context. If you touch the agent leaf, the child host, or error reporting, keep
   the redaction tests green and add to them.
