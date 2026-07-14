@@ -858,6 +858,27 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
     expect(rec.requests[1]?.body).toContain("the secret is in here");
   });
 
+  it("agent({ cwd }) re-roots the leaf through the whole loop: tools resolve checkout-relative", async () => {
+    const workspaceDir = tempDir("bw-cwd-ws-");
+    mkdirSync(join(workspaceDir, "checkout", "src"), { recursive: true });
+    writeFileSync(join(workspaceDir, "checkout", "src", "app.ts"), "repo contents", "utf8");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        // The model uses a clean checkout-relative path — no prefix guessing.
+        () => openAiToolCalls([{ id: "r1", name: "read", args: { path: "src/app.ts" } }]),
+        () => openAiText("done"),
+      ],
+      { workspaceDir },
+    );
+    const opts: AgentOptions & { cwd?: string } = { cwd: "checkout" };
+    const result = await runAgentLeaf("read the file", opts, rec.io);
+    expect(result).toBe("done");
+    expect(rec.requests[1]?.body).toContain("repo contents");
+    // The preamble orients the model with the CWD's entries, not the run root's.
+    expect(rec.requests[0]?.body).toContain("The workspace root contains: src/");
+  });
+
   it("deep-redacts a built-in tool's STRUCTURED event data, not just the model-bound text", async () => {
     // A built-in now publishes a structured tool_call_result (kind + data) to observers. If a known
     // secret rides in that data (here, a file `read` returns it), it must be scrubbed there too —
