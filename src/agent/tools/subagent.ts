@@ -29,6 +29,9 @@ export interface SubagentToolDeps {
   parentProvider: string | undefined;
   /** The parent's reasoning-effort control, inherited by the child (like model/provider). */
   parentReasoning: NormalizedReasoning | undefined;
+  /** The parent's `cwd`, inherited by the child — the parent's world IS its cwd, so paths in the
+   *  prompt it writes for the child only make sense from the same root. */
+  parentCwd: string | undefined;
   /** Derive the child's leaf io: fresh identity, shared sinks (io.forkLeaf, known present). */
   forkLeaf: (opts: { name?: string }) => LeafIo;
   /** The leaf runner (runAgentLeaf) — injected to avoid an import cycle with leaf.ts. */
@@ -125,8 +128,11 @@ export function makeSubagentTool(deps: SubagentToolDeps): ExecutableTool {
 
       const model = input.model ?? deps.parentModel;
       const provider = input.provider ?? deps.parentProvider;
-      const childOpts: AgentOptions = {
+      // `cwd` is typed on AgentOptions from SDK 0.1.29; the intersection keeps this cast-free
+      // against older typings and collapses to plain AgentOptions once the dependency is bumped.
+      const childOpts: AgentOptions & { cwd?: string } = {
         builtins: childBuiltins,
+        ...(deps.parentCwd !== undefined ? { cwd: deps.parentCwd } : {}),
         ...(childInline.length > 0 ? { tools: childInline } : {}),
         ...(model !== undefined ? { model } : {}),
         ...(provider !== undefined ? { provider } : {}),

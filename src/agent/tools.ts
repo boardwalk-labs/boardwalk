@@ -30,6 +30,7 @@ import type { ContentPart, ToolSpec } from "./conversation.js";
 import type { LspService } from "./lsp/index.js";
 import type { Redactor } from "./redact.js";
 import { selectBuiltins } from "./tools/registry.js";
+import { containedPath as containedWorkspacePath } from "./tools/sandbox.js";
 import type { ToolHost } from "./tools/host_tools.js";
 
 /**
@@ -127,9 +128,15 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   const mcp = validateMcpRefs(opts?.mcp);
   const preamble: string[] = [];
 
+  // `cwd` re-roots the leaf's WORKING view of the workspace: the built-in file tools (and bash's
+  // starting directory) resolve + confine under it, the `<env>` orientation describes it, and the
+  // workspace AGENTS.md tier is discovered from it. `memory` deliberately stays ROOT-relative — a
+  // memory dir is a stable cross-run identity, not a working location (see resolveMemoryDir).
+  const workspaceDir = resolveLeafWorkspaceDir(leafCwd(opts), ctx.workspaceDir);
+
   // Built-ins first (default-on, scoped by `builtins`), then the call's own inline tools on top.
   const tools: ExecutableTool[] = selectBuiltins(opts?.builtins, {
-    workspaceDir: ctx.workspaceDir,
+    workspaceDir,
     host: ctx.host,
     lspService: ctx.lspService,
   });
@@ -149,7 +156,7 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   // nothing to declare. TWO tiers: the BUNDLED package (programDir — the author's standing
   // instructions) then the run WORKSPACE (specific), concatenated general→specific, deduped when
   // the two roots are the same dir. "" when neither has an AGENTS.md (adds nothing).
-  const agentsMd = loadAgentsMd(ctx.workspaceDir, ctx.programDir);
+  const agentsMd = loadAgentsMd(workspaceDir, ctx.programDir);
   if (agentsMd !== "") preamble.push(agentsMd);
 
   // Skills: author-pinned, progressively disclosed. Inject a compact CATALOG (name + description) —
@@ -178,12 +185,51 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   preamble.push(
     buildEnvContext(new Date(), {
       hasClock: tools.some((t) => t.name === "clock"),
-      workspace: hasFsTools ? workspaceOrientation(ctx.workspaceDir) : null,
+      workspace: hasFsTools ? workspaceOrientation(workspaceDir) : null,
     }),
   );
 
   assertUniqueToolNames(tools);
   return { tools, preamble, memoryDir, mcp };
+}
+
+/**
+ * Extract the call's `cwd` (SDK ≥ 0.1.29): the workspace-relative directory the leaf works from.
+ * Read via a narrow structural view + runtime-validated, both because AgentOptions comes straight
+ * from user program code (the TS types are aspirational at runtime — same rule as the MCP refs
+ * above) and because this engine may compile against SDK typings that predate the field; the
+ * access tightens to `opts?.cwd` once the dependency is bumped. Empty string ⇒ omitted (the
+ * LLM/author-empty-string case), matching the skill tool's treatment of optional strings.
+ */
+export function leafCwd(opts: AgentOptions | undefined): string | undefined {
+  const raw = (opts as { cwd?: unknown } | undefined)?.cwd;
+  if (raw === undefined || raw === null || raw === "") return undefined;
+  if (typeof raw !== "string") {
+    throw new EngineError(
+      "VALIDATION",
+      "agent() `cwd` must be a string naming a workspace-relative directory.",
+    );
+  }
+  return raw;
+}
+
+/**
+ * Resolve a leaf's `cwd` against the run workspace root: contained (an escaping path fails loudly,
+ * never a silent clamp) and EXISTING as a directory — per the capability-presence rule, a location
+ * the call named must resolve before any model call, never silently degrade to the root.
+ */
+function resolveLeafWorkspaceDir(cwd: string | undefined, rootDir: string): string {
+  if (cwd === undefined) return rootDir;
+  const abs = containedWorkspacePath(rootDir, cwd);
+  if (!existsSync(abs) || !statSync(abs).isDirectory()) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() cwd "${cwd}" is not an existing directory in the workspace.`,
+      "cwd must name an existing workspace-relative directory — create it first (e.g. clone or " +
+        "mkdir in program code), or omit it to work from the workspace root.",
+    );
+  }
+  return abs;
 }
 
 /**
@@ -510,6 +556,9 @@ export const MEMORY_PATH_RE = /^(?!.*(?:^|\/)\.\.?(?:\/|$))[^/\\].*$/;
 function resolveMemoryDir(memory: string, ctx: ToolSetContext): { absoluteDir: string } {
   // Per-agent memory needs NO declaration — but the path is runtime input and must be a
   // clean workspace-relative directory (the engine auto-persists exactly this path).
+  // Deliberately resolved against the workspace ROOT even when the leaf sets `cwd`: a memory dir
+  // is a stable cross-run identity — re-rooting it would silently "lose" memories whenever a
+  // checkout directory is renamed, and agents sharing one memory across different cwds would break.
   if (!MEMORY_PATH_RE.test(memory) || memory.includes("\\")) {
     throw new EngineError(
       "VALIDATION",

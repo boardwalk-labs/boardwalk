@@ -10,6 +10,16 @@ turns on path guessing and ambiguous patches:
 
 ### Added
 
+- **`agent({ cwd })` — the workspace-relative directory a leaf works from** (SDK ≥ 0.1.29).
+  Re-roots the leaf's working view of the workspace: the built-in file tools resolve and confine
+  their paths under the `cwd`, `bash` starts there, the `<env>` workspace orientation describes it,
+  and the workspace-tier `AGENTS.md` is discovered from it — so a run driving several agents in
+  different checkouts gives each one clean repo-relative paths. The `cwd` must be an existing
+  directory inside the workspace (an absent path or an escape fails loudly before any model call —
+  never a silent fallback to the root). `memory` deliberately stays workspace-ROOT-relative (a
+  memory dir is a stable cross-run identity, not a working location), and a `subagent` inherits its
+  parent's `cwd`. Scoping and ergonomics, not a security boundary — the run's sandbox remains the
+  isolation boundary.
 - **"Did you mean" path hints on not-found errors.** When `read`/`edit`/`ls`/`grep`/`apply_patch`
   reject a path that doesn't exist, the error now suggests up to three near-miss workspace paths —
   path-suffix matches first (the repo-cloned-into-a-subdirectory case, where a model cites

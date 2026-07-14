@@ -57,6 +57,7 @@ function harness(
     parentModel: "anthropic/claude-sonnet-4.5",
     parentProvider: undefined,
     parentReasoning: undefined,
+    parentCwd: undefined,
     forkLeaf: (opts) => {
       forked.push(opts);
       return stubIo({
@@ -91,6 +92,13 @@ describe("makeSubagentTool", () => {
     const h = harness({ parentReasoning: { effort: "high" } });
     await h.tool.execute({ prompt: "p" });
     expect(h.runs[0]?.opts?.reasoning).toEqual({ effort: "high" });
+  });
+
+  it("inherits the parent's cwd (the child sees the same working root)", async () => {
+    const h = harness({ parentCwd: "checkout-cli" });
+    await h.tool.execute({ prompt: "p" });
+    const childOpts = h.runs[0]?.opts as (AgentOptions & { cwd?: string }) | undefined;
+    expect(childOpts?.cwd).toBe("checkout-cli");
   });
 
   it("attenuates to a requested subset of the parent's tools", async () => {

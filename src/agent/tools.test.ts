@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentOptions } from "@boardwalk-labs/workflow";
 import { buildToolSet, mcpResultToToolResult, type ExecutableTool } from "./tools.js";
 
 const cleanups: (() => void)[] = [];
@@ -135,5 +136,107 @@ describe("buildToolSet — skill tool", () => {
 
   it("treats an empty `file` as omitted, not a validation error (the LLM-empty-string case)", async () => {
     expect(await loadBody({ name: "reviewer", file: "" })).toContain("THE RUBRIC");
+  });
+});
+
+describe("buildToolSet — agent({ cwd })", () => {
+  /** A run workspace with a checkout under `repo/` — the multi-checkout shape cwd exists for. */
+  function repoWorkspace(): string {
+    const root = workspace();
+    mkdirSync(join(root, "repo", "src"), { recursive: true });
+    writeFileSync(join(root, "repo", "src", "app.ts"), "hello\n", "utf8");
+    writeFileSync(join(root, "root.txt"), "root\n", "utf8");
+    return root;
+  }
+
+  /** `cwd` is typed on AgentOptions from SDK 0.1.29; the intersection keeps these tests cast-free
+   *  against older typings (it collapses to plain AgentOptions once the dependency is bumped). */
+  function withCwd(cwd: string, rest: AgentOptions = {}): AgentOptions {
+    const opts: AgentOptions & { cwd?: string } = { ...rest, cwd };
+    return opts;
+  }
+
+  async function execute(
+    set: ReturnType<typeof buildToolSet>,
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<string> {
+    const tool = set.tools.find((t) => t.name === name);
+    if (tool === undefined) throw new Error(`expected a \`${name}\` tool`);
+    const out = await tool.execute(input);
+    return typeof out === "string" ? out : out.llmText;
+  }
+
+  it("re-roots the file tools: checkout-relative paths resolve under the cwd", async () => {
+    const root = repoWorkspace();
+    const set = buildToolSet(withCwd("repo"), { workspaceDir: root, skillsDir: null });
+    expect(await execute(set, "read", { path: "src/app.ts" })).toBe("hello\n");
+  });
+
+  it("confines the leaf to the cwd — a path climbing back to the root fails loudly", async () => {
+    const root = repoWorkspace();
+    const set = buildToolSet(withCwd("repo"), { workspaceDir: root, skillsDir: null });
+    await expect(execute(set, "read", { path: "../root.txt" })).rejects.toThrow(
+      /escapes the workspace/,
+    );
+  });
+
+  it("orients the model with the CWD's entries, not the run root's", () => {
+    const root = repoWorkspace();
+    const set = buildToolSet(withCwd("repo"), { workspaceDir: root, skillsDir: null });
+    const env = set.preamble.find((b) => b.includes("<env>"));
+    expect(env).toContain("The workspace root contains: src/");
+    expect(env).not.toContain("root.txt");
+  });
+
+  it("discovers workspace AGENTS.md from the cwd (the checkout's project rules)", () => {
+    const root = repoWorkspace();
+    writeFileSync(join(root, "repo", "AGENTS.md"), "REPO RULES", "utf8");
+    writeFileSync(join(root, "AGENTS.md"), "RUN-ROOT RULES", "utf8");
+    const set = buildToolSet(withCwd("repo"), { workspaceDir: root, skillsDir: null });
+    const joined = set.preamble.join("\n\n");
+    expect(joined).toContain("REPO RULES");
+    expect(joined).not.toContain("RUN-ROOT RULES");
+  });
+
+  it("keeps `memory` workspace-ROOT-relative (a stable cross-run identity, not a working location)", async () => {
+    const root = repoWorkspace();
+    const set = buildToolSet(withCwd("repo", { memory: "mem" }), {
+      workspaceDir: root,
+      skillsDir: null,
+    });
+    expect(set.memoryDir).toBe("mem");
+    await execute(set, "memory_write", { path: "note.md", content: "x" });
+    expect(existsSync(join(root, "mem", "note.md"))).toBe(true);
+    expect(existsSync(join(root, "repo", "mem", "note.md"))).toBe(false);
+  });
+
+  it("fails loudly when the cwd does not exist or is a file (never silently degrades to the root)", () => {
+    const root = repoWorkspace();
+    expect(() => buildToolSet(withCwd("nope"), { workspaceDir: root, skillsDir: null })).toThrow(
+      /cwd "nope" is not an existing directory/,
+    );
+    expect(() =>
+      buildToolSet(withCwd("root.txt"), { workspaceDir: root, skillsDir: null }),
+    ).toThrow(/not an existing directory/);
+  });
+
+  it("rejects a cwd escaping the workspace and a non-string cwd", () => {
+    const root = repoWorkspace();
+    expect(() => buildToolSet(withCwd("../out"), { workspaceDir: root, skillsDir: null })).toThrow(
+      /escapes the workspace/,
+    );
+    const bad = { cwd: 5 } as unknown as AgentOptions;
+    expect(() => buildToolSet(bad, { workspaceDir: root, skillsDir: null })).toThrow(
+      /`cwd` must be a string/,
+    );
+  });
+
+  it("treats an empty cwd as the workspace root (the empty-optional-string case)", () => {
+    const root = repoWorkspace();
+    const set = buildToolSet(withCwd(""), { workspaceDir: root, skillsDir: null });
+    const env = set.preamble.find((b) => b.includes("<env>"));
+    expect(env).toContain("repo/");
+    expect(env).toContain("root.txt");
   });
 });
