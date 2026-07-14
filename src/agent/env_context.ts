@@ -1,33 +1,91 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The ambient `<env>` context block prepended to the leaf preamble so the model knows "today"
-// without spending a tool round-trip on the common case (scheduling, "is this overdue?", relative
-// dates). It rides the SAME preamble channel as AGENTS.md/skills, so secret redaction covers it.
+// The ambient `<env>` context block prepended to the leaf preamble so the model knows "today" —
+// and, when the leaf has filesystem tools, what the workspace root looks like — without spending
+// tool round-trips on the common cases (scheduling, "is this overdue?", relative dates; and the
+// first `ls` every file-touching agent otherwise needs before it can name a correct path). It
+// rides the SAME preamble channel as AGENTS.md/skills, so secret redaction covers it.
 //
 // CACHE-SAFE BY CONSTRUCTION:
 //  - The leaf is append-only: the first user message (preamble + prompt) is built once and is the
-//    stable cache prefix for the whole tool loop, so this date — fixed for the run's lifetime — is
-//    byte-identical across every iteration. No intra-run cache churn.
+//    stable cache prefix for the whole tool loop, so this block — fixed for the run's lifetime —
+//    is byte-identical across every iteration. No intra-run cache churn.
 //  - It is the LAST preamble block (placed adjacent to the already-volatile prompt), so the maximal
 //    stable content (AGENTS.md/skills/memory) precedes it — forward-safe if the gateway ever splits
 //    the message into per-block cache breakpoints.
-//  - COARSE on purpose (calendar date, UTC, no time-of-day): stable for 24h and it never implies a
-//    precision the run-start snapshot doesn't have. Precise/zoned time is the `clock` tool's job.
+//  - COARSE on purpose (calendar date, UTC, no time-of-day; TOP-LEVEL workspace entries only): the
+//    date is stable for 24h and never implies a precision the run-start snapshot doesn't have, and
+//    the listing is orientation, not an inventory. Precise/zoned time is the `clock` tool's job;
+//    the live filesystem is `ls`'s.
 //
 // Captured at run start: a held run that resumes days later carries a stale date here — which is
-// exactly why `clock` exists (always fresh). The block points the model there when clock is present.
+// exactly why `clock` exists (always fresh) — and the listing goes stale as the agent itself writes
+// files, which is fine for the same reason (it orients the FIRST calls; `ls` is live).
+
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+
+/** Top-level entries beyond this many are folded into a "+N more" note — orientation, not `ls`. */
+const MAX_WORKSPACE_ENTRIES = 30;
+
+/** The workspace-orientation snapshot rendered into the `<env>` block: the root's top-level entry
+ *  names (directories marked with a trailing `/`), plus how many were folded away. */
+export interface WorkspaceOrientation {
+  entries: string[];
+  more: number;
+}
+
+/**
+ * Snapshot the workspace root's top-level entries for the `<env>` block, or null when the directory
+ * can't be read (the block simply omits the line — orientation is best-effort, never a failure).
+ */
+export function workspaceOrientation(workspaceDir: string): WorkspaceOrientation | null {
+  try {
+    const names = readdirSync(workspaceDir).sort();
+    const shown = names.slice(0, MAX_WORKSPACE_ENTRIES);
+    const entries = shown.map((name) => {
+      try {
+        return statSync(join(workspaceDir, name)).isDirectory() ? `${name}/` : name;
+      } catch {
+        return name; // dangling symlink etc. — the name still orients
+      }
+    });
+    return { entries, more: names.length - shown.length };
+  } catch {
+    return null;
+  }
+}
 
 /** Render the ambient `<env>` block for a run starting at `now`. `hasClock` adds a pointer to the
- *  `clock` tool (only when that tool is actually in the call's tool set). Kept to one content line
- *  so it costs ~25 prompt tokens. */
-export function buildEnvContext(now: Date, opts: { hasClock: boolean }): string {
+ *  `clock` tool (only when that tool is actually in the call's tool set); `workspace` adds the
+ *  root-orientation line (only when the leaf has filesystem tools). Kept to a couple of content
+ *  lines — this block is prompt overhead on every iteration. */
+export function buildEnvContext(
+  now: Date,
+  opts: { hasClock: boolean; workspace?: WorkspaceOrientation | null },
+): string {
   const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "long" }).format(
     now,
   );
   const isoDate = now.toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
   const dateLine = `Today's date is ${weekday}, ${isoDate} (UTC).`;
-  const line = opts.hasClock
-    ? `${dateLine} For the precise current time or another timezone, use the \`clock\` tool.`
-    : dateLine;
-  return `<env>\n${line}\n</env>`;
+  const lines = [
+    opts.hasClock
+      ? `${dateLine} For the precise current time or another timezone, use the \`clock\` tool.`
+      : dateLine,
+  ];
+  if (opts.workspace != null) lines.push(workspaceLine(opts.workspace));
+  return `<env>\n${lines.join("\n")}\n</env>`;
+}
+
+/** The one-line workspace orientation: what the root holds and that tool paths are relative to it. */
+function workspaceLine(ws: WorkspaceOrientation): string {
+  if (ws.entries.length === 0) {
+    return "The workspace is empty. File paths in tool calls are workspace-relative.";
+  }
+  const more = ws.more > 0 ? `, …(+${String(ws.more)} more)` : "";
+  return (
+    `The workspace root contains: ${ws.entries.join(", ")}${more} — ` +
+    "file paths in tool calls are workspace-relative."
+  );
 }

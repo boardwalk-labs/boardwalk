@@ -408,3 +408,75 @@ describe("diagnostics-after-edit", () => {
     expect(readFileSync(join(dir, "a.ts"), "utf8")).toBe("payload\n");
   });
 });
+
+describe("near-miss path hints on not-found errors", () => {
+  /** The observed failure shape: a repo cloned under a subdirectory while the model cites
+   *  repo-relative paths (e.g. findings from a diff review). */
+  function repoWs(): string {
+    const dir = ws();
+    mkdirSync(join(dir, "checkout-cli", "src", "commands"), { recursive: true });
+    writeFileSync(join(dir, "checkout-cli", "src", "commands", "session.test.ts"), "x\n");
+    return dir;
+  }
+
+  it("edit's not-found error suggests the path-suffix match in a subdirectory", async () => {
+    const dir = repoWs();
+    await expect(
+      editTool(dir).execute({ path: "src/commands/session.test.ts", old: "x", new: "y" }),
+    ).rejects.toThrow(/Did you mean "checkout-cli\/src\/commands\/session\.test\.ts"\?/);
+  });
+
+  it("read's not-found error suggests a basename match when no suffix matches", async () => {
+    const dir = repoWs();
+    await expect(readTool(dir).execute({ path: "session.test.ts" })).rejects.toThrow(
+      /Did you mean "checkout-cli\/src\/commands\/session\.test\.ts"\?/,
+    );
+  });
+
+  it("stays a bare not-found when nothing in the workspace is close", async () => {
+    const dir = repoWs();
+    const err = await readTool(dir)
+      .execute({ path: "totally/unrelated.md" })
+      .catch((e: unknown) => e);
+    expect(String(err)).toContain('no such file "totally/unrelated.md"');
+    expect(String(err)).not.toContain("Did you mean");
+  });
+
+  it("lists several candidates (capped) when the basename is common", async () => {
+    const dir = ws();
+    for (const sub of ["a", "b", "c", "d"]) {
+      mkdirSync(join(dir, sub), { recursive: true });
+      writeFileSync(join(dir, sub, "index.ts"), "x\n");
+    }
+    const err = await readTool(dir)
+      .execute({ path: "index.ts" })
+      .catch((e: unknown) => e);
+    expect(String(err)).toContain("Did you mean one of:");
+    // Capped at 3 candidates — a hint, not an inventory.
+    expect(String(err).match(/index\.ts"/g)?.length).toBeLessThanOrEqual(4); // 1 requested + 3 hints
+  });
+
+  it("ls hints at directories (not files) for a missing directory", async () => {
+    const dir = repoWs();
+    await expect(lsTool(dir).execute({ path: "src/commands" })).rejects.toThrow(
+      /Did you mean "checkout-cli\/src\/commands"\?/,
+    );
+  });
+
+  it("grep hints across files and directories", async () => {
+    const dir = repoWs();
+    await expect(grepTool(dir).execute({ pattern: "x", path: "src" })).rejects.toThrow(
+      /Did you mean "checkout-cli\/src"\?/,
+    );
+  });
+
+  it("never suggests matches inside skipped noise directories", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "node_modules", "pkg"), { recursive: true });
+    writeFileSync(join(dir, "node_modules", "pkg", "wanted.ts"), "x\n");
+    const err = await readTool(dir)
+      .execute({ path: "wanted.ts" })
+      .catch((e: unknown) => e);
+    expect(String(err)).not.toContain("Did you mean");
+  });
+});

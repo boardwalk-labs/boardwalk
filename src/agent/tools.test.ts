@@ -46,6 +46,22 @@ describe("buildToolSet — ambient <env> date", () => {
     expect(env).toContain("Today's date is");
     expect(env).not.toContain("clock");
   });
+
+  it("orients the model with the workspace root's top-level entries when fs tools are present", () => {
+    const ws = workspace();
+    mkdirSync(join(ws, "checkout-cli"));
+    writeFileSync(join(ws, "notes.txt"), "hi", "utf8");
+    const set = buildToolSet(undefined, { workspaceDir: ws, skillsDir: null });
+    const env = set.preamble.find((b) => b.includes("<env>"));
+    expect(env).toContain("The workspace root contains: checkout-cli/, notes.txt");
+    expect(env).toContain("workspace-relative");
+  });
+
+  it("omits the workspace line when the leaf has no filesystem tools", () => {
+    const set = buildToolSet({ builtins: "none" }, { workspaceDir: workspace(), skillsDir: null });
+    const env = set.preamble.find((b) => b.includes("<env>"));
+    expect(env).not.toContain("workspace root");
+  });
 });
 
 describe("mcpResultToToolResult", () => {

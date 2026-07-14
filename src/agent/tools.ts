@@ -14,7 +14,7 @@ import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
-import { buildEnvContext } from "./env_context.js";
+import { buildEnvContext, workspaceOrientation } from "./env_context.js";
 import { buildToolUseGuidance } from "./tool_guidance.js";
 import {
   listSkillFiles,
@@ -90,6 +90,19 @@ export interface ToolSetContext {
   lspService?: LspService;
 }
 
+/** The built-ins that touch the workspace filesystem — their presence is what makes the `<env>`
+ *  workspace-orientation line worth its tokens. */
+const FS_TOOL_NAMES = new Set([
+  "read",
+  "write",
+  "edit",
+  "ls",
+  "grep",
+  "glob",
+  "apply_patch",
+  "bash",
+]);
+
 export interface ToolSet {
   tools: ExecutableTool[];
   /** Context blocks (skills, memory index) prepended to the first user message. */
@@ -157,9 +170,17 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     memoryDir = opts.memory;
   }
 
-  // Ambient date goes LAST (adjacent to the prompt) so the stable content above stays a cacheable
-  // prefix — see env_context.ts. Captured at run start; the `clock` tool is the live source.
-  preamble.push(buildEnvContext(new Date(), { hasClock: tools.some((t) => t.name === "clock") }));
+  // Ambient env (date + workspace orientation) goes LAST (adjacent to the prompt) so the stable
+  // content above stays a cacheable prefix — see env_context.ts. Captured at run start; the `clock`
+  // tool and `ls` are the live sources. The workspace line appears only when the leaf actually has
+  // a filesystem-touching tool — a pure-inference or inline-tools-only leaf never needs it.
+  const hasFsTools = tools.some((t) => FS_TOOL_NAMES.has(t.name));
+  preamble.push(
+    buildEnvContext(new Date(), {
+      hasClock: tools.some((t) => t.name === "clock"),
+      workspace: hasFsTools ? workspaceOrientation(ctx.workspaceDir) : null,
+    }),
+  );
 
   assertUniqueToolNames(tools);
   return { tools, preamble, memoryDir, mcp };

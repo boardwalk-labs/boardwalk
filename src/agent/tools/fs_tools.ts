@@ -145,6 +145,76 @@ function readAttachment(file: string, path: string, mimeType: string): RichToolR
 /** Directories never worth scanning in grep/glob fallbacks — they bloat results and slow scans. */
 const SKIP_DIRS = new Set([".git", "node_modules", ".venv", "__pycache__", "dist", ".cache"]);
 
+/** Caps on the near-miss hunt for a not-found path: a hint must never turn a fast failure into a
+ *  slow one on a huge workspace, and more than a few candidates stops being a hint. */
+const NEAR_MISS_WALK_CAP = 20_000;
+const NEAR_MISS_LIMIT = 3;
+
+/**
+ * A "did you mean" suffix for a path-not-found error: workspace paths that end with the requested
+ * path (the repo-cloned-into-a-subdirectory case — the model cites a repo-relative path while the
+ * repo lives under `some-checkout/`) or that share its basename. "" when nothing is close. `kind`
+ * selects what to match so `ls` hints at directories and the file tools at files. Like
+ * similarLineHints, this is a HINT for the model's next attempt only — it is NEVER used to pick a
+ * target silently.
+ */
+export function nearMissPathHint(
+  workspaceDir: string,
+  requested: string,
+  kind: "file" | "dir" | "any" = "file",
+): string {
+  const hits = collectNearMisses(workspaceDir, requested, kind);
+  if (hits.length === 0) return "";
+  if (hits.length === 1) return ` Did you mean "${hits[0] ?? ""}"?`;
+  return ` Did you mean one of: ${hits.map((h) => `"${h}"`).join(", ")}?`;
+}
+
+/** Bounded workspace scan behind nearMissPathHint: path-suffix matches first (the strongest signal),
+ *  then same-basename matches, capped at NEAR_MISS_LIMIT. */
+function collectNearMisses(
+  workspaceDir: string,
+  requested: string,
+  kind: "file" | "dir" | "any",
+): string[] {
+  const clean = requested.replace(/\/+$/, "");
+  const base = clean.split("/").at(-1) ?? "";
+  if (base === "") return [];
+  const suffix = `/${clean}`;
+  const suffixHits: string[] = [];
+  const baseHits: string[] = [];
+  let visited = 0;
+  const scan = (dir: string): boolean => {
+    let entries: string[];
+    try {
+      entries = readdirSync(dir).sort();
+    } catch {
+      return true;
+    }
+    for (const name of entries) {
+      if (++visited > NEAR_MISS_WALK_CAP) return false;
+      const full = join(dir, name);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue; // dangling symlink etc.
+      }
+      const isDir = st.isDirectory();
+      if (isDir && SKIP_DIRS.has(name)) continue;
+      if (kind === "any" || (kind === "dir") === isDir) {
+        const rel = relative(workspaceDir, full);
+        if (`/${rel}`.endsWith(suffix)) suffixHits.push(rel);
+        else if (name === base) baseHits.push(rel);
+      }
+      if (suffixHits.length >= NEAR_MISS_LIMIT) return false;
+      if (isDir && !scan(full)) return false;
+    }
+    return true;
+  };
+  scan(workspaceDir);
+  return [...suffixHits, ...baseHits].slice(0, NEAR_MISS_LIMIT);
+}
+
 export function readTool(workspaceDir: string): ExecutableTool {
   return {
     name: "read",
@@ -168,7 +238,10 @@ export function readTool(workspaceDir: string): ExecutableTool {
         const path = requireString(input, "path");
         const file = containedPath(workspaceDir, path);
         if (!existsSync(file) || statSync(file).isDirectory()) {
-          throw new EngineError("VALIDATION", `read: no such file "${path}".`);
+          throw new EngineError(
+            "VALIDATION",
+            `read: no such file "${path}".${nearMissPathHint(workspaceDir, path)}`,
+          );
         }
         // Images/PDFs come back as a file content part the model sees directly; text falls through.
         const attachMime = attachmentMime(path);
@@ -270,7 +343,10 @@ export function editTool(workspaceDir: string, lsp?: LspService): ExecutableTool
       }
       const file = containedPath(workspaceDir, path);
       if (!existsSync(file) || statSync(file).isDirectory()) {
-        throw new EngineError("VALIDATION", `edit: no such file "${path}".`);
+        throw new EngineError(
+          "VALIDATION",
+          `edit: no such file "${path}".${nearMissPathHint(workspaceDir, path)}`,
+        );
       }
       const content = readFileSync(file, "utf8");
       const count = occurrences(content, oldText);
@@ -361,7 +437,10 @@ export function lsTool(workspaceDir: string): ExecutableTool {
         let total = 0;
         for (const { rel, abs } of targets) {
           if (!existsSync(abs) || !statSync(abs).isDirectory()) {
-            throw new EngineError("VALIDATION", `ls: no such directory "${rel || "."}".`);
+            throw new EngineError(
+              "VALIDATION",
+              `ls: no such directory "${rel || "."}".${nearMissPathHint(workspaceDir, rel, "dir")}`,
+            );
           }
           const entries = readdirSync(abs).sort().slice(0, MAX_LS_ENTRIES);
           total += entries.length;
@@ -411,8 +490,8 @@ export function grepTool(workspaceDir: string): ExecutableTool {
         if (!existsSync(abs)) {
           throw new EngineError(
             "VALIDATION",
-            `grep: no such path "${rel || "."}". Pass a single path, or an array of paths to ` +
-              "search several at once.",
+            `grep: no such path "${rel || "."}".${nearMissPathHint(workspaceDir, rel, "any")} ` +
+              "Pass a single path, or an array of paths to search several at once.",
           );
         }
       }

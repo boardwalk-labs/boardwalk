@@ -3,6 +3,29 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+Three self-correction improvements drawn from auditing a production run whose agents burned
+turns on path guessing and ambiguous patches:
+
+### Added
+
+- **"Did you mean" path hints on not-found errors.** When `read`/`edit`/`ls`/`grep`/`apply_patch`
+  reject a path that doesn't exist, the error now suggests up to three near-miss workspace paths —
+  path-suffix matches first (the repo-cloned-into-a-subdirectory case, where a model cites
+  repo-relative paths), then same-basename matches. A bounded scan, a hint only: the strict-match
+  contract is unchanged and nothing is ever edited at a guessed path.
+- **Workspace orientation in the `<env>` block.** A leaf with filesystem tools now sees a capped
+  listing of the workspace root's top-level entries (directories marked `/`) plus "file paths in
+  tool calls are workspace-relative" — so its first paths are grounded instead of guessed. Same
+  cache-safe placement as the date line (built once at leaf start; `ls` is the live source);
+  pure-inference and inline-tools-only leaves are unchanged.
+- **`@@` anchors in `apply_patch`.** Trailing text on a hunk's `@@` header (Codex-style
+  `@@ function name()`) now scopes an ambiguous hunk: the anchor names a line at or above the
+  target, and each anchor occurrence claims the nearest match at/after itself — exactly one
+  distinct claim applies; anything else still fails loudly (the anchor narrows, it never guesses).
+  The ambiguity error teaches the syntax.
+
 ## 0.1.32
 
 ### Added

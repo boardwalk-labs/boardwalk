@@ -15,7 +15,7 @@
 //   +line two
 //   *** Update File: path/to/existing.ts
 //   *** Move to: path/to/renamed.ts        (optional — present only for a rename)
-//   @@
+//   @@ optional anchor text
 //    context line (leading space)
 //   -removed line
 //   +added line
@@ -27,7 +27,9 @@
 // Update: standard unified-diff hunks (` ` context, `-` removed, `+` added) located by matching
 //   the removed+context lines to a UNIQUE spot — exact, else tolerating trailing whitespace or a
 //   uniform leading-indent shift (the replacement is re-indented to match); an optional
-//   `*** Move to:` renames the file.
+//   `*** Move to:` renames the file. Trailing text on the `@@` header (Codex-style
+//   `@@ function name()`) is an optional ANCHOR — a line at or above the target — used only to
+//   disambiguate a hunk that matches several spots; it narrows, it never guesses.
 // Delete: the file must exist; it is removed.
 
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -35,6 +37,7 @@ import { dirname } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { ExecutableTool, RichToolResult } from "../tools.js";
 import { createUnifiedDiff } from "./diff.js";
+import { nearMissPathHint } from "./fs_tools.js";
 import { capEventText } from "./result.js";
 import { containedPath } from "./sandbox.js";
 
@@ -48,6 +51,10 @@ interface Hunk {
   before: string[];
   /** Lines as they should appear after (context + added), in order. */
   after: string[];
+  /** Optional anchor from the `@@` header's trailing text (Codex-style `@@ function name()`): a
+   *  line ABOVE the target that scopes the match when the hunk alone is ambiguous. Null when the
+   *  header is a bare `@@`. */
+  anchor: string | null;
 }
 
 export function applyPatchTool(workspaceDir: string): ExecutableTool {
@@ -57,7 +64,8 @@ export function applyPatchTool(workspaceDir: string): ExecutableTool {
       "Apply a multi-file patch atomically (all files validated before any write; partial " +
       "application never happens). Envelope: `*** Begin Patch` … `*** End Patch` with " +
       "`*** Add File:`, `*** Update File:` (unified-diff `@@` hunks, optional `*** Move to:`), " +
-      "and `*** Delete File:` sections.",
+      "and `*** Delete File:` sections. Text after `@@` (e.g. `@@ function name()`) is an " +
+      "optional anchor — a line at or above the target — that pins a hunk matching several spots.",
     inputSchema: {
       type: "object",
       properties: {
@@ -192,6 +200,9 @@ export function parsePatch(patch: string): FileAction[] {
       }
       const hunks: Hunk[] = [];
       while (i < body.length && (body[i] ?? "").startsWith("@@")) {
+        // Trailing text on the @@ header is an optional anchor scoping an ambiguous hunk.
+        const anchorText = (body[i] ?? "").slice(2).trim();
+        const anchor = anchorText.length > 0 ? anchorText : null;
         i++; // consume the @@ line
         const before: string[] = [];
         const after: string[] = [];
@@ -218,7 +229,7 @@ export function parsePatch(patch: string): FileAction[] {
           }
           i++;
         }
-        hunks.push({ before, after });
+        hunks.push({ before, after, anchor });
       }
       if (hunks.length === 0) {
         throw new EngineError("VALIDATION", `apply_patch: update of "${path}" has no @@ hunks.`);
@@ -294,7 +305,8 @@ function planWrites(
       if (!existsSync(abs) || statSync(abs).isDirectory()) {
         throw new EngineError(
           "VALIDATION",
-          `apply_patch: cannot delete "${action.path}" — no such file.`,
+          `apply_patch: cannot delete "${action.path}" — no such file.` +
+            nearMissPathHint(workspaceDir, action.path),
         );
       }
       writes.push({ kind: "delete", path: abs });
@@ -304,7 +316,8 @@ function planWrites(
       if (!existsSync(abs) || statSync(abs).isDirectory()) {
         throw new EngineError(
           "VALIDATION",
-          `apply_patch: cannot update "${action.path}" — no such file.`,
+          `apply_patch: cannot update "${action.path}" — no such file.` +
+            nearMissPathHint(workspaceDir, action.path),
         );
       }
       const original = readFileSync(abs, "utf8");
@@ -334,7 +347,7 @@ function planWrites(
 function applyHunks(original: string, hunks: readonly Hunk[], path: string): string {
   let lines = original.split("\n");
   for (const hunk of hunks) {
-    const { at, reindent } = locate(lines, hunk.before, path);
+    const { at, reindent } = locate(lines, hunk, path);
     // reindent re-applies the file's actual indentation to the replacement when the hunk matched a
     // differently-indented block — so a whitespace-tolerant match never de-indents the result.
     const after = reindent(hunk.after);
@@ -424,19 +437,63 @@ function applyIndentDelta(line: string, delta: number): string {
   return line;
 }
 
-function ambiguousHunkError(path: string, matches: readonly number[]): EngineError {
+function ambiguousHunkError(
+  path: string,
+  matches: readonly number[],
+  anchor: string | null,
+): EngineError {
   // Name the matching line numbers so the model can add the surrounding context that pins the one it
   // means — instead of guessing blindly and burning turns (or abandoning apply_patch for a slower
   // one-edit-per-call fallback).
   const nums = matches.map((i) => i + 1);
   const shown = nums.slice(0, 5).map(String).join(", ");
   const more = nums.length > 5 ? `, …(+${String(nums.length - 5)} more)` : "";
+  const anchorAdvice =
+    anchor === null
+      ? "put an anchor on the @@ header — a unique line at or above the target, e.g. " +
+        '"@@ function name()" —'
+      : `the "@@ ${anchor}" anchor did not single one out; use a more specific anchor`;
   return new EngineError(
     "VALIDATION",
     `apply_patch: a hunk for "${path}" matched ${String(matches.length)} locations ` +
-      `(lines ${shown}${more}) — add enough surrounding context lines to the hunk to pin the ` +
-      "one you mean.",
+      `(lines ${shown}${more}) — ${anchorAdvice} or add enough surrounding context lines to the ` +
+      "hunk to pin the one you mean.",
   );
+}
+
+/** 0-based indices of lines matching an `@@` anchor: trimmed-exact matches when any exist (the
+ *  strongest signal), else substring matches (a model often anchors on a fragment of the line). */
+function findAnchorLines(lines: readonly string[], anchor: string): number[] {
+  const exact: number[] = [];
+  const loose: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? "";
+    if (line.trim() === anchor) exact.push(i);
+    else if (line.includes(anchor)) loose.push(i);
+  }
+  return exact.length > 0 ? exact : loose;
+}
+
+/**
+ * Disambiguate multiple hunk matches with the hunk's `@@` anchor: the anchor names a line at or
+ * above the intended match, so each anchor occurrence claims the nearest match at/after itself.
+ * Exactly one distinct claimed match wins; an absent anchor line or a still-ambiguous claim set
+ * returns null and the caller fails loudly — the anchor narrows, it never guesses.
+ */
+function resolveWithAnchor(
+  lines: readonly string[],
+  matches: readonly number[],
+  anchor: string,
+): number | null {
+  const anchorLines = findAnchorLines(lines, anchor);
+  if (anchorLines.length === 0) return null;
+  const claimed = new Set<number>();
+  for (const anchorAt of anchorLines) {
+    const match = matches.find((at) => at >= anchorAt);
+    if (match !== undefined) claimed.add(match);
+  }
+  if (claimed.size !== 1) return null;
+  return [...claimed][0] ?? null;
 }
 
 /**
@@ -446,13 +503,20 @@ function ambiguousHunkError(path: string, matches: readonly number[]): EngineErr
  * ambiguous is a loud failure. Matches how Codex/Aider/Cline apply patches — content-forgiving on
  * whitespace, never fuzzy on the actual text.
  */
-function locate(lines: readonly string[], before: readonly string[], path: string): Located {
+function locate(lines: readonly string[], hunk: Hunk, path: string): Located {
+  const { before, anchor } = hunk;
   if (before.length === 0) {
     throw new EngineError(
       "VALIDATION",
       `apply_patch: a hunk for "${path}" has no context or removed lines.`,
     );
   }
+  // Multiple matches in a tier fall through to the hunk's `@@` anchor (when present) before failing.
+  const disambiguate = (matches: readonly number[]): number => {
+    const resolved = anchor === null ? null : resolveWithAnchor(lines, matches, anchor);
+    if (resolved === null) throw ambiguousHunkError(path, matches, anchor);
+    return resolved;
+  };
   const tiers: ((line: string) => string)[] = [
     (line) => line, // exact
     (line) => line.replace(/[ \t]+$/, ""), // ignore trailing whitespace
@@ -460,7 +524,7 @@ function locate(lines: readonly string[], before: readonly string[], path: strin
   for (const normalize of tiers) {
     const matches = findBlockMatches(lines, before, normalize);
     if (matches.length === 1) return { at: matches[0] ?? 0, reindent: asIs };
-    if (matches.length > 1) throw ambiguousHunkError(path, matches);
+    if (matches.length > 1) return { at: disambiguate(matches), reindent: asIs };
   }
   // Leading-indent-tolerant tier: re-indent the replacement by the matched uniform delta.
   const lead = findLeadingOffsetMatches(lines, before);
@@ -468,11 +532,11 @@ function locate(lines: readonly string[], before: readonly string[], path: strin
     const { at, delta } = lead[0] ?? { at: 0, delta: 0 };
     return { at, reindent: (after) => after.map((l) => applyIndentDelta(l, delta)) };
   }
-  if (lead.length > 1)
-    throw ambiguousHunkError(
-      path,
-      lead.map((m) => m.at),
-    );
+  if (lead.length > 1) {
+    const at = disambiguate(lead.map((m) => m.at));
+    const delta = lead.find((m) => m.at === at)?.delta ?? 0;
+    return { at, reindent: (after) => after.map((l) => applyIndentDelta(l, delta)) };
+  }
 
   throw new EngineError(
     "VALIDATION",

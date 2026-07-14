@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -220,5 +220,131 @@ describe("apply_patch — atomicity (NOTHING is written when any part fails)", (
         patch: patch("*** Delete File: f.ts", "*** Update File: f.ts", "@@", "-z", "+y"),
       }),
     ).rejects.toThrow(/touched by more than one action/);
+  });
+});
+
+describe("apply_patch — @@ anchors (scoping an ambiguous hunk)", () => {
+  /** Two identical blocks under two distinct headers — unresolvable without an anchor. */
+  const TWIN_BLOCKS = [
+    'it("first case", () => {',
+    "  setup();",
+    "  check();",
+    "});",
+    'it("second case", () => {',
+    "  setup();",
+    "  check();",
+    "});",
+    "",
+  ].join("\n");
+
+  it("pins an ambiguous hunk to the block under the anchor line", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), TWIN_BLOCKS);
+    await applyPatchTool(dir).execute({
+      patch: patch(
+        "*** Update File: f.ts",
+        '@@ it("second case", () => {',
+        " setup();",
+        "-check();",
+        "+verify();",
+      ),
+    });
+    const out = readFileSync(join(dir, "f.ts"), "utf8");
+    // Only the second block changed; the first is untouched.
+    expect(out).toContain('it("first case", () => {\n  setup();\n  check();');
+    expect(out).toContain('it("second case", () => {\n  setup();\n  verify();');
+  });
+
+  it("matches the anchor as a substring when no line trim-equals it", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), TWIN_BLOCKS);
+    await applyPatchTool(dir).execute({
+      patch: patch(
+        "*** Update File: f.ts",
+        "@@ second case",
+        " setup();",
+        "-check();",
+        "+verify();",
+      ),
+    });
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toContain(
+      'it("second case", () => {\n  setup();\n  verify();',
+    );
+  });
+
+  it("fails loudly when the anchor claims no match (all matches precede it)", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "a\nb\na\nc\n");
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@ c", "-a", "+A"),
+      }),
+    ).rejects.toThrow(/did not single one out|matched 2 locations/);
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe("a\nb\na\nc\n");
+  });
+
+  it("fails loudly when the anchor is itself ambiguous across matches", async () => {
+    const dir = ws();
+    // The same header precedes BOTH identical blocks — the anchor cannot single one out.
+    const twice = "hdr()\nx\nhdr()\nx\n";
+    writeFileSync(join(dir, "f.ts"), twice);
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@ hdr()", "-x", "+y"),
+      }),
+    ).rejects.toThrow(/did not single one out/);
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe(twice);
+  });
+
+  it("an unmatched anchor keeps the plain ambiguity error (with the anchor advice)", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "x\nx\n");
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@ no-such-anchor", "-x", "+y"),
+      }),
+    ).rejects.toThrow(/did not single one out/);
+  });
+
+  it("a bare @@ ambiguity error teaches the anchor syntax", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "f.ts"), "x\nx\n");
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: f.ts", "@@", "-x", "+y"),
+      }),
+    ).rejects.toThrow(/put an anchor on the @@ header/);
+  });
+
+  it("disambiguates the leading-indent-tolerant tier too, re-indenting the replacement", async () => {
+    const dir = ws();
+    // Two identical 4-space-indented blocks; the hunk is written at column 0 (uniform drift).
+    writeFileSync(join(dir, "f.ts"), "one:\n    body();\ntwo:\n    body();\n");
+    await applyPatchTool(dir).execute({
+      patch: patch("*** Update File: f.ts", "@@ two:", "-body();", "+fixed();"),
+    });
+    expect(readFileSync(join(dir, "f.ts"), "utf8")).toBe("one:\n    body();\ntwo:\n    fixed();\n");
+  });
+});
+
+describe("apply_patch — near-miss path hints", () => {
+  it("suggests the subdirectory path on a not-found update", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "checkout", "src"), { recursive: true });
+    writeFileSync(join(dir, "checkout", "src", "app.ts"), "x\n");
+    await expect(
+      applyPatchTool(dir).execute({
+        patch: patch("*** Update File: src/app.ts", "@@", "-x", "+y"),
+      }),
+    ).rejects.toThrow(/Did you mean "checkout\/src\/app\.ts"\?/);
+  });
+
+  it("suggests on a not-found delete too", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "checkout"), { recursive: true });
+    writeFileSync(join(dir, "checkout", "old.ts"), "x\n");
+    await expect(
+      applyPatchTool(dir).execute({ patch: patch("*** Delete File: old.ts") }),
+    ).rejects.toThrow(/Did you mean "checkout\/old\.ts"\?/);
   });
 });
