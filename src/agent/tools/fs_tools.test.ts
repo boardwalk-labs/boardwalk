@@ -70,9 +70,9 @@ describe("read", () => {
     const dir = ws();
     writeFileSync(join(dir, "wide.txt"), "x".repeat(250_000));
     const out = rich(await readTool(dir).execute({ path: "wide.txt" })).llmText;
-    expect(out).toContain("capped at 100000 chars");
+    expect(out).toContain("capped at 40000 chars");
     // The content portion (before the note) is exactly the cap.
-    expect(out.slice(0, 100_000)).toBe("x".repeat(100_000));
+    expect(out.slice(0, 40_000)).toBe("x".repeat(40_000));
   });
 
   it("rejects a path escaping the workspace and a missing file", async () => {

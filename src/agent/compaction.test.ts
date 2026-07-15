@@ -2,10 +2,10 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_COMPACTION_BUDGET_CHARS,
+  DEFAULT_COMPACTION_BUDGET_TOKENS,
   dedupeFileReads,
-  estimateChars,
-  estimateConversationChars,
+  estimateConversationTokens,
+  estimateTokens,
   planCompaction,
 } from "./compaction.js";
 import type { ChatMessage } from "./conversation.js";
@@ -24,18 +24,45 @@ const toolResults = (id: string, content: string): ChatMessage => ({
 
 const FAT = "X".repeat(1000); // one message big enough to blow a small test budget
 
-describe("estimateChars", () => {
-  it("counts text plus a per-message overhead for each role", () => {
-    expect(estimateChars(user("abcd"))).toBe(4 + 16);
-    expect(estimateChars(assistantText("hi"))).toBe(2 + 16);
+describe("estimateTokens", () => {
+  const OVERHEAD = 4;
+
+  it("counts prose at the text density plus a per-message overhead", () => {
+    expect(estimateTokens(user("abcd"))).toBeCloseTo(4 / 4.0 + OVERHEAD, 5);
+    expect(estimateTokens(assistantText("hi"))).toBeCloseTo(2 / 4.0 + OVERHEAD, 5);
+  });
+
+  it("counts tool results at the DENSER json density, not the prose one", () => {
+    const body = "result-body";
+    expect(estimateTokens(toolResults("c1", body))).toBeCloseTo(body.length / 2.87 + OVERHEAD, 5);
+  });
+
+  it("splits an assistant turn: prose text, json-dense tool-call input", () => {
     const call = assistantCall("c1", "lookup");
-    expect(estimateChars(call)).toBe("lookup".length + JSON.stringify({ x: 1 }).length + 16);
-    expect(estimateChars(toolResults("c1", "result-body"))).toBe("result-body".length + 16);
+    const jsonChars = "lookup".length + JSON.stringify({ x: 1 }).length;
+    expect(estimateTokens(call)).toBeCloseTo(0 / 4.0 + jsonChars / 2.87 + OVERHEAD, 5);
+  });
+
+  /**
+   * The regression this whole change exists for. The old estimator treated every role as ~4
+   * chars/token, so a tool-result-dominated conversation — i.e. every real agent loop — was
+   * under-counted by ~40%, and the budget fired far later than intended (measured: a 600k-char
+   * trigger was really ~209k tokens, past a 200k model's window).
+   */
+  it("does NOT under-count a tool-result-heavy conversation the way a flat 4.0 ratio would", () => {
+    const body = "Y".repeat(100_000);
+    const flatFourEstimate = body.length / 4.0;
+    const actual = estimateTokens(toolResults("c1", body));
+    expect(actual).toBeGreaterThan(flatFourEstimate * 1.3);
+    expect(actual).toBeCloseTo(body.length / 2.87 + OVERHEAD, 0);
   });
 
   it("sums a whole conversation", () => {
     const msgs = [user("aaaa"), assistantText("bb")];
-    expect(estimateConversationChars(msgs)).toBe(estimateChars(msgs[0]!) + estimateChars(msgs[1]!));
+    expect(estimateConversationTokens(msgs)).toBeCloseTo(
+      estimateTokens(msgs[0]!) + estimateTokens(msgs[1]!),
+      5,
+    );
   });
 });
 
@@ -44,7 +71,7 @@ describe("planCompaction", () => {
     const msgs = [user("task"), assistantText("answer")];
     expect(planCompaction(msgs)).toBeNull();
     // The generous default budget never trips a small conversation.
-    expect(estimateConversationChars(msgs)).toBeLessThan(DEFAULT_COMPACTION_BUDGET_CHARS);
+    expect(estimateConversationTokens(msgs)).toBeLessThan(DEFAULT_COMPACTION_BUDGET_TOKENS);
   });
 
   it("returns null when over budget but there is no compressible middle", () => {

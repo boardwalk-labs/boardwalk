@@ -19,12 +19,41 @@
 import type { ChatMessage, ContentPart } from "./conversation.js";
 
 /**
- * Default compaction budget, in CHARACTERS of serialized message text (see estimateChars).
- * Deliberately GENEROUS — at the ~4-chars-per-token heuristic this is roughly 150k tokens, so
- * normal runs and every conformance workflow stay far below it. Compaction is a last resort for
- * a genuinely long run, never routine behavior that could change a short run's observable shape.
+ * Default compaction budget, in TOKENS (see estimateTokens).
+ *
+ * This was previously 600_000 CHARACTERS, justified as "roughly 150k tokens" on a flat
+ * ~4-chars-per-token assumption. That assumption was measured and found INVERTED for real agent
+ * traffic: a conversation is dominated by JSON tool I/O, which tokenizes at ~2.87 chars/token
+ * (o200k_base), not 4.0 — so the old trigger actually fired at ~209k tokens. That is past Claude
+ * Sonnet 4.6's 200k window and far past any 128k model, i.e. the guardrail under-counted tokens in
+ * exactly the case it exists to protect, and only very-large-window models survived a long run.
+ *
+ * 100k is a deliberately CONSERVATIVE step (roughly half the old effective ceiling), chosen so that
+ * with the per-tool caps in `tools/` bounding how much one turn can add, the peak request stays
+ * comfortably inside a 200k window. It is roughly cost-NEUTRAL (a lower budget means more compaction
+ * events, each costing a cache-bust plus a summary call, which offsets the smaller per-turn context)
+ * — the win is QUALITY: model accuracy degrades steeply with context length well before the window
+ * fills, so a long run should not sit near any model's ceiling.
+ *
+ * NOT yet model-aware: the leaf cannot see its model (resolution lives behind the `streamModel`
+ * seam), and on the managed `auto` lane the routed model — and therefore its window — is unknowable
+ * until the response comes back. A window-derived CEILING is a separate, later change; this budget is
+ * the primary control and must stand on its own. **This exact number is a considered guess pending a
+ * measured sweep** — see docs/AGENT_EFFICIENCY.md (P5).
  */
-export const DEFAULT_COMPACTION_BUDGET_CHARS = 600_000;
+export const DEFAULT_COMPACTION_BUDGET_TOKENS = 100_000;
+
+/**
+ * Chars-per-token by content kind, measured against `o200k_base` (2026-07-15): English prose 4.02,
+ * TypeScript source 4.13, JSON tool results 2.87. We keep two buckets rather than one flat number
+ * because the difference between them is the whole bug this replaces.
+ *
+ * These are ESTIMATES for a guardrail, not a tokenizer — the engine takes no tokenizer dependency
+ * (it would be per-provider wrong anyway). The loop calibrates them against the provider's OWN
+ * reported input-token count after every turn (see leaf.ts), so a bad constant self-corrects.
+ */
+const CHARS_PER_TOKEN_TEXT = 4.0;
+const CHARS_PER_TOKEN_JSON = 2.87;
 
 /**
  * Newest messages kept verbatim past the summary. Six leaves room for the latest
@@ -33,20 +62,21 @@ export const DEFAULT_COMPACTION_BUDGET_CHARS = 600_000;
  */
 export const RECENT_TURNS_KEPT = 6;
 
-/** Per-message serialization overhead added to the char estimate (role tag, JSON punctuation). */
-const PER_MESSAGE_OVERHEAD_CHARS = 16;
+/** Per-message serialization overhead added to the token estimate (role tag, JSON punctuation). */
+const PER_MESSAGE_OVERHEAD_TOKENS = 4;
 
-/** Estimated char cost of a file part (image or document) in the size guardrail. A file has no
- *  character length but does occupy real model context (hundreds+ of vision/document tokens); count
- *  it as a fixed chunk so a file-heavy loop compacts SOONER, never later (the safe direction).
- *  ~1.5k tokens at 4 chars/token. */
-const FILE_ESTIMATE_CHARS = 6_000;
+/** Estimated TOKEN cost of a file part (image or document). A file has no character length but does
+ *  occupy real model context (hundreds+ of vision/document tokens); count it as a fixed chunk so a
+ *  file-heavy loop compacts SOONER, never later (the safe direction). */
+const FILE_ESTIMATE_TOKENS = 1_500;
 
-/** Char estimate for message content that may be a bare string or content parts (text + file). */
-function contentChars(content: string | readonly ContentPart[]): number {
-  if (typeof content === "string") return content.length;
+/** Token estimate for message content that may be a bare string or content parts (text + file).
+ *  `charsPerToken` selects the density bucket — tool results are JSON-dense, prose is not. */
+function contentTokens(content: string | readonly ContentPart[], charsPerToken: number): number {
+  if (typeof content === "string") return content.length / charsPerToken;
   return content.reduce(
-    (sum, part) => sum + (part.type === "text" ? part.text.length : FILE_ESTIMATE_CHARS),
+    (sum, part) =>
+      sum + (part.type === "text" ? part.text.length / charsPerToken : FILE_ESTIMATE_TOKENS),
     0,
   );
 }
@@ -60,34 +90,42 @@ export interface CompactionPlan {
 }
 
 /**
- * Estimate a message's size in characters: its serialized text plus a small fixed overhead. The
- * provider has no token counter we can reach with zero deps, and char count tracks token count
- * closely enough for a guardrail (English ≈ 4 chars/token; JSON tool I/O runs denser, which only
- * makes us compact SOONER — the safe direction).
+ * Estimate a message's size in TOKENS, bucketing by how the content actually tokenizes:
+ *  - `user` prose and an assistant's natural-language text → CHARS_PER_TOKEN_TEXT
+ *  - `tool_results` content and an assistant's serialized `toolCalls` → CHARS_PER_TOKEN_JSON
+ *
+ * The provider exposes no token counter we can reach without a (per-provider wrong) tokenizer
+ * dependency, so this is a guardrail estimate. It is deliberately bucketed rather than flat: an
+ * agent loop's bulk is JSON tool I/O, and treating that as prose is what let the old char budget
+ * fire ~40% later than intended. The loop scales the result by a live calibration factor derived
+ * from the provider's own reported usage (leaf.ts), so residual error self-corrects.
  */
-export function estimateChars(message: ChatMessage): number {
+export function estimateTokens(message: ChatMessage): number {
   switch (message.role) {
     case "user":
-      return contentChars(message.content) + PER_MESSAGE_OVERHEAD_CHARS;
+      return contentTokens(message.content, CHARS_PER_TOKEN_TEXT) + PER_MESSAGE_OVERHEAD_TOKENS;
     case "assistant": {
-      let chars = message.text.length;
+      // Natural-language text tokenizes as prose; the serialized tool-call inputs are JSON-dense.
+      let tokens = message.text.length / CHARS_PER_TOKEN_TEXT;
       for (const call of message.toolCalls) {
-        chars += call.name.length + JSON.stringify(call.input).length;
+        tokens += (call.name.length + JSON.stringify(call.input).length) / CHARS_PER_TOKEN_JSON;
       }
-      return chars + PER_MESSAGE_OVERHEAD_CHARS;
+      return tokens + PER_MESSAGE_OVERHEAD_TOKENS;
     }
     case "tool_results": {
-      let chars = 0;
-      for (const result of message.results) chars += contentChars(result.content);
-      return chars + PER_MESSAGE_OVERHEAD_CHARS;
+      let tokens = 0;
+      for (const result of message.results) {
+        tokens += contentTokens(result.content, CHARS_PER_TOKEN_JSON);
+      }
+      return tokens + PER_MESSAGE_OVERHEAD_TOKENS;
     }
   }
 }
 
-/** Total estimated size of a conversation, in characters. */
-export function estimateConversationChars(messages: readonly ChatMessage[]): number {
+/** Total estimated size of a conversation, in tokens. */
+export function estimateConversationTokens(messages: readonly ChatMessage[]): number {
   let total = 0;
-  for (const message of messages) total += estimateChars(message);
+  for (const message of messages) total += estimateTokens(message);
   return total;
 }
 
@@ -105,10 +143,10 @@ export function estimateConversationChars(messages: readonly ChatMessage[]): num
  */
 export function planCompaction(
   messages: readonly ChatMessage[],
-  budgetChars: number = DEFAULT_COMPACTION_BUDGET_CHARS,
+  budgetTokens: number = DEFAULT_COMPACTION_BUDGET_TOKENS,
   recentKept: number = RECENT_TURNS_KEPT,
 ): CompactionPlan | null {
-  if (estimateConversationChars(messages) <= budgetChars) return null;
+  if (estimateConversationTokens(messages) <= budgetTokens) return null;
 
   // The head (index 0) and the tail (last `recentKept`) are sacrosanct; the candidate middle is
   // everything in between. With nothing in between, there is nothing to compress.
@@ -135,10 +173,12 @@ function isAssistantWithTools(message: ChatMessage | undefined): boolean {
 }
 
 /**
- * Minimum estimated chars a summary compaction must reclaim to be worth its own model call. Below
+ * Minimum estimated TOKENS a summary compaction must reclaim to be worth its own model call. Below
  * this, the cheap dedupe pass (or just proceeding) is preferable to paying for a summarization turn.
+ * (Was 50_000 CHARS, which at the JSON density this file now models is ~17k tokens — 15k keeps the
+ * same practical threshold while being expressed in the unit the budget is actually in.)
  */
-export const MIN_COMPACTION_RECLAIM_CHARS = 50_000;
+export const MIN_COMPACTION_RECLAIM_TOKENS = 15_000;
 
 /**
  * Replace all-but-the-newest `read` of each file path with a short pointer, IN PLACE, and return the

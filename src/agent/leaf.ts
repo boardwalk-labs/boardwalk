@@ -21,11 +21,11 @@ import type {
   ToolReturn,
 } from "@boardwalk-labs/workflow";
 import {
-  DEFAULT_COMPACTION_BUDGET_CHARS,
-  MIN_COMPACTION_RECLAIM_CHARS,
+  DEFAULT_COMPACTION_BUDGET_TOKENS,
+  MIN_COMPACTION_RECLAIM_TOKENS,
   dedupeFileReads,
-  estimateChars,
-  estimateConversationChars,
+  estimateConversationTokens,
+  estimateTokens,
   planCompaction,
 } from "./compaction.js";
 import { EngineError, type EngineErrorCode } from "../errors.js";
@@ -94,6 +94,73 @@ const CONSECUTIVE_ERROR_NUDGE_TEXT =
   "[Your last several tool calls have all failed. Step back and reconsider — try a different tool " +
   "or corrected inputs, re-read the current state to get your bearings, or produce your final " +
   "answer with what you have.]";
+
+/**
+ * Calibrates the conversation size estimate against ground truth. `estimateTokens` is a chars-based
+ * guardrail with hand-measured densities; the PROVIDER, meanwhile, reports exactly how many input
+ * tokens the request it just served actually cost. So after every turn we can compare what we
+ * estimated against what it really was, and scale future estimates by the ratio.
+ *
+ * Why this and not a tokenizer: the engine takes no tokenizer dependency (it would be wrong for some
+ * provider anyway), and — decisively — the loop cannot know its model. Resolution lives behind the
+ * `streamModel` seam, and on the managed `auto` lane the routed model isn't even chosen until the
+ * request lands. A feedback loop from the provider's own numbers needs none of that: it works on
+ * every lane, corrects a bad constant, and absorbs the system + tool-schema overhead the message
+ * estimate never counted (which is why the ratio typically settles above 1).
+ *
+ * Conservative by construction: we track a HIGH-water ratio (decaying slowly) rather than an average,
+ * because under-estimating context is the dangerous direction — it is what lets a conversation sail
+ * past the model's window before compaction ever fires. Over-estimating merely compacts a bit early.
+ *
+ * CAVEAT — cached tokens. On the managed lane `prompt_tokens` INCLUDES cache reads (they are a subset),
+ * so it is the true context size. Anthropic-native `input_tokens` EXCLUDES `cache_read_input_tokens`;
+ * that is safe today only because the BYO Anthropic path emits no `cache_control` and therefore
+ * caches nothing, so its count is complete. **If `cache_control` is ever added to the Anthropic
+ * adapter, this calibration silently under-counts and the adapter must report
+ * `input_tokens + cache_read_input_tokens + cache_creation_input_tokens` instead.**
+ *
+ * Exported for unit testing.
+ */
+export class ContextCalibrator {
+  /** Multiplier applied to the raw estimate. Starts neutral until a real turn is observed. */
+  private ratio = 1;
+
+  /** Clamp the learned ratio: a wild provider number must not disable the guardrail or force
+   *  constant compaction. 4x covers a badly-wrong density; 1.0 floors it at "trust the estimate". */
+  private static readonly MIN_RATIO = 1;
+  private static readonly MAX_RATIO = 4;
+  /** Decay the high-water mark slightly each turn so one outlier turn doesn't pin it forever. */
+  private static readonly DECAY = 0.98;
+
+  /** Fold in one turn's ground truth. `estimated` is what we predicted for the messages we SENT;
+   *  `actualInputTokens` is what the provider billed for that same request (undefined ⇒ ignore). */
+  observe(estimated: number, actualInputTokens: number | undefined): void {
+    if (actualInputTokens === undefined || actualInputTokens <= 0 || estimated <= 0) return;
+    const observed = actualInputTokens / estimated;
+    // High-water with slow decay: jump up immediately, drift down only as calmer turns accumulate.
+    this.ratio = Math.max(observed, this.ratio * ContextCalibrator.DECAY);
+    this.ratio = Math.min(
+      ContextCalibrator.MAX_RATIO,
+      Math.max(ContextCalibrator.MIN_RATIO, this.ratio),
+    );
+  }
+
+  /** The current multiplier. Exposed so a caller working in RAW estimate terms (planCompaction) can
+   *  convert a calibrated budget back down to the scale that function measures in. */
+  scale(): number {
+    return this.ratio;
+  }
+
+  /** The calibrated token estimate for a conversation. */
+  estimate(messages: readonly ChatMessage[]): number {
+    return estimateConversationTokens(messages) * this.ratio;
+  }
+
+  /** The calibrated estimate for a single message (used for the reclaim-worth check). */
+  estimateOne(message: ChatMessage): number {
+    return estimateTokens(message) * this.ratio;
+  }
+}
 
 /** A canonical, order-independent signature of a turn's tool calls, for repetition detection. */
 function turnSignature(toolCalls: readonly ToolCallRequest[]): string {
@@ -500,6 +567,8 @@ async function runToolLoop(
   const recentSignatures: string[] = [];
   // Consecutive turns whose every tool call errored (see CONSECUTIVE_ERROR_*). Reset by any success.
   let consecutiveErrorTurns = 0;
+  // Learns how our size estimate compares to the provider's real input-token count (see the class).
+  const calibrator = new ContextCalibrator();
   // Optional per-call ceiling on tool-calling turns (undefined ⇒ unbounded; see readMaxIterations).
   const cap = readMaxIterations(opts);
   // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
@@ -515,8 +584,11 @@ async function runToolLoop(
     // no model call), then — only if still over budget — summarize the oldest middle, reusing the
     // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
-    await reduceContextIfNeeded(messages, turnTools, opts, io);
+    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator);
 
+    // Snapshot what we PREDICTED for exactly the messages this call sends, so the provider's reported
+    // input-token count can be compared against it once the turn returns.
+    const predicted = estimateConversationTokens(messages);
     const { turn, modelRef } = await modelTurn(
       messages,
       turnTools,
@@ -525,6 +597,7 @@ async function runToolLoop(
       turnId,
       String(iteration),
     );
+    calibrator.observe(predicted, turn.usage.inputTokens);
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
     totals.outputTokens += turn.usage.outputTokens ?? 0;
@@ -617,24 +690,30 @@ async function reduceContextIfNeeded(
   tools: readonly ExecutableTool[],
   opts: AgentOptions | undefined,
   io: LeafIo,
+  calibrator: ContextCalibrator,
 ): Promise<void> {
-  if (estimateConversationChars(messages) <= DEFAULT_COMPACTION_BUDGET_CHARS) return;
+  if (calibrator.estimate(messages) <= DEFAULT_COMPACTION_BUDGET_TOKENS) return;
 
   // Cheap pass: drop stale duplicate file reads (no model call). Re-check before summarizing.
   dedupeFileReads(messages);
-  if (estimateConversationChars(messages) <= DEFAULT_COMPACTION_BUDGET_CHARS) return;
+  if (calibrator.estimate(messages) <= DEFAULT_COMPACTION_BUDGET_TOKENS) return;
 
-  const plan = planCompaction(messages, DEFAULT_COMPACTION_BUDGET_CHARS);
+  // planCompaction re-checks the budget against the RAW estimate, so hand it the budget in raw terms
+  // (i.e. undo the calibration) — otherwise a calibrated-up conversation would be judged in-budget by
+  // the planner and return null even though we are over.
+  const plan = planCompaction(messages, DEFAULT_COMPACTION_BUDGET_TOKENS / calibrator.scale());
   if (plan === null) return;
-  const rangeChars = messages
+  const rangeTokens = messages
     .slice(plan.start, plan.end + 1)
-    .reduce((sum, message) => sum + estimateChars(message), 0);
-  if (rangeChars < MIN_COMPACTION_RECLAIM_CHARS) return; // not worth a model call
+    .reduce((sum, message) => sum + calibrator.estimateOne(message), 0);
+  if (rangeTokens < MIN_COMPACTION_RECLAIM_TOKENS) return; // not worth a model call
 
   const summary = await summarizeForCompaction(messages, tools, opts, io);
   // Shrink guard: a digest no smaller than what it replaces is churn (and covers a model that
-  // ignored the instruction and echoed the transcript) — skip the splice.
-  if (summary.length >= rangeChars) return;
+  // ignored the instruction and echoed the transcript) — skip the splice. Compared in tokens, on the
+  // same footing as the range it would replace (a `user` message, so prose density).
+  const summaryTokens = calibrator.estimateOne({ role: "user", content: summary });
+  if (summaryTokens >= rangeTokens) return;
   messages.splice(plan.start, plan.end - plan.start + 1, {
     role: "user",
     content: io.redactor.redact(summary),

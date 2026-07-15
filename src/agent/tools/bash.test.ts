@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../../errors.js";
 import type { RichToolResult } from "../tools.js";
 import {
+  BoundedBuffer,
   assertEverySegmentAllowed,
   assertNoForbiddenConstructs,
   bashTool,
@@ -227,4 +228,63 @@ describe("bash tool — execution + traversal", () => {
       tool.execute({ command: 'node -e "setTimeout(()=>{}, 5000)"', timeoutMs: 150 }),
     ).rejects.toThrow(/timed out/);
   }, 10_000);
+});
+
+describe("BoundedBuffer", () => {
+  const push = (buf: BoundedBuffer, s: string): void => buf.push(Buffer.from(s, "utf8"));
+
+  it("keeps everything and reports no truncation when under the cap", () => {
+    const buf = new BoundedBuffer(100);
+    push(buf, "hello ");
+    push(buf, "world");
+    expect(buf.text()).toBe("hello world");
+    expect(buf.wasTruncated()).toBe(false);
+    expect(buf.truncatedNote()).toBe("");
+  });
+
+  /**
+   * The regression that motivated the head+tail rewrite: a build/test command puts its VERDICT last,
+   * and the old head-only buffer discarded exactly that. The tail must survive an arbitrarily long
+   * stream of output.
+   */
+  it("keeps the TAIL — the verdict — no matter how much output precedes it", () => {
+    const buf = new BoundedBuffer(200);
+    push(buf, "START");
+    for (let i = 0; i < 500; i++) push(buf, `noise line ${String(i)} ................\n`);
+    push(buf, "FAILED: 3 assertions");
+
+    const text = buf.text();
+    expect(text).toContain("FAILED: 3 assertions"); // the answer survived
+    expect(text.startsWith("START")).toBe(true); // so did the head
+    expect(buf.wasTruncated()).toBe(true);
+    expect(text).toContain("elided from the middle");
+  });
+
+  it("never exceeds its byte budget (plus the elision marker)", () => {
+    const buf = new BoundedBuffer(200);
+    for (let i = 0; i < 100; i++) push(buf, "X".repeat(50));
+    // head + tail are bounded by `limit`; the marker itself is small and bounded.
+    expect(Buffer.byteLength(buf.text(), "utf8")).toBeLessThan(200 + 80);
+  });
+
+  it("splits the budget head/tail and reports the elided byte count", () => {
+    const buf = new BoundedBuffer(100); // head 30, tail 70
+    push(buf, "H".repeat(30));
+    push(buf, "M".repeat(1000)); // all middle — evicted
+    push(buf, "T".repeat(70));
+
+    const text = buf.text();
+    expect(text.startsWith("H".repeat(30))).toBe(true);
+    expect(text.endsWith("T".repeat(70))).toBe(true);
+    expect(text).toMatch(/…\[1000 bytes elided from the middle]…/);
+  });
+
+  it("handles a single chunk larger than the whole budget", () => {
+    const buf = new BoundedBuffer(100);
+    push(buf, "A".repeat(30) + "B".repeat(500) + "C".repeat(70));
+    const text = buf.text();
+    expect(text.startsWith("A".repeat(30))).toBe(true);
+    expect(text.endsWith("C".repeat(70))).toBe(true);
+    expect(buf.wasTruncated()).toBe(true);
+  });
 });

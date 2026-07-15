@@ -32,8 +32,16 @@ import { containedPath } from "./sandbox.js";
 /** Default per-call timeout; the model can lower it, never raise it past {@link MAX_TIMEOUT_MS}. */
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_TIMEOUT_MS = 600_000;
-/** Output cap — a runaway command (e.g. `cat` of a huge file) can't flood the model context. */
-const MAX_OUTPUT_BYTES = 64 * 1024;
+/**
+ * Per-stream output cap — a runaway command (e.g. `cat` of a huge file) can't flood the model
+ * context. Applied to stdout and stderr SEPARATELY, so this is half the worst-case per call.
+ *
+ * Was 64 KiB per stream: ~23k tokens each at the measured JSON/log density, so one noisy command
+ * could add ~45k tokens. 32 KiB is ~11k tokens per stream. Lowering it is only safe because
+ * {@link BoundedBuffer} now keeps the head AND the tail — under the old head-only truncation a
+ * smaller cap would have discarded more of the verdict, which is the part worth having.
+ */
+const MAX_OUTPUT_BYTES = 32 * 1024;
 
 /**
  * Root commands allowed to start a segment. A coding-agent set: VCS, the JS/Python toolchains,
@@ -577,39 +585,83 @@ function formatResult(
   return parts.join("\n");
 }
 
-/** A byte-bounded accumulator — stops collecting past the cap and remembers it truncated. */
-class BoundedBuffer {
-  private readonly chunks: Buffer[] = [];
-  private size = 0;
-  private truncated = false;
+/**
+ * A byte-bounded accumulator that keeps the HEAD **and** the TAIL of a command's output, eliding the
+ * middle.
+ *
+ * This used to keep the head only and discard everything past the cap — which threw away precisely
+ * the part that matters. A build or test run puts its context up front and its VERDICT at the end
+ * (the failing assertion, the compiler summary, the stack trace), so head-only truncation dropped the
+ * answer and kept the preamble, and the model then re-ran the command to try to see it. Keeping both
+ * ends costs the same bytes and preserves the useful content.
+ *
+ * The head is captured first; once it is full, later chunks accrue in a tail window that evicts from
+ * the front, so the last `tailLimit` bytes always survive no matter how much output streams by.
+ *
+ * Exported for unit testing.
+ */
+export class BoundedBuffer {
+  private readonly head: Buffer[] = [];
+  private headSize = 0;
+  private readonly tail: Buffer[] = [];
+  private tailSize = 0;
+  /** Bytes dropped from the middle — reported so the model knows the gap is there. */
+  private elided = 0;
 
-  constructor(private readonly limit: number) {}
+  private readonly headLimit: number;
+  private readonly tailLimit: number;
+
+  /** `limit` is the TOTAL byte budget, split between the two ends. The tail gets the larger share:
+   *  the verdict lives there, and the head only needs enough to identify what ran. */
+  constructor(private readonly limit: number) {
+    this.headLimit = Math.floor(limit * 0.3);
+    this.tailLimit = limit - this.headLimit;
+  }
 
   push(chunk: Buffer): void {
-    if (this.size >= this.limit) {
-      this.truncated = true;
-      return;
+    let rest = chunk;
+    // Fill the head first.
+    if (this.headSize < this.headLimit) {
+      const room = this.headLimit - this.headSize;
+      const take = rest.subarray(0, room);
+      this.head.push(take);
+      this.headSize += take.length;
+      rest = rest.subarray(take.length);
+      if (rest.length === 0) return;
     }
-    const room = this.limit - this.size;
-    if (chunk.length > room) {
-      this.chunks.push(chunk.subarray(0, room));
-      this.size = this.limit;
-      this.truncated = true;
-    } else {
-      this.chunks.push(chunk);
-      this.size += chunk.length;
+    // Everything after the head goes to the tail window, evicting the oldest to stay in budget.
+    this.tail.push(rest);
+    this.tailSize += rest.length;
+    while (this.tailSize > this.tailLimit) {
+      const oldest = this.tail[0];
+      if (oldest === undefined) break;
+      const over = this.tailSize - this.tailLimit;
+      if (oldest.length <= over) {
+        this.tail.shift();
+        this.tailSize -= oldest.length;
+        this.elided += oldest.length;
+      } else {
+        this.tail[0] = oldest.subarray(over);
+        this.tailSize -= over;
+        this.elided += over;
+      }
     }
   }
 
   text(): string {
-    return Buffer.concat(this.chunks).toString("utf8");
+    const head = Buffer.concat(this.head).toString("utf8");
+    if (this.elided === 0) return head + Buffer.concat(this.tail).toString("utf8");
+    const tail = Buffer.concat(this.tail).toString("utf8");
+    return `${head}\n…[${String(this.elided)} bytes elided from the middle]…\n${tail}`;
   }
 
   wasTruncated(): boolean {
-    return this.truncated;
+    return this.elided > 0;
   }
 
   truncatedNote(): string {
-    return this.truncated ? `\n…[output truncated at ${String(this.limit)} bytes]` : "";
+    return this.elided > 0
+      ? `\n…[output capped at ${String(this.limit)} bytes — head + tail kept, middle elided]`
+      : "";
   }
 }

@@ -7,12 +7,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { EngineError } from "../errors.js";
 import { startFakeMcpServer } from "../testing/fake_mcp.js";
 import {
+  ContextCalibrator,
   extractJsonCandidate,
   runAgentLeaf,
   type LeafEventBody,
   type LeafIo,
   type ModelTurnRequest,
 } from "./leaf.js";
+import type { ChatMessage } from "./conversation.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
 import { Redactor } from "./redact.js";
 import type { ResolvedModel } from "./resolve.js";
@@ -1619,5 +1621,63 @@ describe("runAgentLeaf — subagent", () => {
       return b.kind === "turn_ended" && b.agentId === "agent-2";
     });
     expect(childEnded).toBeDefined();
+  });
+});
+
+describe("ContextCalibrator", () => {
+  const msgs = (chars: number): ChatMessage[] => [{ role: "user", content: "X".repeat(chars) }];
+
+  it("is neutral before any turn is observed (trusts the raw estimate)", () => {
+    const c = new ContextCalibrator();
+    expect(c.scale()).toBe(1);
+    // 400 prose chars ≈ 100 tokens + per-message overhead.
+    expect(c.estimate(msgs(400))).toBeCloseTo(104, 0);
+  });
+
+  it("learns the provider's real ratio and scales estimates by it", () => {
+    const c = new ContextCalibrator();
+    // The request really cost 2x what we predicted (system + tool schemas we never counted).
+    c.observe(1000, 2000);
+    expect(c.scale()).toBeCloseTo(2, 5);
+    expect(c.estimate(msgs(400))).toBeCloseTo(104 * 2, 0);
+  });
+
+  it("ignores a turn with no reported usage, and nonsense values", () => {
+    const c = new ContextCalibrator();
+    c.observe(1000, undefined);
+    c.observe(1000, 0);
+    c.observe(0, 5000);
+    expect(c.scale()).toBe(1);
+  });
+
+  /** Under-estimating context is the dangerous direction — it is what let a conversation sail past
+   *  the model's window before compaction fired. So the ratio jumps UP at once and only drifts down. */
+  it("jumps up immediately but decays down only slowly (conservative)", () => {
+    const c = new ContextCalibrator();
+    c.observe(1000, 3000); // a fat turn: ratio 3
+    expect(c.scale()).toBeCloseTo(3, 5);
+
+    c.observe(1000, 1000); // a calm turn would imply ratio 1 — must NOT drop straight there
+    expect(c.scale()).toBeGreaterThan(2.9);
+
+    for (let i = 0; i < 50; i++) c.observe(1000, 1000);
+    expect(c.scale()).toBeLessThan(2); // …but sustained calm does bring it down
+  });
+
+  it("clamps the ratio so a wild provider number can't disable or pin the guardrail", () => {
+    const high = new ContextCalibrator();
+    high.observe(1, 1_000_000);
+    expect(high.scale()).toBe(4); // MAX_RATIO
+
+    const low = new ContextCalibrator();
+    low.observe(1000, 10); // provider under-reports wildly
+    expect(low.scale()).toBe(1); // floored: never estimate BELOW the raw estimate
+  });
+
+  it("estimateOne scales a single message the same way", () => {
+    const c = new ContextCalibrator();
+    c.observe(1000, 2000);
+    const one: ChatMessage = { role: "user", content: "X".repeat(400) };
+    expect(c.estimateOne(one)).toBeCloseTo(c.estimate([one]), 5);
   });
 });

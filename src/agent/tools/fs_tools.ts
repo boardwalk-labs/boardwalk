@@ -92,10 +92,18 @@ const MAX_LS_ENTRIES = 1000;
  * MAX_READ_CHARS characters regardless. A whole large file dumped into context is the single
  * biggest source of wasted tokens (and it then rides in context for the rest of the loop); the
  * model can page with `offset`/`limit` or locate with `grep`. The cap is applied at READ time, so
- * it never rewrites history — it is prompt-cache-safe, unlike retroactive pruning.
+ * it never rewrites history — it is prompt-cache-safe, unlike retroactive pruning. That property is
+ * why capping HERE is the right lever: eviction after the fact reclaims tokens but busts the prompt
+ * cache, which at the hit rates a real loop sustains takes ~10 turns just to break even.
+ *
+ * MAX_READ_CHARS was 100_000 — about 24k TOKENS of source at the measured ~4.13 chars/token, so a
+ * single turn fanning out four reads could add ~97k tokens, half the whole compaction budget, in one
+ * step. 40_000 chars is ~10k tokens: still a generous whole-file read, but it keeps a fan-out turn's
+ * growth bounded well inside the budget. Anthropic's own context-management cookbook measures
+ * file-read results at ~96% of an agent's context, so this is the dominant term.
  */
 const DEFAULT_READ_LINES = 2000;
-const MAX_READ_CHARS = 100_000;
+const MAX_READ_CHARS = 40_000;
 
 /** File extensions `read` returns as an ATTACHMENT — a file content part the model sees directly
  *  (image or document) — instead of UTF-8 text. Everything else is read as text. */
