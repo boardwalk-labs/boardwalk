@@ -47,9 +47,6 @@ export interface InitMessage {
   input: unknown;
   config: Record<string, JsonValue>;
   manifest: WorkflowManifest;
-  /** The replay frontier: the highest journaled seq (0 on a fresh run). On a resume/restart the
-   *  child replays seams ≤ this and SUPPRESSES their observability (already emitted last segment). */
-  replayFrontier: number;
 }
 
 export interface HostResultMessage {
@@ -71,7 +68,6 @@ export const parentToChildSchema = z.union([
     input: z.unknown(),
     config: z.record(z.string(), z.unknown()),
     manifest: z.record(z.string(), z.unknown()),
-    replayFrontier: z.number().int().nonnegative(),
   }),
   z.object({
     type: z.literal("host_result"),
@@ -97,10 +93,11 @@ export const HOST_METHODS = [
   "web_search",
   "resolve_model",
   "mcp_token",
-  // Durable suspension: the child memoizes durable-seam results through the journal so a
-  // re-executed run (crash-restart or resume) returns them instead of recomputing.
-  "journal_get",
-  "journal_put",
+  // Human-in-the-loop gate: the call HOLDS (the promise stays pending, the process stays alive)
+  // until a person answers via the control surface; the supervisor resolves it with the
+  // validated response. The run's crash model is restart-from-top, so nothing is memoized —
+  // an answered gate survives a restart via its human_input_requests row, looked up by key.
+  "human_input",
 ] as const;
 export type HostMethod = (typeof HOST_METHODS)[number];
 
@@ -145,35 +142,6 @@ export const childToParentSchema = z.union([
     dir: z.string().min(1),
   }),
   z.object({
-    // Durable suspension: the program reached a seam that releases the process until an external
-    // event (a human answer; a timer; a child run finalizing). The supervisor persists the wake
-    // condition + a pending journal entry, then kills this child; resume re-spawns and replays.
-    type: z.literal("suspend"),
-    reason: z.enum(["human_input", "sleep", "workflow_call"]),
-    /** The suspending seam's synchronous seq (the journal key). */
-    seq: z.number().int().positive(),
-    fingerprint: z.string().min(1),
-    /** Present for reason "workflow_call": the durable child run the parent is parked on. The
-     *  child's finalize wakes the parent (the parent re-attaches + reads the child's output). */
-    childRunId: z.string().min(1).optional(),
-    /** Present for reason "human_input": the gate to open. */
-    humanInput: z
-      .object({
-        key: z.string().min(1),
-        prompt: z.string(),
-        /** The input form (text | choice | multiselect); validated when a response is submitted. */
-        inputSpec: z.unknown(),
-        assignees: z.array(z.string()).optional(),
-      })
-      .optional(),
-    /** Present for a TOOL-level gate (the model's `human_input` mid-leaf): the leaf's transcript
-     *  checkpoint, stored on the suspended journal entry so the leaf resumes where it paused. */
-    leafCheckpoint: z.unknown().optional(),
-    /** Present for reason "sleep": the relative wait in ms. The supervisor computes the absolute
-     *  wake time with ITS clock, so the wake is consistent with the scheduler (and test clocks). */
-    durationMs: z.number().int().positive().optional(),
-  }),
-  z.object({
     type: z.literal("done"),
     output: z.unknown(),
     outputDeclared: z.boolean(),
@@ -191,27 +159,28 @@ export type ChildToParent = z.infer<typeof childToParentSchema>;
 
 // Host-call argument schemas, validated supervisor-side before acting.
 export const getSecretArgsSchema = z.strictObject({ name: z.string().min(1) });
-/** run_workflow (fire-and-forget) args: no journal seam, so no seq/fingerprint. */
+/** call_workflow / run_workflow args. call_workflow HOLDS until the child run is terminal (the
+ *  child's run row is the durable memo — a restarted parent re-attaches via the idempotency key
+ *  instead of spawning a second child); run_workflow is the fire-and-forget sibling. */
 export const callWorkflowArgsSchema = z.strictObject({
   slug: z.string().min(1),
   input: z.unknown(),
   idempotencyKey: z.string().min(1).optional(),
 });
-/** call_workflow (durable child-wait) args: carry the seam's seq + fingerprint so the supervisor
- *  can journal the wait (pending → resolved) and the parent can suspend until the child finalizes. */
-export const callWorkflowJournaledArgsSchema = z.strictObject({
-  seq: z.number().int().positive(),
-  fingerprint: z.string().min(1),
-  slug: z.string().min(1),
-  input: z.unknown(),
-  idempotencyKey: z.string().min(1).optional(),
+/** The supervisor's call_workflow reply: the completed child's output. A failed/cancelled child
+ *  surfaces as an IPC error, not a reply. Re-validated child-side. */
+export const callWorkflowReplySchema = z.strictObject({ output: z.unknown() });
+/** human_input: open (or re-attach to) a gate and HOLD until a person answers. */
+export const humanInputArgsSchema = z.strictObject({
+  key: z.string().min(1),
+  prompt: z.string(),
+  /** The input form (text | choice | multiselect); validated when a response is submitted. */
+  inputSpec: z.unknown(),
+  assignees: z.array(z.string()).optional(),
 });
-/** The supervisor's call_workflow reply: the child's output if it already finished, or its run id
- *  (so the child can park `waiting_for_child`) if it is still running. Re-validated child-side. */
-export const callWorkflowReplySchema = z.discriminatedUnion("status", [
-  z.strictObject({ status: z.literal("completed"), output: z.unknown() }),
-  z.strictObject({ status: z.literal("running"), childRunId: z.string().min(1) }),
-]);
+/** The supervisor's human_input reply: the person's validated response. Re-validated child-side
+ *  only for shape — the supervisor already validated it against the gate's input spec. */
+export const humanInputReplySchema = z.strictObject({ response: z.unknown() });
 export const writeArtifactArgsSchema = z.strictObject({
   name: z.string().min(1),
   contentType: z.string().min(1),
@@ -276,34 +245,6 @@ export const mcpTokenArgsSchema = z.strictObject({
   invalidateToken: z.string().min(1).optional(),
 });
 
-/** The durable-seam kinds the journal memoizes (mirrors the store's JournalKind). */
-const journalKindIpc = z.enum(["agent", "step", "human_input", "sleep", "workflow_call"]);
-
-/** journal_get: look up a seam's memoized entry by its synchronous seq. */
-export const journalGetArgsSchema = z.strictObject({ seq: z.number().int().positive() });
-
-/** journal_put: record a seam's entry (idempotent supervisor-side on run_id+seq). */
-export const journalPutArgsSchema = z.strictObject({
-  seq: z.number().int().positive(),
-  kind: journalKindIpc,
-  fingerprint: z.string().min(1),
-  label: z.string().optional(),
-  state: z.enum(["pending", "resolved"]),
-  result: z.unknown().optional(),
-});
-
-/** The supervisor's journal_get response — the memoized entry, or null on a miss. Re-validated
- *  child-side before use. */
-export const journalEntryResultSchema = z
-  .strictObject({
-    seq: z.number().int().positive(),
-    kind: journalKindIpc,
-    fingerprint: z.string(),
-    // `suspended` is a parked agent leaf the child resumes from its checkpoint (+ joined answers).
-    state: z.enum(["pending", "suspended", "resolved"]),
-    result: z.unknown(),
-  })
-  .nullable();
 /** The supervisor's mcp_token response. null accessToken ⇒ interaction would be required —
  *  the hint names the `engine.authorizeMcpServer(...)` call that fixes it. */
 export const mcpTokenResultSchema = z.strictObject({

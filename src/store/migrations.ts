@@ -170,11 +170,23 @@ const V3_SQL = `
 ALTER TABLE runs ADD COLUMN active_ms INTEGER NOT NULL DEFAULT 0;
 `;
 
+// v4 — the North Star deletion (Phase D). The whole process is the durable unit now: waits HOLD
+// the run's process (no release, no replay), so the journal that memoized durable-seam results
+// and the timed-wake column are gone. human_input_requests SURVIVES — its row is the durable
+// answer slot a restarted program re-reads by key (its \`seq\` column stays as an informational
+// per-run gate counter).
+const V4_SQL = `
+DROP TABLE run_journal;
+DROP INDEX runs_wake_at;
+ALTER TABLE runs DROP COLUMN wake_at;
+`;
+
 /** Every migration the engine knows, ascending. Append-only — never edit a shipped entry. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1_SQL },
   { version: 2, sql: V2_SQL },
   { version: 3, sql: V3_SQL },
+  { version: 4, sql: V4_SQL },
 ];
 
 /**

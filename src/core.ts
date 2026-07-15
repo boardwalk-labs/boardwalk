@@ -26,7 +26,7 @@ export type {
 
 // ---- Tool-level human input (the in-leaf `human_input` tool). A leaf
 //      parks by THROWING LeafParked carrying its transcript checkpoint + the gate; the host catches
-//      it, suspends the run, and on wake calls runAgentLeaf again with a LeafResume (the checkpoint +
+//      it, waits for the answer, and calls runAgentLeaf again with a LeafResume (the checkpoint +
 //      the answers keyed by tool-call id) so the loop re-enters exactly where it paused. Shared so the
 //      single-node engine and the hosted platform drive the SAME leaf identically. ----
 export { LeafParked, HUMAN_INPUT_TOOL_NAME } from "./agent/leaf.js";

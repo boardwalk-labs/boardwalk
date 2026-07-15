@@ -395,12 +395,12 @@ describe("RunSupervisor", () => {
     expect(f.store.getRun(orphanCancelling)?.status).toBe("cancelled");
   }, 20_000);
 
-  it("boot recovery resumes a waiting_for_child parent whose child finalized during downtime", async () => {
+  it("boot recovery restarts a held-status row from the top — its process died with the engine", async () => {
     const f = fixture();
     f.deploy(
       "slow-kid",
       `import { sleep, output } from "@boardwalk-labs/workflow";
-       await sleep(60_000);
+       await sleep(150);
        output("kid-done");`,
     );
     f.deploy(
@@ -409,28 +409,18 @@ describe("RunSupervisor", () => {
        output({ said: await workflows.call("slow-kid", {}) });`,
     );
 
-    // Drive the parent until it RELEASES (the child is parked in its long sleep). Await the
-    // suspending pass so its active entry is fully cleared before we recover (else recoverOnBoot's
-    // re-dispatch races the still-settling suspend — supervise() would hand back the suspended pass).
+    // Simulate an engine that died mid-hold: the row says waiting_for_child, but no process
+    // exists (a live hold would have an active entry; this one has none).
     const parentId = f.startRun("waiter");
-    const firstPass = f.supervisor.supervise(parentId);
-    await waitFor(() => f.store.getRun(parentId)?.status === "waiting_for_child");
-    expect((await firstPass).status).toBe("waiting_for_child");
-
-    const child = f.store.listRuns().find((r) => r.parentRunId === parentId);
-    if (child === undefined) throw new Error("expected the parent to have spawned a child");
-
-    // Simulate the child finishing while the engine was DOWN: mark it terminal directly, bypassing
-    // finishRun so the live finalize-wake never fires — exactly the missed wake the boot sweep covers.
-    f.store.updateRunStatus(child.id, "completed", { output: "kid-done", endedAt: Date.now() });
+    f.store.updateRunStatus(parentId, "waiting_for_child");
 
     const { resumed } = f.supervisor.recoverOnBoot();
     expect(resumed).toContain(parentId);
 
-    // The re-dispatched parent replays, re-attaches to the now-terminal child, and completes.
+    // The re-dispatched parent restarts from the top, runs the child, and completes. (Re-attach
+    // idempotency across a crash is covered by the workflows.call crash test above.)
     await waitFor(() => f.store.getRun(parentId)?.status === "completed");
     expect(f.store.getRun(parentId)?.output).toEqual({ said: "kid-done" });
-    // Re-attach was idempotent: still exactly one child, no re-spawn.
     expect(f.store.listRuns().filter((r) => r.parentRunId === parentId)).toHaveLength(1);
   }, 30_000);
 

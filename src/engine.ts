@@ -112,7 +112,6 @@ export class Engine {
     this.scheduler = new Scheduler({
       store: this.store,
       dispatch: (runId) => void this.supervisor.supervise(runId),
-      wake: (runId) => this.supervisor.resume(runId),
       emitQueued: (runId) => this.supervisor.emitQueued(runId),
       ...(opts.clock !== undefined ? { clock: opts.clock } : {}),
       ...(opts.log !== undefined ? { log: opts.log } : {}),
@@ -227,9 +226,11 @@ export class Engine {
   }
 
   /**
-   * Answer a run's pending human-input gate, validating the response against its input spec, then
-   * resume the run. Atomic: the first responder wins (a second gets CONFLICT). Throws NOT_FOUND
-   * when no pending gate matches `key`, VALIDATION when the response doesn't fit the spec.
+   * Answer a run's pending human-input gate, validating the response against its input spec.
+   * The run HOLDS its process while a gate is pending — the supervisor hands the validated
+   * answer to the held host-call and it continues in place. Atomic: the first responder wins
+   * (a second gets CONFLICT). Throws NOT_FOUND when no pending gate matches `key`, VALIDATION
+   * when the response doesn't fit the spec.
    */
   respondToInput(
     runId: string,
@@ -249,26 +250,15 @@ export class Engine {
       );
     }
     const validated = validateHumanInputResponse(request.inputSpec, value);
-    const resolved = this.store.transaction(() => {
-      const r = this.store.resolveHumanInputRequest(
-        request.id,
-        validated,
-        opts.respondedBy ?? null,
-      );
-      if (r === null) return null;
-      // A PROGRAM-level gate's journal entry IS the answer slot → resolve it. A TOOL-level gate's
-      // entry holds the leaf checkpoint (the answer is joined from the request row at read) → leave
-      // it suspended.
-      const entry = this.store.getJournalEntry(runId, request.seq);
-      if (entry !== null && entry.kind === "human_input") {
-        this.store.resolveJournalEntry(runId, request.seq, validated);
-      }
-      return r;
-    });
+    const resolved = this.store.resolveHumanInputRequest(
+      request.id,
+      validated,
+      opts.respondedBy ?? null,
+    );
     if (resolved === null) {
       throw new EngineError("CONFLICT", `Human-input request "${key}" was already answered.`);
     }
-    this.supervisor.onInputResolved(runId, request.id, key);
+    this.supervisor.deliverInputAnswer(runId, request.id, key, validated);
     return resolved;
   }
 

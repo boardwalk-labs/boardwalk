@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// Conformance: program-level human-in-the-loop (durable suspension).
+// Conformance: program-level human-in-the-loop.
 //
-// A workflow that calls humanInput() SUSPENDS — it releases its process and parks in
-// `awaiting_input` until a person responds through the control plane. The answer resolves the
-// pending journal entry; the run resumes (a fresh process replays the journal) and the
-// humanInput() call returns the validated response. The model is never involved.
+// A workflow that calls humanInput() HOLDS its process in `awaiting_input` until a person
+// responds through the control plane. The answer is validated against the gate's input spec and
+// handed to the live process — the humanInput() call returns it in place, locals intact. The
+// model is never involved. The answered request row is durable: a crash-restarted program
+// re-reaching the same key gets the stored answer instead of re-asking.
 
 import { afterEach, describe, expect, it } from "vitest";
 import { createEngine, disposeEngines, pause, statusesOf, waitForStatus } from "./harness.js";
@@ -24,14 +25,14 @@ const APPROVAL_PROGRAM = `
 `;
 
 describe("conformance: human-in-the-loop", () => {
-  it("suspends on humanInput(), parks until answered, then resumes with the validated response", async () => {
+  it("holds on humanInput() until answered, then continues with the validated response", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({ program: APPROVAL_PROGRAM });
 
     const run = engine.startRun("approval");
     await waitForStatus(engine, run.id, "awaiting_input");
 
-    // Parked, not running: a pending gate exists and the run does not progress on its own.
+    // Held, not progressing: a pending gate exists and the run waits for a person.
     const pending = engine.listInputRequests({ runId: run.id, statuses: ["pending"] });
     expect(pending).toHaveLength(1);
     expect(pending[0]?.key).toBe("approve");
@@ -39,21 +40,19 @@ describe("conformance: human-in-the-loop", () => {
     await pause(150);
     expect(engine.store.getRun(run.id)?.status).toBe("awaiting_input");
 
-    // A person answers through the control plane; the run resumes and completes.
+    // A person answers through the control plane; the held call returns and the run completes.
     engine.respondToInput(run.id, "approve", { value: "Approve", isOther: false });
     await waitForStatus(engine, run.id, "completed");
 
     const done = engine.store.getRun(run.id);
     expect(done?.output).toEqual({ decision: { value: "Approve", isOther: false } });
-    // The lifecycle stream records the suspend + the gate + the resolution + the resume.
+    // The lifecycle stream records the hold + the gate + the resolution.
     const statuses = statusesOf(engine, run.id);
     expect(statuses).toContain("awaiting_input");
     expect(statuses.at(-1)).toBe("completed");
     const kinds = engine.store.listEvents(run.id).map((row) => row.event.kind);
-    expect(kinds).toContain("suspended");
     expect(kinds).toContain("human_input_requested");
     expect(kinds).toContain("human_input_resolved");
-    expect(kinds).toContain("resumed");
   }, 20_000);
 
   it("validates the response against the input spec and rejects an out-of-options answer", async () => {
@@ -68,7 +67,7 @@ describe("conformance: human-in-the-loop", () => {
     ).toThrow(/not one of the offered options/);
     expect(engine.store.getRun(run.id)?.status).toBe("awaiting_input");
 
-    // A correct answer then resumes it.
+    // A correct answer then releases the hold.
     engine.respondToInput(run.id, "approve", { value: "Reject", isOther: false });
     await waitForStatus(engine, run.id, "completed");
     expect(engine.store.getRun(run.id)?.output).toEqual({
@@ -90,7 +89,7 @@ describe("conformance: human-in-the-loop", () => {
     await waitForStatus(engine, run.id, "completed");
   }, 20_000);
 
-  it("replay is silent: pre-suspend console output is not duplicated on resume", async () => {
+  it("console output around a gate appears exactly once — the process never re-runs", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
       program: `
@@ -108,8 +107,8 @@ describe("conformance: human-in-the-loop", () => {
     engine.respondToInput(run.id, "note", { value: "ok" });
     await waitForStatus(engine, run.id, "completed");
 
-    // The program re-ran from the top on resume, but BEFORE-GATE (emitted pre-suspend) must appear
-    // exactly once; AFTER-GATE (new, post-resume) appears once.
+    // The process held straight through the gate: each line streams exactly once, with no
+    // replay machinery involved.
     const stdout = engine.store
       .listEvents(run.id)
       .filter((row) => row.event.kind === "program_output")

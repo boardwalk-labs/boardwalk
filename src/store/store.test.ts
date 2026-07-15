@@ -186,7 +186,6 @@ describe("Store: runs", () => {
       createdAt: run.createdAt,
       startedAt: null,
       endedAt: null,
-      wakeAt: null,
       activeMs: 0,
     });
     expect(store.getRun(run.id)).toEqual(run);
@@ -679,87 +678,6 @@ describe("Store: corrupted JSON columns throw INTERNAL naming table.column", () 
   });
 });
 
-describe("Store: run journal", () => {
-  it("puts + gets a resolved entry and round-trips the result", () => {
-    const store = openStore();
-    const wf = seedWorkflow(store, "wf");
-    const run = seedRun(store, wf.id);
-    expect(store.getJournalEntry(run.id, 1)).toBeNull();
-    const row = store.putJournalEntry({
-      runId: run.id,
-      seq: 1,
-      kind: "agent",
-      fingerprint: "fp-1",
-      label: "summarize",
-      state: "resolved",
-      result: { answer: 42 },
-    });
-    expect(row.state).toBe("resolved");
-    expect(row.result).toEqual({ answer: 42 });
-    expect(row.resolvedAt).not.toBeNull();
-    expect(store.getJournalEntry(run.id, 1)).toEqual(row);
-  });
-
-  it("is idempotent on (run_id, seq): the existing entry wins", () => {
-    const store = openStore();
-    const wf = seedWorkflow(store, "wf");
-    const run = seedRun(store, wf.id);
-    const first = store.putJournalEntry({
-      runId: run.id,
-      seq: 1,
-      kind: "step",
-      fingerprint: "fp",
-      state: "resolved",
-      result: "one",
-    });
-    const second = store.putJournalEntry({
-      runId: run.id,
-      seq: 1,
-      kind: "step",
-      fingerprint: "fp",
-      state: "resolved",
-      result: "two",
-    });
-    expect(second).toEqual(first);
-    expect(second.result).toBe("one");
-  });
-
-  it("resolves a pending entry, and a null value is preserved as a resolved null", () => {
-    const store = openStore();
-    const wf = seedWorkflow(store, "wf");
-    const run = seedRun(store, wf.id);
-    store.putJournalEntry({
-      runId: run.id,
-      seq: 1,
-      kind: "human_input",
-      fingerprint: "fp",
-      state: "pending",
-    });
-    store.resolveJournalEntry(run.id, 1, null);
-    const row = store.getJournalEntry(run.id, 1);
-    expect(row?.state).toBe("resolved");
-    expect(row?.result).toBeNull();
-    expectEngineError(() => store.resolveJournalEntry(run.id, 99, "x"), "NOT_FOUND");
-  });
-
-  it("lists a run's journal in seq order", () => {
-    const store = openStore();
-    const wf = seedWorkflow(store, "wf");
-    const run = seedRun(store, wf.id);
-    for (const seq of [2, 1, 3]) {
-      store.putJournalEntry({
-        runId: run.id,
-        seq,
-        kind: "agent",
-        fingerprint: "f",
-        state: "resolved",
-        result: seq,
-      });
-    }
-    expect(store.listJournal(run.id).map((e) => e.seq)).toEqual([1, 2, 3]);
-  });
-});
-
 describe("Store: human-input requests", () => {
   function seedRequest(store: Store, runId: string, key = "approve") {
     return store.createHumanInputRequest({
@@ -782,6 +700,14 @@ describe("Store: human-input requests", () => {
     expect(store.getHumanInputRequest(req.id)).toEqual(req);
     expect(store.findPendingHumanInputRequest(run.id, "approve")?.id).toBe(req.id);
     expect(store.findPendingHumanInputRequest(run.id, "nope")).toBeNull();
+    // The answered row is the durable answer slot a restarted program re-reads by key.
+    expect(store.findResolvedHumanInputRequest(run.id, "approve")).toBeNull();
+    store.resolveHumanInputRequest(req.id, { value: "Approve", isOther: false }, "nick");
+    expect(store.findResolvedHumanInputRequest(run.id, "approve")?.response).toEqual({
+      value: "Approve",
+      isOther: false,
+    });
+    expect(store.findPendingHumanInputRequest(run.id, "approve")).toBeNull();
   });
 
   it('round-trips a request with NO assignees as SQL NULL (not the text "null")', () => {
@@ -828,23 +754,5 @@ describe("Store: human-input requests", () => {
     expect(store.listHumanInputRequests({ runId: run.id, statuses: ["cancelled"] })).toHaveLength(
       2,
     );
-  });
-});
-
-describe("Store: timed wake", () => {
-  it("returns only suspended runs whose wake_at is due", () => {
-    const store = openStore();
-    const wf = seedWorkflow(store, "wf");
-    const due = seedRun(store, wf.id);
-    const future = seedRun(store, wf.id);
-    const running = seedRun(store, wf.id);
-    store.updateRunStatus(due.id, "sleeping", { wakeAt: 1000 });
-    store.updateRunStatus(future.id, "awaiting_input", { wakeAt: 9_000_000_000_000 });
-    store.updateRunStatus(running.id, "running");
-    const woke = store.listRunsToWake(2000).map((r) => r.id);
-    expect(woke).toEqual([due.id]);
-    // Clearing wake_at on resume removes it from the sweep.
-    store.updateRunStatus(due.id, "pending", { wakeAt: null });
-    expect(store.listRunsToWake(2000)).toHaveLength(0);
   });
 });

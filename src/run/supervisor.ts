@@ -45,17 +45,14 @@ import type { EventRow, RunRow, Store, WorkflowRow } from "../store/store.js";
 import { defaultIdempotencyKey } from "./idempotency.js";
 import {
   callWorkflowArgsSchema,
-  callWorkflowJournaledArgsSchema,
   childToParentSchema,
   getSecretArgsSchema,
-  journalGetArgsSchema,
-  journalPutArgsSchema,
+  humanInputArgsSchema,
   mcpTokenArgsSchema,
   readArtifactArgsSchema,
   resolveModelArgsSchema,
   webSearchArgsSchema,
   writeArtifactArgsSchema,
-  type ChildToParent,
   type HostMethod,
   type InitMessage,
   type IpcErrorShape,
@@ -96,8 +93,7 @@ type SpawnResult =
   | { kind: "failed"; error: IpcErrorShape; output: unknown; outputDeclared: boolean }
   | { kind: "crashed" }
   | { kind: "cancelled" }
-  | { kind: "budget" }
-  | { kind: "suspended" };
+  | { kind: "budget" };
 
 interface ActiveRun {
   promise: Promise<RunRow>;
@@ -105,28 +101,34 @@ interface ActiveRun {
   cancelRequested: boolean;
   /** Set when a budget kill is in flight — names which budget, for the failure message. */
   budgetReason: string | null;
-  /** Set when the child signaled a durable suspension — the exit is a park, not a crash. */
-  suspendRequested: boolean;
-  /** The just-finished segment's ON-CPU duration (ms), captured at the FIRST settle-determining
-   *  event (a suspend decision, a done/failed message, a budget/crash) — NOT at child-exit, which
-   *  can lag the suspend (and, under a test clock, be advanced past it). The budget accounting adds
+  /** The just-finished segment's duration (ms), captured at the FIRST settle-determining
+   *  event (a done/failed message, a budget/crash). The budget accounting adds
    *  this to the run's cumulative active_ms. */
   lastSegmentActiveMs: number;
   /** Memory dirs agent() calls used this run — auto-persisted at successful run end. */
   memoryDirs: Set<string>;
+  /** Held human-input gates: key → the pending host-call waiting for a person's answer. */
+  inputWaiters: Map<
+    string,
+    { resolve: (response: JsonValue) => void; reject: (err: Error) => void }
+  >;
+  /** In-flight workflows.call holds (the parent is waiting on this many child runs). */
+  childWaits: number;
+  /** Monotonic gate counter — the informational `seq` recorded on human_input_requests rows. */
+  gateSeq: number;
   envelope: { turn: number; seq: number };
 }
 
 const TERMINAL_STATUSES: readonly RunStatus[] = ["completed", "failed", "cancelled"];
-const SUSPENDED_STATUSES: readonly RunStatus[] = [
-  "sleeping",
-  "awaiting_input",
-  "waiting_for_child",
-];
+const HELD_STATUSES: readonly RunStatus[] = ["sleeping", "awaiting_input", "waiting_for_child"];
 
-/** True when a run is parked (released its process), awaiting an external wake. */
-export function isSuspended(status: RunStatus): boolean {
-  return SUSPENDED_STATUSES.includes(status);
+/**
+ * True when a run's status says it is waiting on an external condition (a person's answer, a
+ * child run). A LIVE run holds its process through these; a row left in one by a dead engine
+ * has no process and is restarted from the top by the boot sweep.
+ */
+export function isHeld(status: RunStatus): boolean {
+  return HELD_STATUSES.includes(status);
 }
 
 /** Treat an MCP access token expiring this soon as already expired — a token that dies
@@ -136,13 +138,6 @@ const MCP_TOKEN_EXPIRY_SKEW_MS = 30_000;
 /** True when a run can no longer change state. */
 export function isTerminal(status: RunStatus): boolean {
   return TERMINAL_STATUSES.includes(status);
-}
-
-/** Read the child run id off a pending workflow_call journal entry's result ({ childRunId }). */
-function readChildRunId(result: JsonValue | null): string | null {
-  if (typeof result !== "object" || result === null || Array.isArray(result)) return null;
-  const value = result.childRunId;
-  return typeof value === "string" ? value : null;
 }
 
 export class RunSupervisor {
@@ -193,10 +188,8 @@ export class RunSupervisor {
       return Promise.reject(new EngineError("NOT_FOUND", `Unknown run: ${runId}`));
     }
     if (isTerminal(run.status)) return Promise.resolve(run);
-    // A parked run is driven only by resume() (a wake or a submitted answer), never by a bare
-    // supervise() — returning it as-is keeps a parent's workflows.call hold pending across the
-    // child's suspend+resume instead of re-spawning it here.
-    if (isSuspended(run.status)) return Promise.resolve(run);
+    // A held-status row with no active entry was left behind by a dead engine (a live hold's
+    // entry was caught above) — fall through and re-execute from the top, the crash semantics.
     if (run.status === "cancelling") {
       // An interrupted cancellation (the killer died mid-kill). The process is gone — the
       // orphan exits on IPC disconnect — so finalize instead of re-executing.
@@ -213,9 +206,11 @@ export class RunSupervisor {
       child: null,
       cancelRequested: false,
       budgetReason: null,
-      suspendRequested: false,
       lastSegmentActiveMs: 0,
       memoryDirs: new Set(),
+      inputWaiters: new Map(),
+      childWaits: 0,
+      gateSeq: 0,
       envelope: this.resumeEnvelope(runId),
     };
     entry.promise = this.execute(run, entry)
@@ -254,12 +249,12 @@ export class RunSupervisor {
 
     const entry = this.active.get(runId);
     if (entry === undefined) {
-      // Nothing is executing it right now (queued, parked/suspended, or left over from a dead
-      // engine). A suspended run has no process to signal, so finalize directly and close any
-      // pending human-input gates so they can't strand.
+      // Nothing is executing it right now (queued, or a held-status row left by a dead engine).
+      // No process to signal — finalize directly and close any pending human-input gates so
+      // they can't strand.
       const envelope = this.resumeEnvelope(runId);
-      if (isSuspended(run.status)) this.store.cancelPendingHumanInputRequests(runId);
-      this.store.updateRunStatus(runId, "cancelled", { endedAt: this.clock.now(), wakeAt: null });
+      this.store.cancelPendingHumanInputRequests(runId);
+      this.store.updateRunStatus(runId, "cancelled", { endedAt: this.clock.now() });
       this.stampAndStore(runId, envelope, { kind: "run_status", status: "cancelled" });
       return;
     }
@@ -281,180 +276,55 @@ export class RunSupervisor {
   }
 
   // --------------------------------------------------------------------------
-  // Suspension + resume
+  // Human-input delivery (the run HOLDS its process while a gate is pending)
   // --------------------------------------------------------------------------
 
   /**
-   * Persist a durable suspension the child signaled: a pending journal entry at the seam's seq
-   * plus (for a human-input gate) the request row, then flip the run to its suspended status.
-   * Re-suspend (a spurious wake) reuses the existing pending request instead of creating another.
+   * A human answered a pending gate: emit the resolution and hand the validated response to the
+   * held host-call so the live process continues. With no live waiter (the engine restarted and
+   * the run hasn't re-reached the gate yet), the answer simply stays on the request row — the
+   * restarted program's gate lookup finds it by key and returns immediately.
    */
-  private handleSuspend(
-    run: RunRow,
-    entry: ActiveRun,
-    msg: Extract<ChildToParent, { type: "suspend" }>,
-  ): void {
-    if (msg.reason === "sleep") {
-      // Compute the absolute wake time with THIS clock so it agrees with the wake sweep.
-      const wakeAt = this.clock.now() + (msg.durationMs ?? 0);
-      this.store.transaction(() => {
-        this.store.putJournalEntry({
-          runId: run.id,
-          seq: msg.seq,
-          kind: "sleep",
-          fingerprint: msg.fingerprint,
-          state: "pending",
-          result: { wakeAt },
-        });
-        this.store.updateRunStatus(run.id, "sleeping", { wakeAt });
-      });
-      this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "sleeping" });
-      this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "sleep", wakeAt });
-      return;
-    }
-    if (msg.reason === "workflow_call") {
-      // The parent parked on a still-running child. Journal the child id (pending) + flip to
-      // `waiting_for_child`; the child's finalize wakes us (we re-attach + read its output).
-      if (msg.childRunId === undefined) {
-        throw new EngineError("INTERNAL", `workflow_call suspend missing its childRunId`);
-      }
-      const childRunId = msg.childRunId;
-      this.store.transaction(() => {
-        this.store.putJournalEntry({
-          runId: run.id,
-          seq: msg.seq,
-          kind: "workflow_call",
-          fingerprint: msg.fingerprint,
-          state: "pending",
-          result: { childRunId },
-        });
-        this.store.updateRunStatus(run.id, "waiting_for_child", { wakeAt: null });
-      });
-      this.stampAndStore(run.id, entry.envelope, {
-        kind: "run_status",
-        status: "waiting_for_child",
-      });
-      this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "child" });
-      // The child may have finalized in the window before we committed `waiting_for_child` (its
-      // finalize-wake then found us still running). Re-check and resume now so we can't strand.
-      const child = this.store.getRun(childRunId);
-      if (child !== null && isTerminal(child.status)) this.resume(run.id);
-      return;
-    }
-    if (msg.humanInput === undefined) {
-      throw new EngineError("INTERNAL", `human_input suspend missing its request payload`);
-    }
-    const hi = msg.humanInput;
-    const inputSpec = asJsonValue(hi.inputSpec, "human_input input spec");
-    // A TOOL-level gate (the model's mid-leaf `human_input`) carries the leaf's transcript
-    // checkpoint — store it on a `suspended` agent journal entry so the leaf resumes where it
-    // paused. A PROGRAM-level gate (the `humanInput()` hook) has no leaf to resume — its journal
-    // entry is just `pending`, and the answer becomes its memoized value on resolve.
-    const result = this.store.transaction(() => {
-      if (msg.leafCheckpoint !== undefined) {
-        this.store.putJournalEntry({
-          runId: run.id,
-          seq: msg.seq,
-          kind: "agent",
-          fingerprint: msg.fingerprint,
-          state: "suspended",
-          result: { checkpoint: asJsonValue(msg.leafCheckpoint, "leaf checkpoint") },
-        });
-      } else {
-        this.store.putJournalEntry({
-          runId: run.id,
-          seq: msg.seq,
-          kind: "human_input",
-          fingerprint: msg.fingerprint,
-          state: "pending",
-        });
-      }
-      const existing = this.store.findPendingHumanInputRequest(run.id, hi.key);
-      const request =
-        existing ??
-        this.store.createHumanInputRequest({
-          runId: run.id,
-          seq: msg.seq,
-          key: hi.key,
-          prompt: hi.prompt,
-          inputSpec,
-          ...(hi.assignees !== undefined ? { assignees: hi.assignees } : {}),
-        });
-      this.store.updateRunStatus(run.id, "awaiting_input", { wakeAt: null });
-      return { request, isNew: existing === null };
+  deliverInputAnswer(runId: string, requestId: string, key: string, response: JsonValue): void {
+    const entry = this.active.get(runId);
+    this.stampAndStore(runId, entry?.envelope ?? this.resumeEnvelope(runId), {
+      kind: "human_input_resolved",
+      requestId,
+      key,
     });
-    // Emit BOTH the run_status transition (so status-tracking consumers see awaiting_input) and
-    // the richer `suspended` marker (carrying the reason).
-    this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "awaiting_input" });
-    this.stampAndStore(run.id, entry.envelope, { kind: "suspended", reason: "human_input" });
-    if (result.isNew) {
-      this.stampAndStore(run.id, entry.envelope, {
-        kind: "human_input_requested",
-        requestId: result.request.id,
-        key: hi.key,
-        prompt: hi.prompt,
-      });
-    }
-  }
-
-  /** Re-dispatch a parked run (a timed wake — long sleep / human-input timeout). Idempotent. */
-  resume(runId: string): void {
-    const run = this.store.getRun(runId);
-    if (run === null || !isSuspended(run.status)) return;
-    this.doResume(runId, this.resumeEnvelope(runId), []);
+    if (entry === undefined) return;
+    const waiter = entry.inputWaiters.get(key);
+    if (waiter === undefined) return;
+    entry.inputWaiters.delete(key);
+    waiter.resolve(response);
+    this.refreshHoldStatus(runId, entry);
   }
 
   /**
-   * A human answered a pending gate: emit the resolution. Re-dispatch only once EVERY gate the run
-   * is waiting on is answered (whole-batch resume — a fan-out that raised N questions resumes once,
-   * not N times); until then the run stays parked.
+   * Keep the run's status honest about what its held process is doing: `awaiting_input` while
+   * any gate is pending (it wins — a person can act on it), `waiting_for_child` while a
+   * workflows.call is in flight, `running` otherwise. Only forward, observable transitions —
+   * terminal and cancelling states are never overwritten.
    */
-  onInputResolved(runId: string, requestId: string, key: string): void {
+  private refreshHoldStatus(runId: string, entry: ActiveRun): void {
     const run = this.store.getRun(runId);
-    if (run === null || run.status !== "awaiting_input") return;
-    const stillPending = this.store.listHumanInputRequests({ runId, statuses: ["pending"] });
-    if (stillPending.length > 0) {
-      this.stampAndStore(runId, this.resumeEnvelope(runId), {
-        kind: "human_input_resolved",
-        requestId,
-        key,
-      });
-      return;
-    }
-    this.doResume(runId, this.resumeEnvelope(runId), [
-      { kind: "human_input_resolved", requestId, key },
-    ]);
-  }
-
-  private doResume(
-    runId: string,
-    envelope: { turn: number; seq: number },
-    preEvents: readonly RunEventBody[],
-  ): void {
-    for (const event of preEvents) this.stampAndStore(runId, envelope, event);
-    this.store.updateRunStatus(runId, "pending", { wakeAt: null });
-    this.stampAndStore(runId, envelope, { kind: "resumed" });
-    // execute() re-spawns the child, which replays the journal and returns the now-resolved
-    // answer at the suspending seam, then continues to the next suspend point or completion.
-    //
-    // Race guard: a wake can land between status→awaiting_input (visible to the caller) and the
-    // suspending execute() clearing its active entry. supervise() would then return that stale
-    // promise and never re-dispatch, stranding the run at `pending`. If an entry is still in
-    // flight, supervise AFTER it settles (its own finally deletes the entry first).
-    const existing = this.active.get(runId);
-    if (existing !== undefined) {
-      void existing.promise.finally(() => {
-        void this.supervise(runId);
-      });
-    } else {
-      void this.supervise(runId);
-    }
+    if (run === null || isTerminal(run.status) || run.status === "cancelling") return;
+    const desired: RunStatus =
+      entry.inputWaiters.size > 0
+        ? "awaiting_input"
+        : entry.childWaits > 0
+          ? "waiting_for_child"
+          : "running";
+    if (run.status === desired) return;
+    this.setStatus(runId, entry, desired);
   }
 
   /**
-   * Boot recovery sweep (SPEC §2.2): runs a dead engine left active are re-dispatched
-   * (restart-from-the-top — the child died with the engine); interrupted cancellations are
-   * finalized (the orphan child exits on IPC disconnect, so the kill already happened).
+   * Boot recovery sweep (SPEC §2.2): runs a dead engine left active — including held-status rows
+   * (sleeping / awaiting_input / waiting_for_child), whose process died with the engine — are
+   * re-dispatched (restart-from-the-top, the documented crash semantics); interrupted
+   * cancellations are finalized (the orphan child exits on IPC disconnect, so the kill already
+   * happened). An answered gate survives the restart via its request row, found by key.
    * Engine restarts do not consume the run's crash-restart budget.
    */
   recoverOnBoot(): { resumed: string[]; cancelled: string[] } {
@@ -468,23 +338,11 @@ export class RunSupervisor {
       });
       cancelled.push(run.id);
     }
-    for (const run of this.store.listRuns({ statuses: ["queued", "pending", "running"] })) {
+    for (const run of this.store.listRuns({
+      statuses: ["queued", "pending", "running", ...HELD_STATUSES],
+    })) {
       resumed.push(run.id);
       void this.supervise(run.id);
-    }
-    // A parent parked `waiting_for_child` whose child finalized during the downtime missed its
-    // finalize-wake. Resume it (it re-attaches + reads the child's memoized output). A parent whose
-    // child is still in flight stays parked — that child (recovered above) wakes it on its finalize.
-    for (const parent of this.store.listRuns({ statuses: ["waiting_for_child"] })) {
-      const pending = this.store
-        .listJournal(parent.id)
-        .find((e) => e.kind === "workflow_call" && e.state === "pending");
-      const childId = pending !== undefined ? readChildRunId(pending.result) : null;
-      const child = childId !== null ? this.store.getRun(childId) : null;
-      if (child !== null && isTerminal(child.status)) {
-        resumed.push(parent.id);
-        this.resume(parent.id);
-      }
     }
     return { resumed, cancelled };
   }
@@ -597,11 +455,6 @@ export class RunSupervisor {
         }
         case "cancelled":
           return this.finishRun(run.id, entry, "cancelled", {});
-        case "suspended":
-          // Parked: handleSuspend already persisted the status + a pending journal entry + the
-          // wake condition. Do NOT restart or finalize — return the suspended row as-is; resume()
-          // re-dispatches it when the wake condition is met (an answer, or — later — a timer).
-          return this.mustGetRun(run.id);
         case "budget":
           return this.finishRun(run.id, entry, "failed", {
             error: {
@@ -638,9 +491,8 @@ export class RunSupervisor {
     return new Promise<SpawnResult>((resolve) => {
       let settled = false;
       let budgetTimer: NodeJS.Timeout | null = null;
-      // Capture this segment's ON-CPU duration at the FIRST settle-determining event (idempotent),
-      // so a suspend's idle tail — the gap between the suspend decision and the child's exit, which
-      // a test clock can advance past — is not miscounted as active compute.
+      // Capture this segment's duration at the FIRST settle-determining event (idempotent), so a
+      // test clock advanced after the settle can't inflate the tally.
       const segStart = this.clock.now();
       let activeMarked = false;
       const markActive = (): void => {
@@ -653,6 +505,12 @@ export class RunSupervisor {
         settled = true;
         markActive();
         if (budgetTimer !== null) clearTimeout(budgetTimer);
+        // Any gate still held when the segment settles (budget kill, cancel, crash) can never be
+        // answered into THIS process — reject the waiters so their host-call promises don't leak.
+        for (const waiter of entry.inputWaiters.values()) {
+          waiter.reject(new EngineError("CANCELLED", "the run settled while awaiting input"));
+        }
+        entry.inputWaiters.clear();
         resolve(result);
       };
 
@@ -705,7 +563,7 @@ export class RunSupervisor {
         const msg = parsed.data;
         switch (msg.type) {
           case "host_call":
-            void this.handleHostCall(run, workflow, dirs, msg.method, msg.args)
+            void this.handleHostCall(run, entry, workflow, dirs, msg.method, msg.args)
               .then((value) => {
                 if (child.connected) {
                   child.send({
@@ -761,27 +619,6 @@ export class RunSupervisor {
               console.error(`run ${run.id}: ignored malformed memory dir from child`);
             }
             break;
-          case "suspend":
-            // The program reached a seam that releases the process. Persist the suspension
-            // (status + pending journal entry + any request), then kill the child; its exit
-            // settles as "suspended" (below), so execute() neither restarts nor finalizes.
-            try {
-              // Capture active time at the SUSPEND DECISION — before the kill + the child's exit
-              // (and before a test clock advances past it). The exit's settle() then no-ops markActive.
-              markActive();
-              this.handleSuspend(run, entry, msg);
-              entry.suspendRequested = true;
-              child.kill("SIGKILL");
-            } catch (err) {
-              // A malformed suspend (e.g. a corrupt spec) fails the run rather than parking it.
-              settle({
-                kind: "failed",
-                error: toErrorShape(err),
-                output: null,
-                outputDeclared: false,
-              });
-            }
-            break;
           case "done":
             // A budget breach detected mid-run (recordUsage set budgetReason) is AUTHORITATIVE even
             // if the program then ran to completion: IPC is FIFO, so the breaching report_usage was
@@ -805,8 +642,7 @@ export class RunSupervisor {
       child.on("error", () => settle({ kind: "crashed" }));
       child.on("exit", () => {
         entry.child = null;
-        if (entry.suspendRequested) settle({ kind: "suspended" });
-        else if (entry.budgetReason !== null) settle({ kind: "budget" });
+        if (entry.budgetReason !== null) settle({ kind: "budget" });
         else if (entry.cancelRequested) settle({ kind: "cancelled" });
         else settle({ kind: "crashed" });
       });
@@ -823,9 +659,6 @@ export class RunSupervisor {
         input: run.input,
         config: workflow.config,
         manifest: workflow.manifest,
-        // Re-runs (resume / crash-restart) replay journaled seams up to here with observability
-        // suppressed; a fresh run has no journal (frontier 0) and emits everything.
-        replayFrontier: this.store.maxJournalSeq(run.id),
       };
       if (child.connected) child.send(init);
     });
@@ -868,6 +701,7 @@ export class RunSupervisor {
 
   private async handleHostCall(
     run: RunRow,
+    entry: ActiveRun,
     workflow: WorkflowRow,
     dirs: RunDirs,
     method: HostMethod,
@@ -886,37 +720,33 @@ export class RunSupervisor {
         });
       }
       case "call_workflow": {
-        const a = callWorkflowJournaledArgsSchema.parse(args);
+        const a = callWorkflowArgsSchema.parse(args);
+        // Hold until the child run is terminal — the parent's process stays alive through the
+        // whole wait (this engine has no snapshot substrate to release it to). The child's run
+        // row is the durable memo: a crash-restarted parent re-attaches via the idempotency key,
+        // and an already-terminal child resolves supervise() immediately.
         const child = this.startChildRun(run.id, a.slug, a.input, a.idempotencyKey);
-        // Hold for the child's first segment. A SHORT child (one that runs straight to terminal)
-        // finishes here and we return its output — cheaper than releasing + replaying this parent.
-        // A LONG child (one that itself suspends — sleeps, awaits input, waits on its OWN child)
-        // settles non-terminal, and THAT releases this parent too (`waiting_for_child`).
-        const settled = await this.supervise(child.id);
-        if (settled.status === "completed") {
-          // Memoize the output so the parent's replay (and any later restart) returns it instantly.
-          this.store.putJournalEntry({
-            runId: run.id,
-            seq: a.seq,
-            kind: "workflow_call",
-            fingerprint: a.fingerprint,
-            state: "resolved",
-            result: settled.output,
-          });
-          return { status: "completed", output: settled.output };
+        entry.childWaits += 1;
+        this.refreshHoldStatus(run.id, entry);
+        let settled: RunRow;
+        try {
+          settled = await this.supervise(child.id);
+        } finally {
+          entry.childWaits -= 1;
+          this.refreshHoldStatus(run.id, entry);
         }
+        if (settled.status === "completed") return { output: settled.output };
         if (settled.status === "cancelled") {
           throw new EngineError("CANCELLED", `Child workflow "${a.slug}" was cancelled.`);
         }
-        if (settled.status === "failed") {
-          throw new EngineError(
-            "PROGRAM_ERROR",
-            `Child workflow "${a.slug}" failed: ${settled.error?.message ?? "unknown error"}`,
-          );
-        }
-        // The child suspended (it is long-running): release this parent until the child finalizes.
-        // The child replies io.suspend(workflow_call) → pending journal entry + `waiting_for_child`.
-        return { status: "running", childRunId: child.id };
+        throw new EngineError(
+          "PROGRAM_ERROR",
+          `Child workflow "${a.slug}" failed: ${settled.error?.message ?? "unknown error"}`,
+        );
+      }
+      case "human_input": {
+        const a = humanInputArgsSchema.parse(args);
+        return await this.holdForHumanInput(run, entry, a);
       }
       case "run_workflow": {
         const a = callWorkflowArgsSchema.parse(args);
@@ -972,51 +802,58 @@ export class RunSupervisor {
         );
         return { results };
       }
-      case "journal_get": {
-        const a = journalGetArgsSchema.parse(args);
-        const entry = this.store.getJournalEntry(run.id, a.seq);
-        if (entry === null) return null;
-        let result = entry.result;
-        // A suspended agent leaf resumes with the person's answers joined from the request rows
-        // (the single source of truth) — merged into { checkpoint, answers } for the child.
-        if (entry.state === "suspended" && entry.kind === "agent") {
-          const answers = this.store.resolvedAnswersForSeq(run.id, a.seq);
-          const base =
-            typeof entry.result === "object" &&
-            entry.result !== null &&
-            !Array.isArray(entry.result)
-              ? entry.result
-              : {};
-          result = { ...base, answers };
-        }
-        return {
-          seq: entry.seq,
-          kind: entry.kind,
-          fingerprint: entry.fingerprint,
-          state: entry.state,
-          result,
-        };
-      }
-      case "journal_put": {
-        const a = journalPutArgsSchema.parse(args);
-        const row = this.store.putJournalEntry({
-          runId: run.id,
-          seq: a.seq,
-          kind: a.kind,
-          fingerprint: a.fingerprint,
-          label: a.label ?? null,
-          state: a.state,
-          result: a.result === undefined ? null : asJsonValue(a.result, "journal result"),
-        });
-        return {
-          seq: row.seq,
-          kind: row.kind,
-          fingerprint: row.fingerprint,
-          state: row.state,
-          result: row.result,
-        };
-      }
     }
+  }
+
+  /**
+   * The human_input host call: open (or re-attach to) the gate row, flip the run to
+   * `awaiting_input`, and HOLD the call until a person answers. An already-answered gate
+   * (a crash-restarted program re-reaching the same key) returns its stored response
+   * immediately — the request row is the durable answer slot, no journal required.
+   */
+  private async holdForHumanInput(
+    run: RunRow,
+    entry: ActiveRun,
+    gate: {
+      key: string;
+      prompt: string;
+      inputSpec: unknown;
+      assignees?: readonly string[] | undefined;
+    },
+  ): Promise<{ response: JsonValue }> {
+    const answered = this.store.findResolvedHumanInputRequest(run.id, gate.key);
+    if (answered?.response != null) return { response: answered.response };
+    const inputSpec = asJsonValue(gate.inputSpec, "human_input input spec");
+    const result = this.store.transaction(() => {
+      // Re-attach to a pending row (a crash-restart re-reaching an unanswered gate) instead of
+      // opening a duplicate the responder would see twice.
+      const existing = this.store.findPendingHumanInputRequest(run.id, gate.key);
+      entry.gateSeq += 1;
+      const request =
+        existing ??
+        this.store.createHumanInputRequest({
+          runId: run.id,
+          seq: entry.gateSeq,
+          key: gate.key,
+          prompt: gate.prompt,
+          inputSpec,
+          ...(gate.assignees !== undefined ? { assignees: gate.assignees } : {}),
+        });
+      return { request, isNew: existing === null };
+    });
+    if (result.isNew) {
+      this.stampAndStore(run.id, entry.envelope, {
+        kind: "human_input_requested",
+        requestId: result.request.id,
+        key: gate.key,
+        prompt: gate.prompt,
+      });
+    }
+    const response = await new Promise<JsonValue>((resolve, reject) => {
+      entry.inputWaiters.set(gate.key, { resolve, reject });
+      this.refreshHoldStatus(run.id, entry);
+    });
+    return { response };
   }
 
   /** Find-or-create the durable child run for workflows.call/run (idempotent re-attach). */
@@ -1162,32 +999,11 @@ export class RunSupervisor {
         ? { error: { code: opts.error.code, message: opts.error.message } }
         : {}),
     });
-    const finalized = this.mustGetRun(runId);
-    // A child reaching terminal wakes a parent parked on it (workflows.call child-wait release).
-    this.wakeWaitingParent(finalized);
-    return finalized;
-  }
-
-  /**
-   * A run reached terminal: if its parent is parked `waiting_for_child` on THIS exact child
-   * (its pending workflow_call journal entry names it), resume the parent — it re-attaches, reads
-   * the now-memoized output, and continues. Defensive: a wake failure must never corrupt the
-   * child's terminal transition (boot recovery is the backstop for a missed wake).
-   */
-  private wakeWaitingParent(child: RunRow): void {
-    if (child.parentRunId === null) return;
-    try {
-      const parent = this.store.getRun(child.parentRunId);
-      if (parent === null || parent.status !== "waiting_for_child") return;
-      const pending = this.store
-        .listJournal(parent.id)
-        .find((e) => e.kind === "workflow_call" && e.state === "pending");
-      if (pending === undefined) return;
-      if (readChildRunId(pending.result) !== child.id) return;
-      this.resume(parent.id);
-    } catch (err) {
-      console.error(`run ${child.parentRunId}: failed to wake waiting_for_child parent`, err);
-    }
+    // A failed/cancelled run can leave gates pending (the held process died with them open) —
+    // close them so the inbox never shows a question no run is waiting on. A completed run has
+    // none by construction (the program can't finish while a humanInput() call is held).
+    if (status !== "completed") this.store.cancelPendingHumanInputRequests(runId);
+    return this.mustGetRun(runId);
   }
 
   /** Stamp a child-emitted body. A malformed body is dropped with a diagnostic, never fatal. */

@@ -8,7 +8,6 @@
 // supervisor over IPC. agent() runs its loop in THIS process too — program-defined tools and
 // MCP connections must execute where the program lives (the trusted layer).
 
-import { createHash } from "node:crypto";
 import { z } from "zod";
 import type {
   AgentOptions,
@@ -44,7 +43,7 @@ import type {
 import { EngineError, isEngineErrorCode } from "../errors.js";
 import {
   callWorkflowReplySchema,
-  journalEntryResultSchema,
+  humanInputReplySchema,
   mcpTokenResultSchema,
   readArtifactResultSchema,
   resolvedModelSchema,
@@ -57,30 +56,9 @@ import {
 /** Cap on a webfetch response body (the local backend's default); the model can ask for less. */
 const DEFAULT_FETCH_MAX_BYTES = 256 * 1024;
 
-/** What the child tells the supervisor when a seam suspends the run (releases the process). */
-export interface SuspendSignal {
-  reason: "human_input" | "sleep" | "workflow_call";
-  seq: number;
-  fingerprint: string;
-  humanInput?: {
-    key: string;
-    prompt: string;
-    inputSpec: unknown;
-    assignees?: string[];
-  };
-  /** A tool-level gate's leaf transcript checkpoint, stored so the leaf resumes where it paused. */
-  leafCheckpoint?: unknown;
-  /** Relative wait (ms) for reason "sleep"; the supervisor computes the absolute wake time. */
-  durationMs?: number;
-  /** The durable child run the parent is parked on, for reason "workflow_call". */
-  childRunId?: string;
-}
-
 export interface ChildHostIo {
   /** Broker a host call to the supervisor; resolves with its result. */
   request(method: HostMethod, args: Record<string, unknown>): Promise<unknown>;
-  /** Signal a durable suspension; the supervisor records it and kills this process. */
-  suspend(signal: SuspendSignal): void;
   /** Emit a run-event body (the supervisor stamps the envelope). turnId scopes leaf frames. */
   emit(body: RunEventBody, turnId?: string): void;
   /** Tell the supervisor to open a new turn block (it emits turn_started naming the leaf). */
@@ -101,60 +79,37 @@ export interface ChildHost {
   host: WorkflowHost;
   /** The run process's one redactor — the child entry scrubs failure reports with it too. */
   redactor: Redactor;
-  /**
-   * True while the program is REPLAYING journaled seams on a resume/restart (before the frontier).
-   * The child entry uses it to drop console output that was already emitted last segment — so a
-   * resumed run's stream isn't littered with duplicate pre-suspend logs.
-   */
-  isReplaying(): boolean;
 }
 
-/**
- * @param replayFrontier the highest journaled seq; 0 on a fresh run. While re-running seams up to
- * the frontier, the host is "replaying" and observability (console output, phase markers) is
- * suppressed — those lines were emitted in the prior segment.
- */
-export function createChildHost(
-  io: ChildHostIo,
-  capabilities: ToolSetContext,
-  replayFrontier = 0,
-): ChildHost {
+export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): ChildHost {
   let phaseCount = 0;
-  // Replaying until a seam at/after the frontier is reached. A fresh run (frontier 0) is live
-  // immediately; a resume starts suppressed and goes live as it crosses the suspending seam.
-  let live = replayFrontier === 0;
   // One counter per run → a stable, run-unique id for each agent() call. The author's optional
   // name rides alongside as the display label; concurrent agents stay distinguishable either way.
   let agentCount = 0;
+  // One counter per run → the default key for humanInput() gates without an author-set key.
+  // A crash-restart re-runs the program from the top, re-deriving the same keys in the same call
+  // order, so an already-answered gate is found by key and returns its stored answer.
+  let inputCount = 0;
   // One redactor for the whole run process: every secret value revealed to the program (and
   // every provider key) is scrubbed from everything model-bound, across all agent() calls.
   const redactor = new Redactor();
 
-  // Durable-seam sequence: a synchronous monotonic counter assigned at each journaled seam's
-  // entry (agent / step). Because a program's synchronous call order is deterministic, the same
-  // logical call gets the same seq on every execution — the journal key that lets a resumed run
-  // return a memoized result instead of recomputing. A miss runs the seam and records it; a hit
-  // returns the stored result (a fingerprint mismatch is a determinism error). The counter
-  // resets per child process, so a re-executed run re-derives the identical keys from the top.
-  let seamCount = 0;
-  /** Advance the seam counter and, on a resume, go live once we reach the suspending seam (the
-   *  frontier) — output after it is new; output before it was already emitted. */
-  function nextSeam(): number {
-    const seq = ++seamCount;
-    if (seq >= replayFrontier) live = true;
-    return seq;
-  }
-  async function journalGet(seq: number): Promise<JournalLookup> {
-    return journalEntryResultSchema.parse(await io.request("journal_get", { seq }));
-  }
-  async function journalPut(entry: {
-    seq: number;
-    kind: "agent" | "step";
-    fingerprint: string;
-    label: string;
-    result: unknown;
-  }): Promise<void> {
-    await io.request("journal_put", { ...entry, state: "resolved" });
+  /** Open (or re-attach to) a human-input gate and HOLD until a person answers. */
+  async function requestHumanInput(gate: {
+    key: string;
+    prompt: string;
+    inputSpec: unknown;
+    assignees?: readonly string[];
+  }): Promise<unknown> {
+    const reply = humanInputReplySchema.parse(
+      await io.request("human_input", {
+        key: gate.key,
+        prompt: gate.prompt,
+        inputSpec: gate.inputSpec,
+        ...(gate.assignees !== undefined ? { assignees: [...gate.assignees] } : {}),
+      }),
+    );
+    return reply.response;
   }
 
   // Resolution is supervisor-side (keys never live in config here); the result is cached per
@@ -308,138 +263,64 @@ export function createChildHost(
   const host: WorkflowHost = {
     setPhase(name: string, opts: PhaseOptions | undefined): void {
       phaseCount += 1;
-      // Suppressed during replay: the marker was already emitted in the prior segment.
-      if (!live) return;
       io.emit({ kind: "phase", name, id: opts?.id ?? `phase-${String(phaseCount)}` });
     },
 
     async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
-      const seq = nextSeam();
-      const fingerprint = seamFingerprint([
-        "agent",
-        opts?.provider ?? null,
-        opts?.model ?? null,
-        prompt,
-        opts?.schema ?? null,
-      ]);
-      const existing = await journalGet(seq);
-      let resume: LeafResume | undefined;
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "agent", existing.kind);
-        if (existing.state === "resolved") return existing.result;
-        // A `suspended` entry is a parked leaf (tool-level human_input): resume it from the stored
-        // checkpoint + the answers the supervisor joined in.
-        resume = leafResumeSchema.parse(existing.result);
-      }
       agentCount += 1;
       const identity: AgentIdentity = {
         agentId: `agent-${String(agentCount)}`,
         ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
       };
-      try {
-        const result = await runAgentLeaf(prompt, opts, makeLeafIo(identity), resume);
-        await journalPut({ seq, kind: "agent", fingerprint, label: prompt.slice(0, 120), result });
-        return result;
-      } catch (err) {
-        if (err instanceof LeafParked) {
-          // The model paused for a person: suspend the run with the leaf's checkpoint + the gate.
-          io.suspend({
-            reason: "human_input",
-            seq,
-            fingerprint,
-            leafCheckpoint: err.checkpoint,
-            humanInput: {
-              key: err.request.toolCallId,
-              prompt: err.request.prompt,
-              inputSpec: err.request.inputSpec,
-            },
+      // A tool-level human_input gate parks the leaf (LeafParked carries the transcript
+      // checkpoint). The transcript lives in THIS process's memory, so the hold is local: wait
+      // for the person's answer, then re-enter the leaf with the checkpoint + answer. Loop —
+      // the model may raise several gates over one leaf's lifetime. Answers ACCUMULATE across
+      // parks: a turn with several human_input calls parks once per unanswered gate, and each
+      // re-entry must still see every earlier answer or the first gate would just re-park.
+      const answers: Record<string, unknown> = {};
+      let resume: LeafResume | undefined;
+      for (;;) {
+        try {
+          return await runAgentLeaf(prompt, opts, makeLeafIo(identity), resume);
+        } catch (err) {
+          if (!(err instanceof LeafParked) || err.checkpoint === undefined) throw err;
+          answers[err.request.toolCallId] = await requestHumanInput({
+            key: err.request.toolCallId,
+            prompt: err.request.prompt,
+            inputSpec: err.request.inputSpec,
           });
-          // Park: the supervisor kills this process; a fresh process resumes the leaf.
-          return new Promise<never>(() => {});
+          resume = { checkpoint: err.checkpoint, answers };
         }
-        throw err;
       }
-    },
-
-    async step(name: string, fn: () => unknown): Promise<unknown> {
-      const seq = nextSeam();
-      const fingerprint = seamFingerprint(["step", name]);
-      const existing = await journalGet(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "step", existing.kind);
-        if (existing.state === "resolved") return existing.result;
-      }
-      const result = await fn();
-      await journalPut({ seq, kind: "step", fingerprint, label: name, result });
-      return result;
     },
 
     async humanInput(opts: HumanInputOptions): Promise<HumanInputResult> {
-      const seq = nextSeam();
-      const key = opts.key ?? `seam-${String(seq)}`;
-      const fingerprint = seamFingerprint(["human_input", key, opts.prompt, opts.input]);
-      const existing = await journalGet(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint) {
-          throw determinismError(seq, "human_input", existing.kind);
-        }
-        // The resolved result is the human's validated response; a still-`pending` entry means a
-        // spurious wake without an answer, so fall through to re-suspend.
-        if (existing.state === "resolved") return existing.result as HumanInputResult;
-      }
-      io.suspend({
-        reason: "human_input",
-        seq,
-        fingerprint,
-        humanInput: {
-          key,
-          prompt: opts.prompt,
-          inputSpec: opts.input,
-          ...(opts.assignees !== undefined ? { assignees: [...opts.assignees] } : {}),
-        },
+      inputCount += 1;
+      const key = opts.key ?? `input-${String(inputCount)}`;
+      // Holds until a person answers; the supervisor validated the response against the gate's
+      // input spec before resolving, so the cast is the IPC boundary's contract, not a guess.
+      const answer = await requestHumanInput({
+        key,
+        prompt: opts.prompt,
+        inputSpec: opts.input,
+        ...(opts.assignees !== undefined ? { assignees: opts.assignees } : {}),
       });
-      // Park: the run is now suspended and the supervisor will kill this process. Never resolves;
-      // a fresh process resumes the run and this seam returns the journaled answer above.
-      return new Promise<never>(() => {});
+      return answer as HumanInputResult;
     },
 
     async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
-      // Durable child-wait: journal the call so a long-running child can RELEASE the parent's
-      // process (suspend `waiting_for_child`) instead of holding it. The child's finalize wakes the
-      // parent, which re-attaches (idempotent) + reads the now-memoized output. A child that is
-      // already terminal returns immediately — no suspend round-trip.
-      const seq = nextSeam();
-      const idempotencyKey = opts?.idempotencyKey;
-      const fingerprint = seamFingerprint([
-        "workflow_call",
-        slug,
-        input ?? null,
-        idempotencyKey ?? null,
-      ]);
-      const existing = await journalGet(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "workflow_call", existing.kind);
-        // A resolved entry is the child's memoized output; a still-`pending` entry (we parked on the
-        // child last segment) falls through to re-attach + re-check whether it has finalized yet.
-        if (existing.state === "resolved") return existing.result;
-      }
+      // Durable child-wait: the call HOLDS until the child run is terminal. The child's run row
+      // is the durable memo — a crash-restarted parent re-attaches via the idempotency key and,
+      // if the child already completed, gets its recorded output straight back.
       const reply = callWorkflowReplySchema.parse(
         await io.request("call_workflow", {
-          seq,
-          fingerprint,
           slug,
           input,
-          ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+          ...(opts?.idempotencyKey !== undefined ? { idempotencyKey: opts.idempotencyKey } : {}),
         }),
       );
-      if (reply.status === "completed") return reply.output;
-      // The child is still running: suspend until it finalizes. The supervisor writes the pending
-      // journal entry + flips us to `waiting_for_child`, then kills this process.
-      io.suspend({ reason: "workflow_call", seq, fingerprint, childRunId: reply.childRunId });
-      return new Promise<never>(() => {});
+      return reply.output;
     },
 
     async runWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
@@ -452,34 +333,19 @@ export function createChildHost(
     },
 
     async sleep(arg: SleepArg): Promise<void> {
-      const seq = nextSeam();
-      const fingerprint = seamFingerprint(["sleep"]);
-      const existing = await journalGet(seq);
-      if (existing !== null) {
-        if (existing.fingerprint !== fingerprint)
-          throw determinismError(seq, "sleep", existing.kind);
-        // A journaled sleep already elapsed in a prior segment — the run only progresses past a
-        // sleep once it is due, so on replay this returns immediately.
-        return;
-      }
+      // Hold-in-process: this engine has no snapshot substrate, so a wait of any length holds
+      // the process (locals survive trivially — nothing ever leaves memory). Chunked so a
+      // multi-week sleep({ until }) doesn't overflow setTimeout's ~24.8-day cap.
       const durationMs = sleepMs(arg);
       if (durationMs <= 0) return;
-      if (durationMs < SUSPEND_THRESHOLD_MS) {
-        // Short wait: hold the process (cheaper than a release + replay round-trip). Chunked so a
-        // multi-week sleep({ until }) doesn't overflow setTimeout's ~24.8-day cap.
-        let remaining = durationMs;
-        while (remaining > 0) {
-          const slice = Math.min(remaining, MAX_TIMEOUT_MS);
-          await new Promise<void>((resolve) => {
-            setTimeout(resolve, slice);
-          });
-          remaining -= slice;
-        }
-        return;
+      let remaining = durationMs;
+      while (remaining > 0) {
+        const slice = Math.min(remaining, MAX_TIMEOUT_MS);
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, slice);
+        });
+        remaining -= slice;
       }
-      // Long wait: suspend — release the process; a timer resumes the run when it is due.
-      io.suspend({ reason: "sleep", seq, fingerprint, durationMs });
-      return new Promise<never>(() => {});
     },
 
     async getSecret(name: string): Promise<string> {
@@ -504,15 +370,11 @@ export function createChildHost(
       return artifactRefSchema.parse(value);
     },
   };
-  return { host, redactor, isReplaying: () => !live };
+  return { host, redactor };
 }
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer sleeps are chunked. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
-
-/** Sleeps at or above this hold-vs-release boundary SUSPEND (release the process + resume on a
- *  timer); shorter ones hold in-process, where a release + replay would cost more than it saves. */
-const SUSPEND_THRESHOLD_MS = 30_000;
 
 // Supervisor responses are validated like any other boundary input — the channel being ours
 // doesn't exempt it.
@@ -523,45 +385,6 @@ const artifactRefSchema = z.strictObject({
   name: z.string().min(1),
   url: z.string().min(1),
 });
-
-/** The supervisor's journal_get response: a memoized seam entry, or null on a miss. */
-type JournalLookup = z.infer<typeof journalEntryResultSchema>;
-
-/**
- * The shape of a SUSPENDED agent leaf's journal result on resume: the transcript checkpoint plus
- * the answers the supervisor joined from the resolved request rows. `messages` is our own
- * serialized transcript round-tripping through JSON — passed back to the leaf, not re-validated.
- */
-const leafResumeSchema = z.object({
-  checkpoint: z.object({
-    messages: z.array(z.custom<ChatMessage>()),
-    iteration: z.number().int(),
-    totals: z.object({
-      inputTokens: z.number().int(),
-      outputTokens: z.number().int(),
-    }),
-  }),
-  answers: z.record(z.string(), z.unknown()),
-});
-
-/** A stable content hash of a seam's salient args — the determinism check on replay. */
-function seamFingerprint(parts: readonly unknown[]): string {
-  return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
-}
-
-/** A seam reached on replay didn't match what the journal recorded at that seq. */
-function determinismError(seq: number, got: string, recorded: string): EngineError {
-  const detail =
-    got === recorded
-      ? `the same "${got}" seam but with different arguments (a changed prompt, model, or step name)`
-      : `a "${recorded}" call, but this execution reached a "${got}" call`;
-  return new EngineError(
-    "PROGRAM_ERROR",
-    `Nondeterministic replay at seam ${String(seq)}: the journal recorded ${detail}. A workflow's ` +
-      `code on the path to a suspend/resume must be deterministic — route nondeterministic I/O ` +
-      `through agent(), step.run(), or workflows.call so it is journaled.`,
-  );
-}
 
 /** Scrub every known secret value out of model-bound message text — the seam's last word before
  *  anything reaches the provider. Pure + idempotent: returns redacted copies, mutates nothing. */

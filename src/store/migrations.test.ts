@@ -67,7 +67,6 @@ describe("migrate", () => {
       "cron_fires",
       "human_input_requests",
       "run_events",
-      "run_journal",
       "runs",
       "workflows",
     ]);
@@ -82,7 +81,6 @@ describe("migrate", () => {
       "human_input_requests_status",
       "runs_parent_idempotency_key",
       "runs_status",
-      "runs_wake_at",
       "runs_workflow_id_status",
     ]);
   });

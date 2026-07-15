@@ -3,6 +3,39 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.0
+
+### Changed (breaking — the journal is deleted; waits hold in-process)
+
+The North Star deletion (Phase D). The journal/replay/fingerprint supervisor machinery is gone;
+on this engine — which has no snapshot substrate — every wait now HOLDS the run's process, so
+locals survive trivially and nothing ever replays. Requires `@boardwalk-labs/workflow` ≥ 0.2.0
+(which drops durable `now()`/`random()`/`uuid()`, `step`, and the `/lint` module).
+
+- **`sleep` holds** for its whole duration (any length; chunked past setTimeout's cap). No
+  `sleeping` status, no timed-wake sweep. A held wait burns `max_duration_seconds` — on a
+  non-snapshot engine, waiting occupies the process ("pay idle"); prefer a cron topology for
+  long waits.
+- **`humanInput()` holds**: the gate is a blocking `human_input` host call; the run sits in
+  `awaiting_input` with its process alive, and the validated answer is delivered to the live
+  call. The `human_input_requests` row is the durable answer slot — a crash-restarted program
+  re-reaching the same key gets the stored answer instead of re-asking.
+- **The in-leaf `human_input` tool holds the leaf mid-loop**: the transcript stays in memory;
+  the answer re-enters the leaf via `LeafResume` in the same process. Answers accumulate across
+  parks, so a turn with several gates converges.
+- **`workflows.call` holds until the child run is terminal.** The child's run row is the durable
+  memo — a restarted parent re-attaches via the idempotency key; the journal memoization is
+  redundant. `waiting_for_child` remains as the observable status while the call is in flight.
+- **Crash/restart semantics unchanged and now uniform**: restart-from-top, side effects re-run,
+  no replay suppression (console output streams once because the process never re-runs).
+- **Deleted**: the `run_journal` table (forward migration v4, with `runs.wake_at` and its
+  index), `journal_get`/`journal_put` IPC, the seam sequencer + fingerprint + determinism
+  error, the replay frontier + console suppression, the scheduler's wake pass, and
+  `SuspendSignal`/the `suspend` child message. `isSuspended` is renamed `isHeld`.
+- Held statuses (`awaiting_input`, `waiting_for_child`) now count as ACTIVE for the `serial`
+  concurrency gate — a held run occupies its process, so a serial workflow won't dispatch a
+  second run beside it.
+
 ## 0.1.35
 
 `agent({ cwd })` plus three self-correction improvements drawn from auditing a production run

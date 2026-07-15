@@ -6,7 +6,7 @@
 // source of truth for what a valid answer looks like — the same description the UI renders from.
 // A submission is checked here before it ever reaches the program: a bad answer is a VALIDATION
 // error the responder sees, never a value the workflow has to defend against. Returns the
-// normalized result the program receives (and the journal stores).
+// normalized result the program receives (stored on the request row as the durable answer).
 
 import { z } from "zod";
 import type { JsonValue } from "@boardwalk-labs/workflow";

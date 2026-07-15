@@ -63,39 +63,10 @@ export interface RunRow {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
-  /** Due time for a timed suspension (long sleep / human-input timeout); null otherwise. */
-  wakeAt: number | null;
-  /** Cumulative ON-CPU execution time (ms) across all segments — what `max_duration_seconds`
-   *  (active compute) is checked against. Suspended idle does NOT accrue here. */
+  /** Cumulative execution time (ms) across all segments — what `max_duration_seconds` is
+   *  checked against. A held wait (sleep / gate / child) accrues here: this engine has no
+   *  snapshot substrate, so waiting occupies the process. */
   activeMs: number;
-}
-
-/**
- * A durable-seam memoization state: `pending` (a sleep / program-level gate awaiting its event),
- * `suspended` (a parked agent leaf holding a transcript checkpoint), or `resolved` (memoized). Only
- * `resolved` is immutable; a pending/suspended entry is overwritten as the seam progresses.
- */
-export type JournalState = "pending" | "suspended" | "resolved";
-
-/** The durable seams a run journals (the only ones whose results survive a resume). */
-export type JournalKind = "agent" | "step" | "human_input" | "sleep" | "workflow_call";
-
-/**
- * One memoized durable-seam call. On a resume the program re-runs from the top; each seam looks
- * up its (run_id, seq) entry and, on a `resolved` hit with a matching `fingerprint`, returns
- * `result` WITHOUT re-executing. A `pending` entry is a seam awaiting an external event (a human
- * answer / a timer); `result` then holds its wake payload or a parked-leaf checkpoint.
- */
-export interface JournalRow {
-  runId: string;
-  seq: number;
-  kind: JournalKind;
-  fingerprint: string;
-  label: string | null;
-  state: JournalState;
-  result: JsonValue | null;
-  createdAt: number;
-  resolvedAt: number | null;
 }
 
 /** Lifecycle of a human-in-the-loop gate. */
@@ -193,14 +164,6 @@ const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
 const configSchema = z.record(z.string(), jsonValueSchema);
 const metadataSchema = z.record(z.string(), z.unknown());
 
-const journalStateSchema: z.ZodType<JournalState> = z.enum(["pending", "suspended", "resolved"]);
-const journalKindSchema: z.ZodType<JournalKind> = z.enum([
-  "agent",
-  "step",
-  "human_input",
-  "sleep",
-  "workflow_call",
-]);
 const humanInputStatusSchema: z.ZodType<HumanInputStatus> = z.enum([
   "pending",
   "resolved",
@@ -316,22 +279,7 @@ function mapRun(row: SqlRow): RunRow {
     createdAt: readInteger(row, "runs", "created_at"),
     startedAt: readIntegerOrNull(row, "runs", "started_at"),
     endedAt: readIntegerOrNull(row, "runs", "ended_at"),
-    wakeAt: readIntegerOrNull(row, "runs", "wake_at"),
     activeMs: readInteger(row, "runs", "active_ms"),
-  };
-}
-
-function mapJournal(row: SqlRow): JournalRow {
-  return {
-    runId: readText(row, "run_journal", "run_id"),
-    seq: readInteger(row, "run_journal", "seq"),
-    kind: readEnum(row, "run_journal", "kind", journalKindSchema),
-    fingerprint: readText(row, "run_journal", "fingerprint"),
-    label: readTextOrNull(row, "run_journal", "label"),
-    state: readEnum(row, "run_journal", "state", journalStateSchema),
-    result: readJsonOrNull(row, "run_journal", "result", jsonValueSchema),
-    createdAt: readInteger(row, "run_journal", "created_at"),
-    resolvedAt: readIntegerOrNull(row, "run_journal", "resolved_at"),
   };
 }
 
@@ -657,8 +605,6 @@ export class Store {
       output?: JsonValue;
       startedAt?: number;
       endedAt?: number;
-      /** Present ⇒ set wake_at (a number arms a timed wake; `null` clears it on resume). */
-      wakeAt?: number | null;
     } = {},
   ): void {
     const sets = ["status = ?"];
@@ -678,11 +624,6 @@ export class Store {
     if (opts.endedAt !== undefined) {
       sets.push("ended_at = ?");
       params.push(opts.endedAt);
-    }
-    // Present-key (not value) decides: { wakeAt: null } clears, absence leaves it unchanged.
-    if (Object.hasOwn(opts, "wakeAt")) {
-      sets.push("wake_at = ?");
-      params.push(opts.wakeAt ?? null);
     }
     const result = this.prepare(`UPDATE runs SET ${sets.join(", ")} WHERE id = ?`).run(
       ...params,
@@ -901,108 +842,10 @@ export class Store {
   }
 
   // --------------------------------------------------------------------------
-  // Run journal (durable-seam memoization)
-  // --------------------------------------------------------------------------
-
-  /** The memoized entry for a seam, or null if it hasn't run yet (a replay miss). */
-  getJournalEntry(runId: string, seq: number): JournalRow | null {
-    const row = this.prepare("SELECT * FROM run_journal WHERE run_id = ? AND seq = ?").get(
-      runId,
-      seq,
-    );
-    return row === undefined ? null : mapJournal(row);
-  }
-
-  /**
-   * Record a seam's journal entry, idempotent on (run_id, seq): if the row already exists (e.g. a
-   * crash between the write and the suspend, then a replay), the EXISTING row wins and is
-   * returned — a seq is memoized exactly once.
-   */
-  putJournalEntry(entry: {
-    runId: string;
-    seq: number;
-    kind: JournalKind;
-    fingerprint: string;
-    label?: string | null;
-    state: JournalState;
-    result?: JsonValue | null;
-  }): JournalRow {
-    const resultJson = serializeJson(entry.result, "journal result");
-    return this.transaction(() => {
-      const existing = this.getJournalEntry(entry.runId, entry.seq);
-      // A RESOLVED entry is immutable — that is the memoization guarantee (and the crash-between-
-      // write-and-suspend re-attach). A pending/suspended entry is overwritten: a parked leaf
-      // resuming records its new checkpoint (re-park) or its final result (done).
-      if (existing !== null && existing.state === "resolved") return existing;
-      const t = this.now();
-      try {
-        this.prepare(
-          `INSERT OR REPLACE INTO run_journal (run_id, seq, kind, fingerprint, label, state, result, created_at, resolved_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).run(
-          entry.runId,
-          entry.seq,
-          entry.kind,
-          entry.fingerprint,
-          entry.label ?? null,
-          entry.state,
-          resultJson,
-          existing?.createdAt ?? t, // preserve the original creation time across a replace
-          entry.state === "resolved" ? t : null,
-        );
-      } catch (err) {
-        if (isForeignKeyViolation(err)) {
-          throw new EngineError("NOT_FOUND", `run ${entry.runId} not found`);
-        }
-        throw err;
-      }
-      const row = this.getJournalEntry(entry.runId, entry.seq);
-      if (row === null) {
-        throw new EngineError(
-          "INTERNAL",
-          `journal entry ${entry.runId}/${String(entry.seq)} vanished mid-write`,
-        );
-      }
-      return row;
-    });
-  }
-
-  /** Resolve a pending journal entry with its memoized result (the awaited event arrived). */
-  resolveJournalEntry(runId: string, seq: number, result: JsonValue): void {
-    const resultJson = serializeJson(result, "journal result");
-    const changed = this.prepare(
-      "UPDATE run_journal SET state = 'resolved', result = ?, resolved_at = ? WHERE run_id = ? AND seq = ?",
-    ).run(resultJson, this.now(), runId, seq);
-    if (Number(changed.changes) === 0) {
-      throw new EngineError("NOT_FOUND", `journal entry ${runId}/${String(seq)} not found`);
-    }
-  }
-
-  /** A run's full journal in seq order (replay seeding + debugging). */
-  listJournal(runId: string): JournalRow[] {
-    return this.prepare("SELECT * FROM run_journal WHERE run_id = ? ORDER BY seq ASC")
-      .all(runId)
-      .map(mapJournal);
-  }
-
-  /**
-   * The highest journaled seq for a run, or 0 if none. This is the REPLAY FRONTIER: on a resume
-   * (or crash-restart) the child suppresses observability while re-running seams ≤ this, since
-   * they (and the output around them) were already emitted in the prior segment.
-   */
-  maxJournalSeq(runId: string): number {
-    const row = this.prepare(
-      "SELECT COALESCE(MAX(seq), 0) AS max_seq FROM run_journal WHERE run_id = ?",
-    ).get(runId);
-    if (row === undefined) throw new EngineError("INTERNAL", "MAX(seq) returned no row");
-    return readInteger(row, "run_journal", "max_seq");
-  }
-
-  // --------------------------------------------------------------------------
   // Human-input requests (human-in-the-loop gates)
   // --------------------------------------------------------------------------
 
-  /** Create a pending human-input request (its run_journal entry is written separately). */
+  /** Create a pending human-input request. */
   createHumanInputRequest(args: {
     runId: string;
     seq: number;
@@ -1063,6 +906,18 @@ export class Store {
     return row === undefined ? null : mapHumanInputRequest(row);
   }
 
+  /**
+   * The most recent ANSWERED request for (run, key), or null. A crash-restarted program
+   * re-reaching a gate finds the answer a person already gave here — the request row is the
+   * durable answer slot.
+   */
+  findResolvedHumanInputRequest(runId: string, key: string): HumanInputRequestRow | null {
+    const row = this.prepare(
+      "SELECT * FROM human_input_requests WHERE run_id = ? AND key = ? AND status = 'resolved' ORDER BY responded_at DESC, rowid DESC",
+    ).get(runId, key);
+    return row === undefined ? null : mapHumanInputRequest(row);
+  }
+
   /** List requests newest-first, optionally filtered by run and/or status (the inbox query). */
   listHumanInputRequests(
     filter: { runId?: string; statuses?: readonly HumanInputStatus[] } = {},
@@ -1105,23 +960,6 @@ export class Store {
     return this.getHumanInputRequest(id);
   }
 
-  /**
-   * Resolved human-input answers for a parked agent leaf at (runId, seq), keyed by request key
-   * (which is the tool-call id for a tool-level gate). The leaf reconstructs with these on resume —
-   * the request rows are the single source of truth for answers, joined here at read time.
-   */
-  resolvedAnswersForSeq(runId: string, seq: number): Record<string, JsonValue> {
-    const rows = this.prepare(
-      "SELECT key, response FROM human_input_requests WHERE run_id = ? AND seq = ? AND status = 'resolved'",
-    ).all(runId, seq);
-    const out: Record<string, JsonValue> = {};
-    for (const row of rows) {
-      const key = readText(row, "human_input_requests", "key");
-      out[key] = readJson(row, "human_input_requests", "response", jsonValueSchema);
-    }
-    return out;
-  }
-
   /** Mark a pending request expired/cancelled (timeout, or the run was cancelled). No-op otherwise. */
   closeHumanInputRequest(id: string, status: "expired" | "cancelled"): void {
     this.prepare(
@@ -1134,20 +972,6 @@ export class Store {
     this.prepare(
       "UPDATE human_input_requests SET status = 'cancelled', responded_at = ? WHERE run_id = ? AND status = 'pending'",
     ).run(this.now(), runId);
-  }
-
-  // --------------------------------------------------------------------------
-  // Timed wake
-  // --------------------------------------------------------------------------
-
-  /** Suspended runs whose timed wake is due (long sleep / human-input timeout). */
-  listRunsToWake(now: number): RunRow[] {
-    return this.prepare(
-      `SELECT * FROM runs WHERE status IN ('sleeping', 'awaiting_input') AND wake_at IS NOT NULL AND wake_at <= ?
-       ORDER BY wake_at ASC`,
-    )
-      .all(now)
-      .map(mapRun);
   }
 
   // --------------------------------------------------------------------------
