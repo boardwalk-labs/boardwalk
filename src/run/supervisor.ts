@@ -120,16 +120,9 @@ interface ActiveRun {
 }
 
 const TERMINAL_STATUSES: readonly RunStatus[] = ["completed", "failed", "cancelled"];
+// Held statuses: a LIVE run holds its process through these (a person's answer, a child run); a
+// row left in one by a dead engine has no process and is restarted from the top by the boot sweep.
 const HELD_STATUSES: readonly RunStatus[] = ["sleeping", "awaiting_input", "waiting_for_child"];
-
-/**
- * True when a run's status says it is waiting on an external condition (a person's answer, a
- * child run). A LIVE run holds its process through these; a row left in one by a dead engine
- * has no process and is restarted from the top by the boot sweep.
- */
-export function isHeld(status: RunStatus): boolean {
-  return HELD_STATUSES.includes(status);
-}
 
 /** Treat an MCP access token expiring this soon as already expired — a token that dies
  *  between the broker reply and the server call would burn the child's whole 401 retry. */

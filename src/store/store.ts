@@ -960,13 +960,6 @@ export class Store {
     return this.getHumanInputRequest(id);
   }
 
-  /** Mark a pending request expired/cancelled (timeout, or the run was cancelled). No-op otherwise. */
-  closeHumanInputRequest(id: string, status: "expired" | "cancelled"): void {
-    this.prepare(
-      "UPDATE human_input_requests SET status = ?, responded_at = ? WHERE id = ? AND status = 'pending'",
-    ).run(status, this.now(), id);
-  }
-
   /** Cancel every pending request for a run (called when the run is cancelled). */
   cancelPendingHumanInputRequests(runId: string): void {
     this.prepare(
