@@ -3,6 +3,35 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.2
+
+### Fixed (agent context is budgeted in tokens; a long loop no longer outgrows its model)
+
+The `agent()` compaction budget was 600,000 **characters**, justified as "roughly 150k tokens" on a
+flat ~4-chars-per-token assumption. Measured against `o200k_base`, that assumption is inverted for
+real agent traffic: prose is 4.02 chars/token and TypeScript source 4.13, but **JSON tool results
+are 2.87** — and a tool loop's conversation is mostly JSON tool I/O. The trigger therefore fired at
+**~209k tokens**, past a 200k-window model and far past any 128k one, so a long loop could exceed
+its model's context before compaction ever ran. It is a quality problem before a cost one: accuracy
+degrades steeply with context length well before the window fills.
+
+- **The budget is now `DEFAULT_COMPACTION_BUDGET_TOKENS = 100_000`**, and the estimator buckets by
+  how content actually tokenizes (prose for user/assistant text, the denser JSON ratio for tool
+  results and serialized tool-call inputs). Long loops now compact earlier and stay well inside
+  every supported model's window.
+- **The estimate self-calibrates against the provider.** Each turn reports what the request really
+  cost (`usage.input_tokens` / `prompt_tokens`), so the leaf compares its prediction to reality and
+  scales future estimates. No tokenizer dependency and no per-model table — which matters because
+  the leaf cannot know its model (resolution lives behind the `streamModel` seam). A model whose
+  tokenizer is denser than these constants protects itself automatically.
+- **Tool output caps drop at source**, where capping costs no prompt cache (unlike retroactive
+  eviction, which rewrites history): `read` 100k → **40k chars**, `bash` 64k → **32k bytes per
+  stream**. Page a large file with `offset`/`limit`, or locate with `grep`.
+- **`bash` now keeps the head AND the tail of output**, eliding the middle. It previously kept only
+  the head, which discarded the part that matters — a build or test run puts its verdict at the end.
+
+The 100k target is a considered default, not a measured optimum.
+
 ## 0.2.0
 
 ### Changed (breaking — the journal is deleted; waits hold in-process)
