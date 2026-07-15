@@ -5,7 +5,7 @@
 // restart-from-the-top, idempotent re-attach, hold-and-pay sleep, cancellation, budgets —
 // live in the parent⇄child interaction, not in any unit.
 
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -440,6 +440,54 @@ describe("RunSupervisor", () => {
     expect(row.output).toBe("secret-value-42");
   }, 20_000);
 
+  // The cross-engine half of the cwd contract (docs/WORKSPACE_PERSISTENCE.md I1 + §9). The engine has
+  // chdir'd to the workspace since dev-on-engine, and EVERY persist test below leans on it (they all
+  // write relative paths) — but nothing asserted it, on either engine. That gap is what let the hosted
+  // runner ship with cwd `/` (fleet) and `/app` (Fargate) while dev stayed correct, so the same
+  // program silently lost its state only when hosted. The runner asserts the same invariant in
+  // program_runner.test.ts; these two must not drift apart again.
+  describe("the workspace IS the working directory (WORKSPACE_PERSISTENCE.md I1)", () => {
+    // The run's workspace, per prepareRunDir's layout. Resolved: macOS `tmpdir()` is a symlink
+    // (/var → /private/var) and `process.cwd()` reports the REAL path, so an unresolved expectation
+    // compares a symlink to its target and fails for the wrong reason.
+    const workspaceOf = (dataDir: string, runId: string): string =>
+      realpathSync(join(dataDir, "runs", runId, "workspace"));
+
+    it("runs author code with cwd === the run's workspace dir", async () => {
+      const f = fixture();
+      f.deploy(
+        "cwd-probe",
+        `import { output } from "@boardwalk-labs/workflow";
+         output({ cwd: process.cwd() });`,
+      );
+      const runId = f.startRun("cwd-probe", {});
+      const row = await f.supervisor.supervise(runId);
+      expect((row.output as { cwd: string }).cwd).toBe(workspaceOf(f.dataDir, runId));
+    }, 30_000);
+
+    it("lands a program's RELATIVE write in the workspace, not wherever the engine was started", async () => {
+      const f = fixture();
+      f.deploy(
+        "rel-write",
+        `import { writeFileSync } from "node:fs";
+         writeFileSync("landed-here.txt", "x");`,
+      );
+      const runId = f.startRun("rel-write", {});
+      await f.supervisor.supervise(runId);
+      expect(existsSync(join(workspaceOf(f.dataDir, runId), "landed-here.txt"))).toBe(true);
+    }, 30_000);
+
+    it("keeps the program bundle OUT of the workspace (I2)", async () => {
+      const f = fixture();
+      f.deploy("iso", `import { writeFileSync } from "node:fs"; writeFileSync("only.txt", "x");`);
+      const runId = f.startRun("iso", {});
+      await f.supervisor.supervise(runId);
+      // The engine lays the program down as a SIBLING of the workspace (runs/<id>/program), so a
+      // persist can never sweep the bundle into the durable state. The runner asserts the same.
+      expect(readdirSync(workspaceOf(f.dataDir, runId))).toEqual(["only.txt"]);
+    }, 30_000);
+  });
+
   describe("workspace.persist", () => {
     // Reads state/value.txt if present, writes input.write to it, outputs what it read.
     const COUNTER_PROGRAM = `
@@ -466,7 +514,13 @@ describe("RunSupervisor", () => {
       expect(third.output).toEqual({ read: "beta" });
     }, 30_000);
 
-    it("a FAILED run does not overwrite the durable state", async () => {
+    // A FAILED run DOES persist — every terminal path does (docs/WORKSPACE_PERSISTENCE.md §5).
+    // This test asserted the opposite, because the engine used to persist on success only. That
+    // became unenforceable the moment `sleep` existed (a suspending run persists mid-flight, so a
+    // later failure can't un-write it), it disagreed with hosted for the same program, and it is
+    // backwards for the loops persistence exists to serve: a failed attempt's memory is exactly what
+    // the next attempt needs. Poisoned state is cured by RESET, not by dropping writes.
+    it("a FAILED run persists its workspace — every terminal path does", async () => {
       const f = fixture();
       f.deploy("stateful", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
       await f.supervisor.supervise(f.startRun("stateful", { write: "keep-me" }));
@@ -476,18 +530,22 @@ describe("RunSupervisor", () => {
         "stateful",
         `import { mkdirSync, writeFileSync } from "node:fs";
          mkdirSync("state", { recursive: true });
-         writeFileSync("state/value.txt", "half-finished");
+         writeFileSync("state/value.txt", "written-before-throwing");
          throw new Error("dies after writing");`,
         { workspace: { persist: ["state"] } },
       );
       const failed = await f.supervisor.supervise(f.startRun("stateful", {}));
       expect(failed.status).toBe("failed");
 
-      // Restore the reader program; it must still see the value from the SUCCESSFUL run.
+      // Restore the reader program; the failed run's write is the new durable baseline.
       f.deploy("stateful", COUNTER_PROGRAM, { workspace: { persist: ["state"] } });
       const after = await f.supervisor.supervise(f.startRun("stateful", { write: "next" }));
-      expect(after.output).toEqual({ read: "keep-me" });
+      expect(after.output).toEqual({ read: "written-before-throwing" });
     }, 30_000);
+
+    // `cancelled` and `budget` share the SAME persist statement as `failed` (it is hoisted above the
+    // switch, guarded only against `crashed`), so the test above pins them too. Racing a real cancel
+    // through the store's `cancelling` status would add flake, not coverage.
 
     it("persist: true round-trips the whole workspace", async () => {
       const f = fixture();

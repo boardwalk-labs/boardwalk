@@ -414,6 +414,29 @@ export class RunSupervisor {
       activeMs += entry.lastSegmentActiveMs;
       this.store.recordActiveMs(run.id, activeMs);
 
+      // Persist-back at EVERY terminal path — success, failure, cancel, and budget alike
+      // (docs/WORKSPACE_PERSISTENCE.md §5). This used to fire only on success, on the reasoning that
+      // a half-finished workspace must not overwrite the durable state. That reasoning stopped
+      // holding the moment `sleep` existed: a suspending run already persists mid-flight, so
+      // success-only is unenforceable, and it made dev disagree with hosted (which persists on every
+      // terminal path) for the same program. It is also backwards for the loops this feature exists
+      // to serve — a failed attempt's memory is exactly what the next attempt needs. The escape
+      // hatch for state that goes bad is RESET (§7), not withholding the write.
+      //
+      // `crashed` is deliberately excluded: it is NOT terminal (it restarts from the top against
+      // this same workspace dir, which is why hydrate doesn't re-run either), and its
+      // restart-budget-exhausted path can't persist a workspace the dead process may have left torn
+      // mid-write. Hosted has the same semantics for free — a crash there is VM death, so nothing
+      // survives to run a persist.
+      if (result.kind !== "crashed") {
+        persistWorkspace(
+          persistRoot(this.dataDir, workflow.id),
+          manifest.workspace?.persist,
+          entry.memoryDirs,
+          dirs.workspaceDir,
+        );
+      }
+
       switch (result.kind) {
         case "done": {
           if (result.outputDeclared) {
@@ -422,15 +445,6 @@ export class RunSupervisor {
           // A completion racing a cancel request coerces to cancelled — `cancelling` must
           // never land on `completed` (the output event above is still preserved).
           if (entry.cancelRequested) return this.finishRun(run.id, entry, "cancelled", {});
-          // Persist-back happens at SUCCESSFUL run end only (failed/cancelled runs must not
-          // overwrite the durable state with a half-finished workspace). Per-agent memory
-          // dirs used this run are persisted alongside the manifest's selection.
-          persistWorkspace(
-            persistRoot(this.dataDir, workflow.id),
-            manifest.workspace?.persist,
-            entry.memoryDirs,
-            dirs.workspaceDir,
-          );
           return this.finishRun(run.id, entry, "completed", {
             output: result.outputDeclared ? result.output : null,
           });
