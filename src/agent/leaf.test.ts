@@ -372,11 +372,39 @@ describe("runAgentLeaf — plain inference", () => {
       groups: [3, 4],
     });
 
-    // Genuinely non-JSON prose still fails the run loudly.
+    // Genuinely non-JSON prose (twice, since the fake clamps to its last response) fails loudly.
     const prose = recordedIo(OPENAI_MODEL, [() => openAiText("Sure! Here are the groups…")]);
     await expect(runAgentLeaf("p", { schema: { type: "object" } }, prose.io)).rejects.toThrow(
-      /not valid JSON/,
+      /not valid JSON \(after a retry\)/,
     );
+  });
+
+  it("schema mode spends ONE corrective turn when the first answer isn't JSON, then parses it", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiText("Sure! Here are the groups you asked for."),
+      () => openAiText('{"groups": [5, 6]}'),
+    ]);
+    const parsed = await runAgentLeaf("group these", { schema: { type: "object" } }, rec.io);
+    expect(parsed).toEqual({ groups: [5, 6] });
+    // Two model turns: the original + exactly one correction, whose request demands JSON only.
+    expect(rec.requests).toHaveLength(2);
+    expect(rec.requests[1]?.body).toContain("was not valid JSON");
+    expect(rec.requests[1]?.body).toContain("JSON Schema");
+    // The correction's usage is metered (not silently dropped).
+    expect(rec.usage.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("schema mode retries only ONCE — a second non-JSON answer fails the run", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiText("first prose answer"),
+      () => openAiText("second prose answer, still no JSON"),
+      () => openAiText('{"never": "reached"}'),
+    ]);
+    await expect(runAgentLeaf("p", { schema: { type: "object" } }, rec.io)).rejects.toThrow(
+      /not valid JSON \(after a retry\)/,
+    );
+    // Original + one retry = 2 requests; the third scripted response is never consumed.
+    expect(rec.requests).toHaveLength(2);
   });
 
   it("extractJsonCandidate recovers JSON from fences, prose, and nested structures", () => {

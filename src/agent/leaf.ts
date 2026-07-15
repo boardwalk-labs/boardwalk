@@ -469,6 +469,13 @@ async function runLeafWithTools(
         : undefined,
     );
   }
+  // Schema resolution happens BEFORE turn_ended: a corrective retry is another (visible) model turn
+  // whose usage must land in the totals the turn_ended event reports.
+  const result =
+    opts?.schema === undefined
+      ? finalText
+      : await resolveSchemaOutput(finalText, opts.schema, messages, opts, io, turnId, totals);
+
   io.emit(turnId, {
     kind: "turn_ended",
     ...io.identity,
@@ -476,7 +483,7 @@ async function runLeafWithTools(
     usage: { inputTokens: totals.inputTokens, outputTokens: totals.outputTokens },
   });
 
-  return opts?.schema === undefined ? finalText : parseSchemaOutput(finalText);
+  return result;
 }
 
 async function runToolLoop(
@@ -510,7 +517,14 @@ async function runToolLoop(
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
     await reduceContextIfNeeded(messages, turnTools, opts, io);
 
-    const { turn, modelRef } = await modelTurn(messages, turnTools, opts, io, turnId, iteration);
+    const { turn, modelRef } = await modelTurn(
+      messages,
+      turnTools,
+      opts,
+      io,
+      turnId,
+      String(iteration),
+    );
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
     totals.outputTokens += turn.usage.outputTokens ?? 0;
@@ -672,9 +686,9 @@ async function modelTurn(
   opts: AgentOptions | undefined,
   io: LeafIo,
   turnId: string,
-  iteration: number,
+  blockLabel: string,
 ): Promise<ModelTurnResult> {
-  const blockId = `text-${String(iteration)}`;
+  const blockId = `text-${blockLabel}`;
   let blockOpen = false;
   const providerIo: ProviderIo = {
     ...io.provider,
@@ -849,25 +863,65 @@ function redactToolReturn(redactor: Redactor, event: ToolReturn): ToolReturn {
   return out;
 }
 
-/**
- * Schema mode: recover the JSON value from the model's final text and parse it. Models routinely
- * wrap valid JSON in prose ("Sure, here you go: {...}") or markdown fences despite instructions, so
- * before parsing we (1) strip a surrounding code fence and (2) carve out the first balanced object
- * or array. This turns the most common "schema mode failed" cases into successes WITHOUT a model
- * round-trip. A truly non-JSON answer still fails the run (the documented contract). Structural
- * validation against the schema itself is a later, cross-engine decision; this recovers + parses.
- */
-function parseSchemaOutput(text: string): unknown {
+/** Best-effort extract + parse; `{ ok: false }` rather than throwing, so a caller can retry. */
+function tryParseJson(text: string): { ok: true; value: unknown } | { ok: false } {
   const candidate = extractJsonCandidate(text);
   try {
-    return JSON.parse(candidate);
+    return { ok: true, value: JSON.parse(candidate) };
   } catch {
-    throw new EngineError(
-      "VALIDATION",
-      "agent() was called with a schema but the model's answer was not valid JSON.",
-      `Answer started with: ${JSON.stringify(candidate.slice(0, 80))}`,
-    );
+    return { ok: false };
   }
+}
+
+/**
+ * Resolve an `agent({ schema })` call's output. First try the best-effort extract + parse, which
+ * recovers the common "wrapped in prose or code fences" misses with no model round-trip. Only if
+ * that fails spend ONE corrective turn — show the model its own answer, demand JSON only, withhold
+ * tools — and re-parse before failing the run. This turns a transient formatting slip into a
+ * success instead of discarding an entire run's work (the failure mode that motivated this: a leaf
+ * answering in prose used to kill a long, expensive run outright).
+ *
+ * The corrective turn is a real, visible model turn: it streams under its own `text-schema-retry`
+ * block and its tokens are metered into `totals`. Structural validation of the parsed value against
+ * the schema stays a separate cross-engine decision (it would change the contract every engine
+ * enforces); this recovers + parses, matching the prior behavior's guarantee.
+ */
+async function resolveSchemaOutput(
+  finalText: string,
+  schema: NonNullable<AgentOptions["schema"]>,
+  messages: ChatMessage[],
+  opts: AgentOptions,
+  io: LeafIo,
+  turnId: string,
+  totals: { inputTokens: number; outputTokens: number },
+): Promise<unknown> {
+  const first = tryParseJson(finalText);
+  if (first.ok) return first.value;
+
+  // The stopped turn's text was never pushed to `messages` (the loop returns it directly), so add it
+  // before the correction, giving the model its own answer to fix.
+  messages.push({ role: "assistant", text: finalText, toolCalls: [] });
+  messages.push({
+    role: "user",
+    content: io.redactor.redact(
+      "Your previous answer was not valid JSON. Respond with ONLY a JSON value matching this JSON " +
+        `Schema — no prose, no code fences, no explanation:\n${JSON.stringify(schema)}`,
+    ),
+  });
+
+  const { turn, modelRef } = await modelTurn(messages, [], opts, io, turnId, "schema-retry");
+  totals.inputTokens += turn.usage.inputTokens ?? 0;
+  totals.outputTokens += turn.usage.outputTokens ?? 0;
+  io.reportUsage(modelRef, turn.usage);
+
+  const second = tryParseJson(turn.text);
+  if (second.ok) return second.value;
+
+  throw new EngineError(
+    "VALIDATION",
+    "agent() was called with a schema but the model's answer was not valid JSON (after a retry).",
+    `Answer started with: ${JSON.stringify(extractJsonCandidate(turn.text).slice(0, 80))}`,
+  );
 }
 
 /**
