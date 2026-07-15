@@ -28,6 +28,12 @@ Same engine, same semantics as the Boardwalk platform: one run = one process, `s
 process, a crash restarts the run from the top, `workflows.call` re-attaches idempotently.
 The conformance suite in this repo tests that parity.
 
+Reach for it when you want to run an AI agent on a schedule ("check the news every day at
+9am"), respond to webhooks with an agent, or keep a background agent loop working toward a goal,
+without hand-rolling cron plus a script plus retry logic. The [examples
+repo](https://github.com/boardwalk-labs/examples) has copyable templates for each of those
+shapes.
+
 ## Quickstart
 
 Run the server with Docker — run history and state live in the mounted data dir:
@@ -87,6 +93,17 @@ engine.close();
 ```
 
 For OAuth-protected MCP servers an `agent()` call connects to, `engine.authorizeMcpServer(url, { onAuthorizationUrl })` performs the one-time interactive grant; after that, runs use (and silently refresh) the stored token headlessly — see [SPEC.md §2.3](./SPEC.md).
+
+## The Boardwalk repos
+
+- [`sdk`](https://github.com/boardwalk-labs/sdk) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports.
+- [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, run locally, deploy.
+- [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`).
+- [`plugins`](https://github.com/boardwalk-labs/plugins) — skills + MCP server for Claude Code, Codex, Cursor, OpenClaw, OpenCode.
+- [`runner`](https://github.com/boardwalk-labs/runner) — self-hosted runner: your machines execute hosted-scheduled runs.
+- [`runner-images`](https://github.com/boardwalk-labs/runner-images) — reproducible base images hosted runners execute in.
+
+Hosted platform and docs: [boardwalk.sh](https://boardwalk.sh).
 
 ## License
 
