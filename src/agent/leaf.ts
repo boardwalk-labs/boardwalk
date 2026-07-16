@@ -21,8 +21,8 @@ import type {
   ToolReturn,
 } from "@boardwalk-labs/workflow";
 import {
-  DEFAULT_COMPACTION_BUDGET_TOKENS,
   MIN_COMPACTION_RECLAIM_TOKENS,
+  compactionBudget,
   dedupeFileReads,
   estimateConversationTokens,
   estimateTokens,
@@ -341,6 +341,14 @@ export interface ModelTurnResult {
   turn: ChatTurn;
   /** The concrete model the call resolved to — `reportUsage` is keyed by it. */
   modelRef: string;
+  /**
+   * The resolved model's context window, when the seam knows it — the leaf never resolves a model,
+   * so this is its only way to learn the window. See {@link compactionBudget}.
+   *
+   * Optional and may arrive LATE: a host with no catalog (`boardwalk dev`, BYO) omits it, and a
+   * router lane isn't knowable until the first response. Learn-when-told, not a precondition.
+   */
+  contextTokens?: number;
 }
 
 export interface LeafIo {
@@ -569,6 +577,9 @@ async function runToolLoop(
   let consecutiveErrorTurns = 0;
   // Learns how our size estimate compares to the provider's real input-token count (see the class).
   const calibrator = new ContextCalibrator();
+  // The resolved model's context window, once the seam tells us (see ModelTurnResult.contextTokens).
+  // Until then the budget falls back to a conservative absolute; a router lane learns it on turn 1.
+  let contextTokens: number | undefined;
   // Optional per-call ceiling on tool-calling turns (undefined ⇒ unbounded; see readMaxIterations).
   const cap = readMaxIterations(opts);
   // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
@@ -584,19 +595,14 @@ async function runToolLoop(
     // no model call), then — only if still over budget — summarize the oldest middle, reusing the
     // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
-    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator);
+    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator, contextTokens);
 
     // Snapshot what we PREDICTED for exactly the messages this call sends, so the provider's reported
     // input-token count can be compared against it once the turn returns.
     const predicted = estimateConversationTokens(messages);
-    const { turn, modelRef } = await modelTurn(
-      messages,
-      turnTools,
-      opts,
-      io,
-      turnId,
-      String(iteration),
-    );
+    const result = await modelTurn(messages, turnTools, opts, io, turnId, String(iteration));
+    const { turn, modelRef } = result;
+    if (result.contextTokens !== undefined) contextTokens = result.contextTokens;
     calibrator.observe(predicted, turn.usage.inputTokens);
 
     totals.inputTokens += turn.usage.inputTokens ?? 0;
@@ -691,17 +697,20 @@ async function reduceContextIfNeeded(
   opts: AgentOptions | undefined,
   io: LeafIo,
   calibrator: ContextCalibrator,
+  contextTokens: number | undefined,
 ): Promise<void> {
-  if (calibrator.estimate(messages) <= DEFAULT_COMPACTION_BUDGET_TOKENS) return;
+  // Sized from the resolved model's window when the seam has reported one (compactionBudget).
+  const budget = compactionBudget(contextTokens);
+  if (calibrator.estimate(messages) <= budget) return;
 
   // Cheap pass: drop stale duplicate file reads (no model call). Re-check before summarizing.
   dedupeFileReads(messages);
-  if (calibrator.estimate(messages) <= DEFAULT_COMPACTION_BUDGET_TOKENS) return;
+  if (calibrator.estimate(messages) <= budget) return;
 
   // planCompaction re-checks the budget against the RAW estimate, so hand it the budget in raw terms
   // (i.e. undo the calibration) — otherwise a calibrated-up conversation would be judged in-budget by
   // the planner and return null even though we are over.
-  const plan = planCompaction(messages, DEFAULT_COMPACTION_BUDGET_TOKENS / calibrator.scale());
+  const plan = planCompaction(messages, budget / calibrator.scale());
   if (plan === null) return;
   const rangeTokens = messages
     .slice(plan.start, plan.end + 1)

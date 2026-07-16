@@ -2,7 +2,9 @@
 
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_COMPACTION_BUDGET_TOKENS,
+  CONTEXT_RESERVE_TOKENS,
+  UNKNOWN_WINDOW_BUDGET_TOKENS,
+  compactionBudget,
   dedupeFileReads,
   estimateConversationTokens,
   estimateTokens,
@@ -71,7 +73,7 @@ describe("planCompaction", () => {
     const msgs = [user("task"), assistantText("answer")];
     expect(planCompaction(msgs)).toBeNull();
     // The generous default budget never trips a small conversation.
-    expect(estimateConversationTokens(msgs)).toBeLessThan(DEFAULT_COMPACTION_BUDGET_TOKENS);
+    expect(estimateConversationTokens(msgs)).toBeLessThan(UNKNOWN_WINDOW_BUDGET_TOKENS);
   });
 
   it("returns null when over budget but there is no compressible middle", () => {
@@ -213,3 +215,43 @@ describe("dedupeFileReads", () => {
 function range(n: number): number[] {
   return Array.from({ length: n }, (_, i) => i);
 }
+
+describe("compactionBudget", () => {
+  /**
+   * The rule: use the model's WINDOW minus a reserve. Claude Code — same workload shape — compacts a
+   * 1M session at ~967k, not at a fixed low number. A flat budget would discard context a 1M model
+   * could simply have held.
+   */
+  it("derives the budget from the window on the models we route to", () => {
+    expect(compactionBudget(1_000_000)).toBe(1_000_000 - CONTEXT_RESERVE_TOKENS); // 936k
+    expect(compactionBudget(200_000)).toBe(200_000 - CONTEXT_RESERVE_TOKENS); // Haiku 4.5 → 136k
+    expect(compactionBudget(400_000)).toBe(400_000 - CONTEXT_RESERVE_TOKENS);
+  });
+
+  it("keeps a 1M model near its window rather than at a fixed low budget", () => {
+    expect(compactionBudget(1_000_000)).toBeGreaterThan(900_000);
+  });
+
+  it("always reserves room for the turn that lands after the check passes", () => {
+    for (const window of [200_000, 400_000, 1_000_000]) {
+      expect(window - compactionBudget(window)).toBeGreaterThanOrEqual(CONTEXT_RESERVE_TOKENS);
+    }
+  });
+
+  it("falls back to a conservative absolute when the window is unknown", () => {
+    // No catalog (boardwalk dev / BYO), or turn 1 on a router lane.
+    expect(compactionBudget(undefined)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
+  });
+
+  it("ignores a nonsense window rather than trusting it", () => {
+    expect(compactionBudget(0)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
+    expect(compactionBudget(-1)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
+    expect(compactionBudget(Number.NaN)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
+    expect(compactionBudget(Number.POSITIVE_INFINITY)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
+  });
+
+  it("floors a tiny window instead of compacting on every turn", () => {
+    // window < reserve would otherwise yield a negative budget.
+    expect(compactionBudget(8_000)).toBe(32_000);
+  });
+});

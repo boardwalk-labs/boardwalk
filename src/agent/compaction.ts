@@ -18,47 +18,28 @@
 
 import type { ChatMessage, ContentPart } from "./conversation.js";
 
+/** Held back from the window: covers everything appended after a check passes — the turn's output
+ *  plus its tool results (worst case a parallel `read` fan-out). What keeps a 200k model safe. */
+export const CONTEXT_RESERVE_TOKENS = 64_000;
+
+/** Budget when the window is unknown: no catalog (`boardwalk dev`, BYO), or turn 1 on a router lane. */
+export const UNKNOWN_WINDOW_BUDGET_TOKENS = 150_000;
+
+/** Floor, so a small or bogus reported window can't make the loop compact every turn. */
+export const MIN_COMPACTION_BUDGET_TOKENS = 32_000;
+
 /**
- * Default compaction budget, in TOKENS (see estimateTokens).
+ * Tokens a conversation may reach before compacting: the model's window minus a reserve.
  *
- * This was previously 600_000 CHARACTERS, justified as "roughly 150k tokens" on a flat
- * ~4-chars-per-token assumption. That assumption is measured-wrong for real agent traffic: a
- * conversation is dominated by JSON tool I/O, which tokenizes at ~2.87 chars/token (o200k_base),
- * not 4.0 — so the old trigger actually fired at ~209k tokens, ~40% later than intended. Expressing
- * the budget in tokens is what makes it mean what it says.
- *
- * WHY AN ABSOLUTE NUMBER AND NOT A FRACTION OF THE MODEL'S WINDOW — the obvious objection is "we
- * route to 1M-context models, so why compact at 100k?" Because the window is not the constraint that
- * binds:
- *
- *  - Anthropic ships the same shape on their own 1M models: server-side compaction defaults to a
- *    150k-input-token trigger, context editing to 100k — both ABSOLUTE, neither scaled to the
- *    window. Their stated reason isn't the limit, it's that "context is a finite resource with
- *    diminishing returns, and irrelevant content degrades model focus."
- *  - The capability that a tool loop actually needs dies far below the window. The literature splits
- *    long context by TASK SHAPE, not by whether the content is relevant: retrieval-shaped work (find
- *    the right thing among many) improves monotonically with more context, while INTEGRATION-shaped
- *    work (hold it all and act on it) collapses — and "continue the work" is integration-shaped.
- *    LoCoDiff, whose context is 100% task-relevant, drops Sonnet 4.5 from 96% to 64% and GPT-5 from
- *    70% to 4% by 60–98k. ManyICLBench reports integration-task drops at 16k. A 1M window does not
- *    buy back that capability; it only buys room to keep paying for tokens the model is no longer
- *    using well.
- *
- * So "the transcript is all relevant, therefore it's safe to keep" is exactly backwards: relevance
- * was never the protective property. If anything this number is generous, not conservative.
- *
- * The window still matters — as a CRASH GUARD, not a target. Every current Claude model except
- * Haiku 4.5 (200k) is 1M, so this budget is nowhere near an overflow on the models we route to; the
- * clamp is for small-window models (see docs/AGENT_EFFICIENCY.md P4). An earlier revision of this
- * comment claimed 209k overflowed Sonnet 4.6's "200k window" — Sonnet 4.6 is 1M. That was wrong.
- *
- * Cost is roughly NEUTRAL either way (a lower budget means more compaction events, each costing a
- * cache-bust plus a summary call, offsetting the smaller per-turn context). The win is quality.
- *
- * **This exact number is a considered guess pending a measured sweep** — see docs/AGENT_EFFICIENCY.md
- * (P5). The evidence above argues it could be too HIGH; nothing yet argues it is too low.
+ * Scale with the window rather than fixing a number — compacting a 1M-capable run at a fixed 100k
+ * discards context the model could simply have held, and pays a summary call to do it.
  */
-export const DEFAULT_COMPACTION_BUDGET_TOKENS = 100_000;
+export function compactionBudget(contextTokens: number | undefined): number {
+  if (contextTokens === undefined || !Number.isFinite(contextTokens) || contextTokens <= 0) {
+    return UNKNOWN_WINDOW_BUDGET_TOKENS;
+  }
+  return Math.max(MIN_COMPACTION_BUDGET_TOKENS, contextTokens - CONTEXT_RESERVE_TOKENS);
+}
 
 /**
  * Chars-per-token by content kind, measured against `o200k_base` (2026-07-15): English prose 4.02,
@@ -160,7 +141,7 @@ export function estimateConversationTokens(messages: readonly ChatMessage[]): nu
  */
 export function planCompaction(
   messages: readonly ChatMessage[],
-  budgetTokens: number = DEFAULT_COMPACTION_BUDGET_TOKENS,
+  budgetTokens: number = UNKNOWN_WINDOW_BUDGET_TOKENS,
   recentKept: number = RECENT_TURNS_KEPT,
 ): CompactionPlan | null {
   if (estimateConversationTokens(messages) <= budgetTokens) return null;
