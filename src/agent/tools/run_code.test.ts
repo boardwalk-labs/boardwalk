@@ -133,9 +133,17 @@ describe("run_code — bounds", () => {
 
   it("times out an async hang", async () => {
     const hang = tool("hang", () => new Promise<string>(() => {})); // never resolves
-    const r = await run([hang], `await tools.hang({}); return "done";`, { timeoutMs: 30 });
+    const r = await run([hang], `await tools.hang({}); return "done";`, { timeoutMs: 150 });
     expect(r.llmText).toContain("exceeded");
   });
+
+  it("hard-bounds a SYNCHRONOUS infinite loop by terminating the worker", async () => {
+    // The whole point of the worker-thread execution model: a `while (true) {}` blocks the WORKER's
+    // thread, not the leaf's event loop, so the parent's timeout still fires and terminates it. On the
+    // old in-process model this test would hang the process forever.
+    const r = await run([], `while (true) {}`, { timeoutMs: 250 });
+    expect(r.llmText).toContain("exceeded");
+  }, 5_000);
 });
 
 describe("run_code — the excluded meta-tools", () => {

@@ -3,6 +3,23 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+### Changed (`run_code` now runs in a worker thread — a runaway loop is hard-bounded)
+
+0.2.8 ran the `run_code` snippet in the leaf's own event loop, so its wall-clock timeout could bound an
+async hang but NOT a synchronous infinite loop (`while (true) {}`): a blocked event loop can't fire its
+own timer, leaving the run's duration budget as the only backstop.
+
+The snippet now runs in a **worker thread**. The parent enforces the timeout by `terminate()`-ing the
+worker, which kills a runaway synchronous loop the in-process timer never could. Because the worker
+can't hold the leaf's tool closures (MCP connections, workspace, host), tools are **bridged**: the
+snippet's `tools.<name>(args)` posts a call to the parent, which runs the real tool where its closure
+lives and posts the text result back. Behavior is otherwise identical — only what the snippet
+`console.log`s or `return`s crosses back, redacted like any tool result; output is capped on both sides
+so a runaway log can't flood the bridge. No capability change: the worker is still exactly as privileged
+as the default-on `bash`, and the run's isolation boundary is the per-run microVM, not the thread.
+
 ## 0.2.8
 
 Programmatic tool calling and progressive tool disclosure — two levers for a leaf that carries many

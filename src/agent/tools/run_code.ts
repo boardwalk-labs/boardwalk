@@ -12,19 +12,22 @@
 // Model-agnostic by construction: it is an ordinary Boardwalk tool, so it works on the managed `auto`
 // lane and every BYO provider — unlike Anthropic's server-side PTC beta, which our routing can't reach.
 //
-// Execution model: the snippet runs IN-PROCESS as an async function with the leaf's tools bound as
-// async functions on a `tools` object. This grants NO capability the leaf doesn't already have — the
-// built-in `bash` tool is default-on and already runs arbitrary code; the run's isolation boundary is
-// the per-run microVM/container, not the JS realm (the run-isolation invariant). So `run_code` is
-// exactly as privileged as `bash`, and no global sandboxing is attempted (it would be theater next to
-// a shell). What the code returns is redacted by the loop like any tool result, so secrets can't leak
-// to the model even though the trusted code layer sees raw tool output.
+// Execution model: the snippet runs in a WORKER THREAD (worker_threads), NOT in the leaf's own event
+// loop. This grants no capability the leaf doesn't already have — `bash` is default-on and already
+// runs arbitrary code, and the run's isolation boundary is the per-run microVM/container, not the JS
+// realm — but it makes the snippet hard-bounded: the parent enforces the wall-clock timeout by
+// `terminate()`-ing the worker, which kills a runaway synchronous loop (`while (true) {}`) that an
+// in-process async timer could never interrupt (a blocked event loop can't fire its own timeout).
 //
-// Bounds: a wall-clock timeout races the async execution, and output is capped (the model is meant to
-// summarize IN code, but a runaway log can't blow the window). A pathological *synchronous* infinite
-// loop (no await) is bounded only by the run's duration budget, same class of exposure as a `bash`
-// `while true`; a child-process bridge would harden this and is the v1 follow-up.
+// The worker can't hold the leaf's tool closures (they capture MCP connections, the workspace, the
+// host), so tools are BRIDGED: the snippet's `tools.<name>(args)` posts a call to the parent, which
+// executes the real tool where its closure lives and posts the text result back. The parent sees the
+// raw result (trusted layer); only what the snippet logs/returns crosses back, and the loop redacts
+// that like any tool result, so secrets can't reach the model. Output is capped on both sides (the
+// worker stops posting past the cap so a runaway log can't flood the bridge; the parent is the
+// truncation authority).
 
+import { Worker } from "node:worker_threads";
 import type {
   ExecutableTool,
   RichToolResult,
@@ -46,10 +49,20 @@ const MAX_TIMEOUT_MS = 600_000;
 /** Cap on combined logged + returned output. The point of PTC is that the model filters in code and
  *  returns a summary; this only stops a runaway log from blowing the window. */
 const MAX_OUTPUT_CHARS = 60_000;
+/** The worker stops posting log output a little past the parent's cap — enough that the parent (the
+ *  truncation authority) sees the overflow and flags it, while the bridge never carries a 10 MB log. */
+const WORKER_LOG_CAP = MAX_OUTPUT_CHARS + 512;
 
-/** The AsyncFunction constructor, typed. Same class of primitive as `bash` spawning a shell — see the
- *  module header on why in-process execution grants nothing beyond the default-on `bash`. */
-type AsyncFnCtor = new (...args: string[]) => (...args: unknown[]) => Promise<unknown>;
+/** Messages the worker sends the parent. Trusted (our own bootstrap emits them). */
+type WorkerToParent =
+  | { type: "call"; id: number; name: string; args: Record<string, unknown> }
+  | { type: "log"; text: string }
+  | { type: "done"; returnValue: string }
+  | { type: "throw"; message: string };
+/** Messages the parent sends the worker in reply to a `call`. */
+type ParentToWorker =
+  | { type: "result"; id: number; text: string }
+  | { type: "callError"; id: number; message: string };
 
 /**
  * Build the `run_code` tool over the leaf's callable tool set. Constructed by the leaf layer once the
@@ -94,72 +107,111 @@ async function runCode(
   if (typeof code !== "string" || code.trim() === "") {
     throw new EngineError("VALIDATION", "run_code `code` must be a non-empty JavaScript string.");
   }
-
-  const output = new BoundedOutput(MAX_OUTPUT_CHARS);
-  const emit = (text: string): void => {
-    output.push(text);
-    onOutput?.("stdout", text);
-  };
-  const consoleShim = {
-    log: (...args: unknown[]) => emit(formatArgs(args) + "\n"),
-    error: (...args: unknown[]) => emit(formatArgs(args) + "\n"),
-    warn: (...args: unknown[]) => emit(formatArgs(args) + "\n"),
-    info: (...args: unknown[]) => emit(formatArgs(args) + "\n"),
-  };
-
-  let toolCallCount = 0;
-  const invoke = async (name: string, args: unknown): Promise<string> => {
-    const tool = byName.get(name);
-    if (tool === undefined) {
-      throw new EngineError(
-        "VALIDATION",
-        `run_code: no tool named "${name}". Available: ${[...byName.keys()].join(", ")}.`,
-      );
-    }
-    toolCallCount += 1;
-    const record = args !== undefined && args !== null ? (args as Record<string, unknown>) : {};
-    // A live-view TRACE of each inner call (via onOutput, redacted by the loop like any stream), so a
-    // viewer can see what the code is doing. It goes ONLY to the stream, never to `output` — the
-    // model's result stays the code's own logged/returned summary, which is the point of PTC.
-    onOutput?.("stdout", `» ${name}(${argsPreview(record)})\n`);
-    return toText(await tool.execute(record));
-  };
-  // `tools.<name>(input)` for every callable tool, plus a `call(name, input)` escape hatch.
-  const toolsObj: Record<string, unknown> = { call: invoke };
-  for (const name of byName.keys()) {
-    toolsObj[name] = (args: unknown): Promise<string> => invoke(name, args);
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-unsafe-member-access
-  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as AsyncFnCtor;
-  let compiled: (...args: unknown[]) => Promise<unknown>;
-  try {
-    compiled = new AsyncFunction("tools", "console", code);
-  } catch (err) {
-    // A syntax error is the model's to fix — return it as the tool result, don't fail the run.
-    return errorResult(`SyntaxError: ${err instanceof Error ? err.message : String(err)}`, output);
-  }
-
   const timeoutMs = readTimeout(input.timeoutMs);
-  let returned: unknown;
+  const output = new BoundedOutput(MAX_OUTPUT_CHARS);
+  let toolCallCount = 0;
+
+  let worker: Worker;
   try {
-    returned = await withTimeout(compiled(toolsObj, consoleShim), timeoutMs);
+    worker = new Worker(new URL(`data:text/javascript,${encodeURIComponent(WORKER_SOURCE)}`), {
+      workerData: { code, logCap: WORKER_LOG_CAP },
+    });
   } catch (err) {
-    // A throw from the snippet (or a tool it called) is the model's to recover from — surface it as
-    // the result text, keeping any output the code produced before it threw.
-    const message = err instanceof Error ? err.message : String(err);
-    return errorResult(message, output);
+    // Failing to even start the worker is ours, not the model's — surface it as an error result.
+    return errorResult(err instanceof Error ? err.message : String(err), output);
   }
 
+  return await new Promise<RichToolResult>((resolve) => {
+    let settled = false;
+    const settle = (result: RichToolResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      void worker.terminate();
+      resolve(result);
+    };
+    // The decisive bound: because the snippet runs in another THREAD, a synchronous loop there does
+    // not block THIS event loop, so this timer still fires and terminates the worker.
+    const timer = setTimeout(() => {
+      settle(errorResult(`exceeded ${String(timeoutMs)}ms (terminated)`, output));
+    }, timeoutMs);
+
+    const post = (msg: ParentToWorker): void => {
+      if (settled) return;
+      try {
+        worker.postMessage(msg);
+      } catch {
+        // The worker is gone (terminated) — nothing to reply to.
+      }
+    };
+
+    const handle = async (msg: WorkerToParent): Promise<void> => {
+      switch (msg.type) {
+        case "call": {
+          toolCallCount += 1;
+          // Live-view TRACE of each inner call (redacted by the loop like any stream); it goes only to
+          // the stream, never into `output`, so the model's result stays the code's own summary.
+          onOutput?.("stdout", `» ${msg.name}(${argsPreview(msg.args)})\n`);
+          const tool = byName.get(msg.name);
+          if (tool === undefined) {
+            post({
+              type: "callError",
+              id: msg.id,
+              message: `run_code: no tool named "${msg.name}". Available: ${[...byName.keys()].join(", ")}.`,
+            });
+            return;
+          }
+          try {
+            const text = toText(await tool.execute(msg.args));
+            post({ type: "result", id: msg.id, text });
+          } catch (err) {
+            post({
+              type: "callError",
+              id: msg.id,
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+          return;
+        }
+        case "log":
+          output.push(msg.text);
+          onOutput?.("stdout", msg.text);
+          return;
+        case "done":
+          settle(successResult(output, msg.returnValue, toolCallCount));
+          return;
+        case "throw":
+          settle(errorResult(msg.message, output));
+          return;
+      }
+    };
+
+    worker.on("message", (msg: WorkerToParent) => void handle(msg));
+    worker.on("error", (err: Error) => settle(errorResult(err.message, output)));
+    worker.on("exit", (exitCode: number) => {
+      if (!settled) {
+        settle(
+          errorResult(`run_code worker exited unexpectedly (code ${String(exitCode)})`, output),
+        );
+      }
+    });
+  });
+}
+
+/** The success result: the code's logged output plus its serialized return value, capped. */
+function successResult(
+  output: BoundedOutput,
+  returnValue: string,
+  toolCallCount: number,
+): RichToolResult {
   const logged = output.text();
-  const returnText = serializeReturn(returned);
   const body =
-    logged !== "" && returnText !== ""
-      ? `${logged}\nreturn: ${returnText}`
+    logged !== "" && returnValue !== ""
+      ? `${logged}\nreturn: ${returnValue}`
       : logged !== ""
         ? logged
-        : returnText !== ""
-          ? `return: ${returnText}`
+        : returnValue !== ""
+          ? `return: ${returnValue}`
           : "(no output; the code neither logged nor returned a value)";
   const clipped = clip(body, MAX_OUTPUT_CHARS);
   const truncated = output.wasTruncated() || clipped.truncated;
@@ -172,23 +224,8 @@ async function runCode(
   };
 }
 
-/** Race a promise against a wall-clock timeout (bounds async hangs; see the module header for the
- *  synchronous-loop caveat). */
-async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new EngineError("PROGRAM_ERROR", `run_code exceeded ${String(ms)}ms.`)),
-      ms,
-    );
-  });
-  try {
-    return await Promise.race([promise, timeout]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
-}
-
+/** An error result the model can recover from (a throw, a timeout, a worker crash) — the message plus
+ *  any output the code produced first. Never fails the run. */
 function errorResult(message: string, output: BoundedOutput): RichToolResult {
   const logged = output.text();
   const text = logged !== "" ? `${logged}\nError: ${message}` : `Error: ${message}`;
@@ -203,27 +240,6 @@ function errorResult(message: string, output: BoundedOutput): RichToolResult {
 function toText(result: ToolExecuteResult): string {
   if (typeof result === "string") return result;
   return result.llmText;
-}
-
-function serializeReturn(value: unknown): string {
-  if (value === undefined) return "";
-  if (typeof value === "string") return value;
-  // Primitives with their own toString are safe; objects go through JSON (never default
-  // "[object Object]" stringification).
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  try {
-    const json = JSON.stringify(value);
-    if (json !== undefined) return json;
-  } catch {
-    // A cyclic structure or a bigint inside — fall through to a stable placeholder.
-  }
-  return "[unserializable value]";
-}
-
-function formatArgs(args: readonly unknown[]): string {
-  return args.map((a) => (typeof a === "string" ? a : serializeReturn(a))).join(" ");
 }
 
 function readTimeout(raw: unknown): number {
@@ -298,3 +314,83 @@ function buildDescription(names: readonly string[]): string {
     'if (c.includes("TODO")) hits.push(f); } return hits;`'
   );
 }
+
+// The worker bootstrap (an ES module, delivered as a data: URL). Plain JS — NOT typechecked by the
+// engine's tsc — deliberately using string concatenation, no template literals, so it embeds cleanly
+// in the template literal below. It sets up the tool bridge, a console shim, and runs the snippet as
+// an async function, reporting everything back over the message port.
+const WORKER_SOURCE = `
+import { parentPort, workerData } from "node:worker_threads";
+const port = parentPort;
+const code = workerData.code;
+const LOG_CAP = workerData.logCap;
+
+let nextId = 0;
+const pending = new Map();
+port.on("message", (msg) => {
+  const p = pending.get(msg.id);
+  if (!p) return;
+  pending.delete(msg.id);
+  if (msg.type === "result") p.resolve(msg.text);
+  else p.reject(new Error(msg.message));
+});
+
+function invoke(name, args) {
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    try {
+      port.postMessage({ type: "call", id: id, name: name, args: args === undefined || args === null ? {} : args });
+    } catch (e) {
+      pending.delete(id);
+      reject(new Error("run_code: argument to " + name + "() is not structured-cloneable" + (e && e.message ? ": " + e.message : "")));
+    }
+  });
+}
+
+const tools = new Proxy({ call: invoke }, {
+  get(target, prop) {
+    if (prop === "call") return invoke;
+    if (typeof prop === "string") return (args) => invoke(prop, args);
+    return undefined;
+  },
+});
+
+function ser(v) {
+  if (v === undefined) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "number" || typeof v === "boolean" || typeof v === "bigint") return String(v);
+  try { const j = JSON.stringify(v); if (j !== undefined) return j; } catch (e) {}
+  return "[unserializable value]";
+}
+function fmt(a) { return a.map((x) => (typeof x === "string" ? x : ser(x))).join(" "); }
+
+let logged = 0;
+function emitLog(text) {
+  if (logged >= LOG_CAP) return;
+  const remaining = LOG_CAP - logged;
+  const chunk = text.length <= remaining ? text : text.slice(0, remaining);
+  logged += chunk.length;
+  port.postMessage({ type: "log", text: chunk });
+}
+const consoleShim = {
+  log: (...a) => emitLog(fmt(a) + "\\n"),
+  error: (...a) => emitLog(fmt(a) + "\\n"),
+  warn: (...a) => emitLog(fmt(a) + "\\n"),
+  info: (...a) => emitLog(fmt(a) + "\\n"),
+  debug: (...a) => emitLog(fmt(a) + "\\n"),
+};
+
+(async () => {
+  try {
+    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+    const fn = new AsyncFunction("tools", "console", code);
+    const ret = await fn(tools, consoleShim);
+    port.postMessage({ type: "done", returnValue: ser(ret) });
+  } catch (e) {
+    const name = e && e.name && e.name !== "Error" ? String(e.name) + ": " : "";
+    const message = e && e.message ? String(e.message) : String(e);
+    port.postMessage({ type: "throw", message: name + message });
+  }
+})();
+`;
