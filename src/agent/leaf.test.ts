@@ -1754,3 +1754,62 @@ describe("ContextCalibrator", () => {
     expect(c.estimateOne(one)).toBeCloseTo(c.estimate([one]), 5);
   });
 });
+
+// `attachments` is untrusted runtime input like every other AgentOptions field (author programs are
+// never type-checked — see tools.ts). A wrong shape used to reach the PROVIDER and fail there, so
+// the leaf retried the doomed request 5 times before surfacing an internal TypeError. It must now
+// fail at the boundary, for free.
+describe("runAgentLeaf — type-invalid `attachments` fails before any model call", () => {
+  async function reject(opts: unknown): Promise<{ err: EngineError; calls: number }> {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("ok", { in: 1, out: 1 })]);
+    try {
+      await runAgentLeaf("hi", opts as AgentOptions, rec.io);
+    } catch (err) {
+      if (err instanceof EngineError) return { err, calls: rec.requests.length };
+      throw new Error(`expected an EngineError, got ${String(err)}`);
+    }
+    throw new Error("expected runAgentLeaf to throw");
+  }
+
+  it("rejects a non-array `attachments` (it used to TypeError on .map)", async () => {
+    const { err } = await reject({ attachments: {} });
+    expect(err.code).toBe("VALIDATION");
+    expect(err.message).toContain("`attachments`");
+    expect(err.message).not.toContain("Cannot read properties");
+    expect((await reject({ attachments: "x" })).err.message).toContain("must be an array");
+  });
+
+  it("rejects a malformed attachment by naming the offending field", async () => {
+    expect((await reject({ attachments: [null] })).err.message).toContain("malformed attachment");
+    expect((await reject({ attachments: [{}] })).err.message).toContain("mimeType");
+  });
+
+  it("requires exactly one of `data`/`url` — neither and both are both wrong", async () => {
+    const neither = await reject({ attachments: [{ mimeType: "image/png" }] });
+    expect(neither.err.message).toContain("exactly one");
+    const both = await reject({
+      attachments: [{ mimeType: "image/png", data: "AAAA", url: "https://x/y.png" }],
+    });
+    expect(both.err.message).toContain("exactly one");
+  });
+
+  it("costs ZERO model calls — the old path burned 5 provider retries on a bad shape", async () => {
+    expect((await reject({ attachments: [{}] })).calls).toBe(0);
+  });
+
+  it("still accepts well-formed attachments (both carriers)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("saw it", { in: 1, out: 1 })]);
+    const result = await runAgentLeaf(
+      "what is this?",
+      {
+        attachments: [
+          { mimeType: "image/png", data: "AAAA", filename: "shot.png" },
+          { mimeType: "application/pdf", url: "https://example.com/doc.pdf" },
+        ],
+      },
+      rec.io,
+    );
+    expect(result).toBe("saw it");
+    expect(rec.requests.length).toBe(1);
+  });
+});

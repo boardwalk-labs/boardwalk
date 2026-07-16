@@ -13,6 +13,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSy
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
 import type {
+  AgentAttachment,
   AgentOptions,
   JsonSchema,
   McpServerRef,
@@ -310,6 +311,56 @@ const toolDefSchema = z.object({
     error: "must be a function",
   }),
 });
+
+// An attachment carries bytes ONE of two ways — inline base64 (`data`) or a `url` the provider
+// fetches — so exactly one must be present. Getting this wrong is not merely a bad message: a
+// malformed attachment used to reach the provider and fail there, and the leaf RETRIED the failing
+// request 5 times before surfacing an internal TypeError. Wrong shape must cost zero model calls.
+const attachmentSchema = z
+  .object({
+    mimeType: z.string().min(1),
+    data: z.string().optional(),
+    url: z.string().min(1).optional(),
+    filename: z.string().optional(),
+  })
+  .refine((a) => (a.data === undefined) !== (a.url === undefined), {
+    error: "must set exactly one of `data` (inline base64) or `url`",
+  });
+
+/**
+ * The call's attachments (images/documents prepended to the first user message). Validated for the
+ * same reason as everything else here — the TS type is not a runtime guarantee — and validated
+ * EARLY, before any MCP server spawns or any model call is billed.
+ */
+export function validateAttachments(
+  attachments: AgentOptions["attachments"],
+): readonly AgentAttachment[] {
+  if (attachments === undefined || attachments === null) return [];
+  if (!Array.isArray(attachments)) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() \`attachments\` must be an array — got ${describeValue(attachments)}.`,
+      ATTACHMENT_HINT,
+    );
+  }
+  const out: readonly AgentAttachment[] = attachments;
+  for (const attachment of out) {
+    const parsed = attachmentSchema.safeParse(attachment);
+    if (!parsed.success) {
+      throw new EngineError(
+        "VALIDATION",
+        `agent() got a malformed attachment — ${issueText(parsed.error)}.`,
+        ATTACHMENT_HINT,
+      );
+    }
+  }
+  return out;
+}
+
+const ATTACHMENT_HINT =
+  "An attachment is { mimeType, data } (inline base64) or { mimeType, url } (a data: URI or an " +
+  "https: URL the provider fetches), plus an optional `filename`. Pass text/source as prompt text, " +
+  "not as an attachment.";
 
 /** Flatten Zod issues into one line: `name: expected string, received number`. */
 function issueText(error: z.ZodError): string {

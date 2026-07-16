@@ -43,6 +43,7 @@ import {
   buildToolSet,
   connectMcpServers,
   leafCwd,
+  validateAttachments,
   type ExecutableTool,
   type McpTokenResult,
   type ToolOutputSink,
@@ -402,6 +403,9 @@ export async function runAgentLeaf(
   resume?: LeafResume,
 ): Promise<unknown> {
   const base = buildToolSet(opts, io.capabilities);
+  // Attachments are shape-checked HERE, beside the tool set, so every sync check on untrusted
+  // AgentOptions completes before an MCP server spawns or a single model call is billed.
+  validateAttachments(opts?.attachments);
   if (base.memoryDir !== null) io.memoryUsed(base.memoryDir);
 
   // MCP connections open AFTER sync validation and BEFORE the first model call; a server the
