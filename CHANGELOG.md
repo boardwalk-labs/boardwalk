@@ -3,6 +3,19 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.11
+
+### Fixed (no-progress guard no longer flags productive editing as a stall)
+
+The no-progress guard (0.2.9) measured "new information" by hashing each tool RESULT — but `edit`/`write`
+confirmations are low-entropy and repeat (`edited X (1 replacement)` reads the same every time), so an
+agent making many similar edits was mistaken for a gathering stall and its run was ended mid-work. A
+turn now counts as PROGRESS if it made any successful mutation/action call (`edit`/`write`/`apply_patch`/
+`bash`/…) or any non-built-in inline/MCP call — doing something is progress regardless of how repetitive
+its confirmation reads. Only a turn whose successful calls were ALL redundant read-only gathers
+(re-reading/re-searching already-seen content) counts as no-progress, which is the stall the guard exists
+to catch.
+
 ## 0.2.10
 
 ### Changed (tighter tool-output hygiene — survey greps, bash overflow-to-file, narrowing guidance)
