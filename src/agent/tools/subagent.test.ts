@@ -58,6 +58,7 @@ function harness(
     parentProvider: undefined,
     parentReasoning: undefined,
     parentCwd: undefined,
+    parentHasRunCode: false,
     forkLeaf: (opts) => {
       forked.push(opts);
       return stubIo({
@@ -86,6 +87,32 @@ describe("makeSubagentTool", () => {
     expect(h.runs[0]?.opts?.tools).toEqual([doubleDef]);
     // The model/provider default to the parent's when the call names none.
     expect(h.runs[0]?.opts?.model).toBe("anthropic/claude-sonnet-4.5");
+  });
+
+  it("grants run_code to the child when the parent has it (and only then)", async () => {
+    // Parent without run_code: never granted, even if the model asks.
+    const without = harness({ parentHasRunCode: false });
+    await without.tool.execute({ prompt: "p" });
+    expect(without.runs[0]?.opts?.builtins).not.toContain("run_code");
+
+    // Parent with run_code: granted by default, and the child re-assembles its own over its tools.
+    const withRc = harness({ parentHasRunCode: true });
+    await withRc.tool.execute({ prompt: "p" });
+    expect(withRc.runs[0]?.opts?.builtins).toContain("run_code");
+
+    // Explicitly requesting it also works.
+    const explicit = harness({ parentHasRunCode: true });
+    await explicit.tool.execute({ prompt: "p", tools: ["read", "run_code"] });
+    expect(explicit.runs[0]?.opts?.builtins).toEqual(["read", "run_code"]);
+  });
+
+  it("rejects a run_code request when the parent lacks it", async () => {
+    const h = harness({ parentHasRunCode: false });
+    // A denied grant throws; the loop (executeToolCall) turns it into an error result for the model.
+    await expect(h.tool.execute({ prompt: "p", tools: ["read", "run_code"] })).rejects.toThrow(
+      /run_code/,
+    );
+    expect(h.runs).toHaveLength(0);
   });
 
   it("inherits the parent's reasoning effort (like model/provider)", async () => {

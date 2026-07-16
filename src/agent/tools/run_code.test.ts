@@ -72,6 +72,24 @@ describe("run_code — orchestration", () => {
     expect(r.event.humanSummary).toContain("10 tool call");
   });
 
+  it("streams a per-inner-call trace to the live view but NOT into the model's result", async () => {
+    const chunks: string[] = [];
+    const t = vi.fn(() => Promise.resolve("row1\nrow2"));
+    const result = await runCodeTool([tool("query", t)]).execute(
+      { code: `const r = await tools.query({ table: "users" }); return r.split("\\n").length;` },
+      (_stream, text) => chunks.push(text),
+    );
+    const streamed = chunks.join("");
+    // The trace shows the inner call in the activity stream…
+    expect(streamed).toContain("» query(");
+    expect(streamed).toContain("users");
+    // …but the model's result carries only the code's summary, never the trace line or raw rows.
+    const llmText = (result as RichToolResult).llmText;
+    expect(llmText).toContain("return: 2");
+    expect(llmText).not.toContain("» query(");
+    expect(llmText).not.toContain("row1");
+  });
+
   it("exposes a generic call(name, input) escape hatch", async () => {
     const t = vi.fn(() => Promise.resolve("ok"));
     const r = await run([tool("weird_name", t)], `return await tools.call("weird_name", {});`);

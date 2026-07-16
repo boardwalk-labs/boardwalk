@@ -46,6 +46,12 @@ tool result, so secrets can't reach the model. A wall-clock timeout and an outpu
 purely synchronous infinite loop is bounded by the run duration budget (a child-process bridge is the
 hardening follow-up). See `src/agent/tools/run_code.ts`.
 
+Two refinements ship alongside it. A **sub-agent** can now be granted `run_code` (it re-assembles its
+own over exactly the tools it was granted), so delegated work gets the same lever. And each inner tool
+call the snippet makes is **traced to the run's live view** (`» read({...})`) so a viewer can watch
+what the code is doing — the trace goes only to the activity stream, never into the model's result, so
+it costs no context.
+
 ## 0.2.7
 
 ### Fixed (a validation error states the fix once, not twice)

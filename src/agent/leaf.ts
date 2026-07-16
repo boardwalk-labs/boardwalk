@@ -436,6 +436,7 @@ export async function runAgentLeaf(
               parentProvider: opts?.provider,
               parentReasoning: normalizeReasoning(opts?.reasoning),
               parentCwd: leafCwd(opts),
+              parentHasRunCode: runCodeSelected(opts?.builtins),
               forkLeaf,
               run: runAgentLeaf,
             }),

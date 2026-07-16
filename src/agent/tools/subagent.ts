@@ -17,13 +17,17 @@ import type { AgentOptions, NormalizedReasoning, ToolDef } from "@boardwalk-labs
 import { EngineError } from "../../errors.js";
 import type { LeafIo } from "../leaf.js";
 import type { ExecutableTool } from "../tools.js";
-import { ALL_BUILTIN_NAMES, SUBAGENT_TOOL_NAME } from "./registry.js";
+import { ALL_BUILTIN_NAMES, RUN_CODE_TOOL_NAME, SUBAGENT_TOOL_NAME } from "./registry.js";
 
 export interface SubagentToolDeps {
   /** The parent leaf's RESOLVED tools — the subset ceiling (matched by name). */
   parentTools: readonly ExecutableTool[];
   /** The parent's inline ToolDefs, forwarded to a child by reference when it requests them. */
   parentInlineTools: readonly ToolDef[];
+  /** Whether the parent has `run_code` (programmatic tool calling). It is a leaf-layer tool, not in
+   *  `parentTools`, so its grantability is passed explicitly; a granted child re-assembles its own
+   *  `run_code` over the tools it was granted. */
+  parentHasRunCode: boolean;
   /** Defaults inherited when the call names no model/provider. */
   parentModel: string | undefined;
   parentProvider: string | undefined;
@@ -63,6 +67,9 @@ export function makeSubagentTool(deps: SubagentToolDeps): ExecutableTool {
     ...inlineByName.keys(),
   ]);
   grantable.delete(SUBAGENT_TOOL_NAME);
+  // `run_code` is a leaf-layer tool (not in parentTools), so add it by the explicit flag. A granted
+  // child re-assembles its OWN run_code over exactly the tools it was granted.
+  if (deps.parentHasRunCode) grantable.add(RUN_CODE_TOOL_NAME);
 
   return {
     name: SUBAGENT_TOOL_NAME,
@@ -122,8 +129,11 @@ export function makeSubagentTool(deps: SubagentToolDeps): ExecutableTool {
 
       // Split the granted subset into built-in names (→ child's `builtins`, an explicit array that
       // never contains `subagent`, so the child is one level deep) and inline ToolDefs (forwarded
-      // by reference). Names are disjoint — an inline tool may not shadow a built-in.
-      const childBuiltins = requested.filter((n) => BUILTIN_NAME_SET.has(n));
+      // by reference). Names are disjoint — an inline tool may not shadow a built-in. `run_code`
+      // rides in the built-in list too (recognized there by selectBuiltins + runCodeSelected).
+      const childBuiltins = requested.filter(
+        (n) => BUILTIN_NAME_SET.has(n) || n === RUN_CODE_TOOL_NAME,
+      );
       const childInline = deps.parentInlineTools.filter((d) => requested.includes(d.name));
 
       const model = input.model ?? deps.parentModel;

@@ -118,6 +118,10 @@ async function runCode(
     }
     toolCallCount += 1;
     const record = args !== undefined && args !== null ? (args as Record<string, unknown>) : {};
+    // A live-view TRACE of each inner call (via onOutput, redacted by the loop like any stream), so a
+    // viewer can see what the code is doing. It goes ONLY to the stream, never to `output` — the
+    // model's result stays the code's own logged/returned summary, which is the point of PTC.
+    onOutput?.("stdout", `» ${name}(${argsPreview(record)})\n`);
     return toText(await tool.execute(record));
   };
   // `tools.<name>(input)` for every callable tool, plus a `call(name, input)` escape hatch.
@@ -225,6 +229,17 @@ function formatArgs(args: readonly unknown[]): string {
 function readTimeout(raw: unknown): number {
   if (typeof raw !== "number" || !Number.isFinite(raw) || raw <= 0) return DEFAULT_TIMEOUT_MS;
   return Math.min(Math.floor(raw), MAX_TIMEOUT_MS);
+}
+
+/** A compact, capped preview of a tool call's arguments for the live-view trace line. */
+function argsPreview(args: Record<string, unknown>): string {
+  let s: string;
+  try {
+    s = JSON.stringify(args) ?? "";
+  } catch {
+    s = "";
+  }
+  return s.length > 120 ? s.slice(0, 120) + "…" : s;
 }
 
 function firstLine(text: string): string {
