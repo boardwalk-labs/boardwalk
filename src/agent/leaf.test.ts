@@ -525,6 +525,73 @@ describe("runAgentLeaf — MCP", () => {
     expect(rec.requests[0]?.body).not.toContain("srv__eval");
   });
 
+  it("defers a large MCP tool set behind find_tools, then advertises only what's searched", async () => {
+    // Five MCP tools, each with a long description, clears the progressive-disclosure size gate
+    // (>= 5 tools and >= ~16K chars of combined schema). See tool_search.ts.
+    const pad = "d".repeat(4000);
+    const mcp = await startFakeMcpServer({
+      tools: [
+        ...["a", "b", "c", "d"].map((n) => ({
+          name: `pad_${n}`,
+          description: `padding tool ${n}\n${pad}`,
+          handler: () => ({ text: "ok" }),
+        })),
+        {
+          name: "lookup",
+          description: `Look things up by key\n${pad}`,
+          handler: (args: Record<string, unknown>) => ({ text: `looked up ${String(args["key"])}` }),
+        },
+      ],
+    });
+    cleanups.push(() => void mcp.close());
+
+    const rec = recordedIo(OPENAI_MODEL, [
+      // Turn 1: the deferred tools aren't advertised, so the model searches for the one it wants.
+      () => openAiToolCalls([{ id: "f1", name: "find_tools", args: { query: "lookup" } }]),
+      // Turn 2: now that it's loaded, the model calls it.
+      () => openAiToolCalls([{ id: "c1", name: "srv__lookup", args: { key: "answer" } }]),
+      () => openAiText("found it"),
+    ]);
+
+    const result = await runAgentLeaf(
+      "look it up",
+      { mcp: [{ name: "srv", transport: "http", url: mcp.url }] },
+      rec.io,
+    );
+    expect(result).toBe("found it");
+
+    // Turn 1: find_tools IS advertised and the catalog names the deferred tools, but their full
+    // (quoted) tool definitions are NOT in the advertised set.
+    const first = rec.requests[0]?.body ?? "";
+    expect(first).toContain('"find_tools"');
+    expect(first).toContain("<tools>");
+    expect(first).toContain("srv__lookup"); // named in the catalog…
+    expect(first).not.toContain('"srv__lookup"'); // …but not advertised as a callable tool
+    expect(first).not.toContain('"srv__pad_a"');
+
+    // Turn 2: the searched tool is now advertised; the un-searched ones stay deferred.
+    const second = rec.requests[1]?.body ?? "";
+    expect(second).toContain('"srv__lookup"');
+    expect(second).not.toContain('"srv__pad_a"');
+
+    // The tool actually executed against the MCP server and its result reached the model.
+    expect(rec.requests[2]?.body).toContain("looked up answer");
+  });
+
+  it("does NOT defer a small MCP tool set (below the size gate) — advertises everything up front", async () => {
+    const mcp = await startFakeMcpServer({
+      tools: [{ name: "lookup", description: "Looks things up", handler: () => ({ text: "ok" }) }],
+    });
+    cleanups.push(() => void mcp.close());
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("done")]);
+    await runAgentLeaf("go", { mcp: [{ name: "srv", transport: "http", url: mcp.url }] }, rec.io);
+    const body = rec.requests[0]?.body ?? "";
+    // One small tool: advertised directly, no find_tools, no catalog.
+    expect(body).toContain('"srv__lookup"');
+    expect(body).not.toContain("find_tools");
+    expect(body).not.toContain("<tools>");
+  });
+
   it("disconnects (DELETEs the session) on completion AND on a model error", async () => {
     const completed = await startFakeMcpServer({
       tools: [{ name: "noop", handler: () => ({ text: "ok" }) }],

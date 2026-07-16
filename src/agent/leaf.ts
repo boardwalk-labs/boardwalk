@@ -51,6 +51,7 @@ import {
 } from "./tools.js";
 import { subagentSelected } from "./tools/registry.js";
 import { makeSubagentTool } from "./tools/subagent.js";
+import { advertisedTools, planToolDisclosure, type ToolDisclosure } from "./tool_search.js";
 
 /**
  * A leaf runs UNBOUNDED by default (no fixed tool-iteration cap): the loop ends when the model stops
@@ -443,7 +444,26 @@ export async function runAgentLeaf(
     // parks in v0), so only a top-level leaf with `humanInput: true` can pause for a person.
     const tools =
       opts?.humanInput === true ? [...withSubagent, humanInputToolSpec()] : withSubagent;
-    return await runLeafWithTools(prompt, opts, io, tools, base.preamble, resume);
+
+    // Progressive tool disclosure: when the MCP tools are a large set, defer their schemas behind a
+    // compact catalog + a `find_tools` search tool (see tool_search.ts). Size-gated, so a normal
+    // leaf is unchanged (disclosure === null). find_tools joins the EXECUTABLE set (the loop runs it),
+    // and the catalog rides the preamble; advertising per turn is filtered by the loop.
+    const disclosure = planToolDisclosure({
+      deferrable: connected?.tools ?? [],
+      allToolNames: new Set(tools.map((t) => t.name)),
+    });
+    const executableTools = disclosure === null ? tools : [...tools, disclosure.findTool];
+    const preamble = disclosure === null ? base.preamble : [...base.preamble, disclosure.catalog];
+    return await runLeafWithTools(
+      prompt,
+      opts,
+      io,
+      executableTools,
+      preamble,
+      resume,
+      disclosure ?? undefined,
+    );
   } finally {
     // Disconnect on completion AND on error — stdio servers are real child processes.
     if (connected !== null) await connected.disconnect();
@@ -457,6 +477,7 @@ async function runLeafWithTools(
   tools: readonly ExecutableTool[],
   preamble: readonly string[],
   resume: LeafResume | undefined,
+  disclosure: ToolDisclosure | undefined,
 ): Promise<unknown> {
   // Re-check across the MERGED set: a namespaced MCP tool can collide with a program tool.
   assertUniqueToolNames(tools);
@@ -539,6 +560,7 @@ async function runLeafWithTools(
       totals,
       resume?.answers ?? {},
       startIteration,
+      disclosure,
     );
   } catch (err) {
     // A park unwinds the leaf cleanly — propagate it for the host to suspend, without emitting a
@@ -589,6 +611,7 @@ async function runToolLoop(
   totals: { inputTokens: number; outputTokens: number },
   answers: Readonly<Record<string, unknown>>,
   startIteration: number,
+  disclosure: ToolDisclosure | undefined,
 ): Promise<string> {
   // Signatures of each tool-using turn, for the repetition guard (see turnSignature + STALL_*).
   const recentSignatures: string[] = [];
@@ -606,8 +629,11 @@ async function runToolLoop(
   for (let iteration = startIteration + 1; cap === undefined || iteration <= cap + 1; iteration++) {
     // The single turn past the ceiling withholds tools so the model MUST give a final answer — a
     // soft landing instead of a hard "exceeded N iterations" failure that discards the work done.
+    // Otherwise ADVERTISE the active subset (progressive disclosure hides deferred-and-unsearched MCP
+    // tools; identity when there's no disclosure). Execution below still uses the FULL `tools` set, so
+    // find_tools and any not-yet-advertised tool the model calls anyway still run.
     const forceFinal = cap !== undefined && iteration > cap;
-    const turnTools = forceFinal ? [] : tools;
+    const turnTools = forceFinal ? [] : advertisedTools(tools, disclosure);
 
     // Bound the context BEFORE each model call: a long loop (or one fat tool result) grows
     // `messages` until the provider rejects it. Reclaim cheaply first (drop stale duplicate reads,
