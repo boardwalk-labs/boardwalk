@@ -53,6 +53,14 @@ export const READ_ONLY_BUILTIN_NAMES: readonly string[] = [
  */
 export const SUBAGENT_TOOL_NAME = "subagent";
 
+/**
+ * The `run_code` (programmatic tool calling) tool's name. Like `subagent`, it is NOT a registry
+ * built-in: it needs the leaf's RESOLVED tool set (the tools the snippet may call), so the LEAF layer
+ * assembles it (see agent/tools/run_code.ts), and the registry only recognizes the name. Kept out of
+ * ALL_BUILTIN_NAMES on purpose — that list is "names selectBuiltins/registry produces".
+ */
+export const RUN_CODE_TOOL_NAME = "run_code";
+
 /** Every built-in name this engine knows (sandbox + engine-native + host-backed), independent of backend presence. */
 export const ALL_BUILTIN_NAMES: readonly string[] = [
   "read",
@@ -182,6 +190,9 @@ export function selectBuiltins(
     // registry built-in — recognize the name here, but let the leaf layer assemble it (see
     // subagentSelected + agent/tools/subagent.ts). Skipping keeps it valid in an explicit list.
     if (name === SUBAGENT_TOOL_NAME) continue;
+    // `run_code` is likewise a leaf-layer tool (it needs the resolved tool set to expose to the
+    // snippet) — recognize the name in an explicit list; the leaf layer assembles it (runCodeSelected).
+    if (name === RUN_CODE_TOOL_NAME) continue;
     const tool = available.get(name);
     if (tool === undefined) {
       throw new EngineError(
@@ -207,6 +218,21 @@ export function subagentSelected(builtins: AgentOptions["builtins"]): boolean {
   if (selection === "all") return true;
   if (selection === "none" || selection === "read-only") return false;
   return selection.includes(SUBAGENT_TOOL_NAME);
+}
+
+/**
+ * Whether the `run_code` (programmatic tool calling) tool is enabled for this call. Same policy as
+ * `subagent`: default-ON with `"all"`, off with `"none"`/`"read-only"` (a read-only leaf gets no code
+ * execution — `run_code` is exactly as powerful as the tools it can call, which under those scopes
+ * would still let it run `bash`-equivalent work only if present, but we keep the policy simple and
+ * conservative), and with an explicit list only when `"run_code"` is named. The tool is built by the
+ * leaf layer (it needs the resolved tool set to expose to the snippet).
+ */
+export function runCodeSelected(builtins: AgentOptions["builtins"]): boolean {
+  const selection = builtins ?? "all";
+  if (selection === "all") return true;
+  if (selection === "none" || selection === "read-only") return false;
+  return selection.includes(RUN_CODE_TOOL_NAME);
 }
 
 /** A pointer at the fix: name a real built-in, or define it inline as a ToolDef. */

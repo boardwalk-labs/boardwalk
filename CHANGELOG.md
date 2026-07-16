@@ -3,6 +3,49 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+### Added (progressive tool disclosure for large MCP tool sets)
+
+A leaf given a large MCP tool set paid its full schema on every turn — a single GitHub/Slack server
+can bring dozens of tools and tens of thousands of tokens of definitions, re-sent each turn (the loop
+is append-only, so that cost compounds). The model also had to disambiguate among all of them at once,
+which degrades tool selection.
+
+MCP tools are now deferred behind a compact catalog (name + one-line description) and a built-in
+`find_tools` search tool: the model searches by keyword to load the few schemas it needs, which then
+join the advertised set for the rest of the run. Mirrors the `skill` progressive-disclosure pattern.
+
+Deferral is **automatic and size-gated** (no `AgentOptions` field, no SDK change): it engages only
+when the MCP set clears both a count and a combined-schema-size threshold (`TOOL_DEFER_MIN_COUNT` /
+`TOOL_DEFER_MIN_CHARS`), so a normal leaf — built-ins plus a couple of MCP tools — is completely
+unchanged, standing context and cache prefix identical. Only **MCP** tools are deferred; the core
+coding built-ins and the call's own inline tools are always advertised. Execution is unchanged: the
+loop advertises the active subset but still executes against the full set, so a tool the model calls
+before searching still runs (find_tools just reveals the schema so the arguments are correct). See
+`src/agent/tool_search.ts`.
+
+### Added (`run_code` — programmatic tool calling)
+
+A fat leaf that makes dozens of tool calls pays for every intermediate result on every append-only
+turn, and drowns in its own transcript. The new default-on `run_code` tool lets the model write a
+JavaScript snippet that orchestrates its OTHER tools in code — the leaf's tools are bound as async
+functions on a `tools` object (`await tools.read({ path })`, `await tools.<server>__<tool>({...})`,
+plus a `call(name, input)` escape hatch) — and only what the snippet `console.log`s or `return`s
+enters model context. The individual tool results it loops over, filters, and aggregates never do.
+This is the one lever that improves accuracy AND cost together; it works on the managed `auto` lane
+and every BYO provider (it is a native tool, not Anthropic's server-side PTC beta).
+
+It composes with progressive disclosure: the snippet can call deferred MCP tools too (deferral hides
+the schema from advertising, never from execution). Default-on under `builtins: "all"` (like
+`bash`/`subagent`), off for `"none"`/`"read-only"`.
+
+The snippet runs in-process and is exactly as privileged as the already-default-on `bash` (the run's
+isolation boundary is the per-run microVM, not the JS realm); what it returns is redacted like any
+tool result, so secrets can't reach the model. A wall-clock timeout and an output cap bound it; a
+purely synchronous infinite loop is bounded by the run duration budget (a child-process bridge is the
+hardening follow-up). See `src/agent/tools/run_code.ts`.
+
 ## 0.2.7
 
 ### Fixed (a validation error states the fix once, not twice)

@@ -49,8 +49,9 @@ import {
   type ToolOutputSink,
   type ToolSetContext,
 } from "./tools.js";
-import { subagentSelected } from "./tools/registry.js";
+import { runCodeSelected, subagentSelected } from "./tools/registry.js";
 import { makeSubagentTool } from "./tools/subagent.js";
+import { RUN_CODE_EXCLUDED_TOOLS, runCodeTool } from "./tools/run_code.js";
 import { advertisedTools, planToolDisclosure, type ToolDisclosure } from "./tool_search.js";
 
 /**
@@ -453,7 +454,15 @@ export async function runAgentLeaf(
       deferrable: connected?.tools ?? [],
       allToolNames: new Set(tools.map((t) => t.name)),
     });
-    const executableTools = disclosure === null ? tools : [...tools, disclosure.findTool];
+    const withFind = disclosure === null ? tools : [...tools, disclosure.findTool];
+    // `run_code` (programmatic tool calling) is assembled HERE too: it exposes the leaf's RESOLVED
+    // tool set to the snippet, so it is built LAST — over the fully-resolved set, minus the meta-tools
+    // it can't compose (and itself, by construction, since it isn't in `withFind` yet). Default-on
+    // under "all"; the snippet can call any resolved tool, including deferred MCP ones (deferral only
+    // hides the schema from advertising, never from execution).
+    const executableTools = runCodeSelected(opts?.builtins)
+      ? [...withFind, runCodeTool(withFind.filter((t) => !RUN_CODE_EXCLUDED_TOOLS.has(t.name)))]
+      : withFind;
     const preamble = disclosure === null ? base.preamble : [...base.preamble, disclosure.catalog];
     return await runLeafWithTools(
       prompt,

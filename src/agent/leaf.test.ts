@@ -539,7 +539,9 @@ describe("runAgentLeaf — MCP", () => {
         {
           name: "lookup",
           description: `Look things up by key\n${pad}`,
-          handler: (args: Record<string, unknown>) => ({ text: `looked up ${String(args["key"])}` }),
+          handler: (args: Record<string, unknown>) => ({
+            text: `looked up ${String(args["key"])}`,
+          }),
         },
       ],
     });
@@ -1060,6 +1062,63 @@ describe("runAgentLeaf — built-in tools (default-on)", () => {
 // ----------------------------------------------------------------------------
 // Skills + memory
 // ----------------------------------------------------------------------------
+
+describe("runAgentLeaf — run_code (programmatic tool calling)", () => {
+  it("advertises run_code by default, not under builtins: none", async () => {
+    const on = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("go", undefined, on.io);
+    expect(on.requests[0]?.body).toContain('"run_code"');
+
+    const off = recordedIo(OPENAI_MODEL, [() => openAiText("ok")]);
+    await runAgentLeaf("go", { builtins: "none" }, off.io);
+    expect(off.requests[0]?.body).not.toContain("run_code");
+  });
+
+  it("orchestrates a built-in tool in code so intermediate results stay OUT of model context", async () => {
+    const workspaceDir = tempDir("bw-runcode-ws-");
+    writeFileSync(join(workspaceDir, "data.txt"), "ALPHA\nBETA\nGAMMA", "utf8");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiToolCalls([
+            {
+              id: "rc1",
+              name: "run_code",
+              args: {
+                code: 'const c = await tools.read({ path: "data.txt" }); return c.split("\\n").length;',
+              },
+            },
+          ]),
+        () => openAiText("done"),
+      ],
+      { workspaceDir },
+    );
+    const result = await runAgentLeaf("count the lines in data.txt with code", undefined, rec.io);
+    expect(result).toBe("done");
+
+    // The code's SUMMARY (the line count) came back into context on the follow-up turn…
+    expect(rec.requests[1]?.body).toContain("return: 3");
+    // …but the file's raw contents NEVER entered context on any turn — the whole point of PTC.
+    for (const { body } of rec.requests) {
+      expect(body).not.toContain("ALPHA");
+      expect(body).not.toContain("GAMMA");
+    }
+  });
+
+  it("surfaces a code error to the model as a tool result so the run continues", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () =>
+        openAiToolCalls([
+          { id: "rc1", name: "run_code", args: { code: 'throw new Error("boom")' } },
+        ]),
+      () => openAiText("recovered"),
+    ]);
+    const result = await runAgentLeaf("run some code", undefined, rec.io);
+    expect(result).toBe("recovered");
+    expect(rec.requests[1]?.body).toContain("boom");
+  });
+});
 
 describe("runAgentLeaf — skills (folder-per-skill, progressive disclosure)", () => {
   function writeSkill(

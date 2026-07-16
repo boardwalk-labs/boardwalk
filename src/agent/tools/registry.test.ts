@@ -7,6 +7,7 @@ import type { ToolHost } from "./host_tools.js";
 import {
   ALL_BUILTIN_NAMES,
   READ_ONLY_BUILTIN_NAMES,
+  runCodeSelected,
   selectBuiltins,
   subagentSelected,
 } from "./registry.js";
@@ -110,6 +111,12 @@ describe("selectBuiltins", () => {
     expect(names(["subagent"], undefined)).toEqual([]);
   });
 
+  it("recognizes `run_code` in an explicit list but builds no registry tool for it (leaf-layer)", () => {
+    // Like `subagent`, `run_code` is assembled by the leaf layer (it needs the resolved tool set).
+    expect(names(["read", "run_code"], undefined)).toEqual(["read"]);
+    expect(names(["run_code"], undefined)).toEqual([]);
+  });
+
   it("an explicit UNKNOWN name fails loudly (UNSUPPORTED)", () => {
     expect(() =>
       selectBuiltins(["definitely_not_a_tool"], {
@@ -198,5 +205,20 @@ describe("subagentSelected", () => {
     expect(subagentSelected(["read", "bash"])).toBe(false);
     expect(subagentSelected(["read", "subagent"])).toBe(true);
     expect(subagentSelected([])).toBe(false);
+  });
+});
+
+describe("runCodeSelected", () => {
+  it('is default-on under "all"/undefined, off for "none"/"read-only"', () => {
+    expect(runCodeSelected(undefined)).toBe(true);
+    expect(runCodeSelected("all")).toBe(true);
+    expect(runCodeSelected("none")).toBe(false);
+    expect(runCodeSelected("read-only")).toBe(false);
+  });
+
+  it("under an explicit list, only when `run_code` is named", () => {
+    expect(runCodeSelected(["read", "bash"])).toBe(false);
+    expect(runCodeSelected(["read", "run_code"])).toBe(true);
+    expect(runCodeSelected([])).toBe(false);
   });
 });
