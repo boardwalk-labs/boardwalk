@@ -258,34 +258,34 @@ describe("buildToolSet — type-invalid AgentOptions fails loudly, not with a Ty
   }
 
   describe("`tools` given built-in names — the mistake authors actually make", () => {
-    // The fix must live in the MESSAGE, not the hint: a hosted run reports a failure as
-    // `{ code, message }` (the runner's contract has no `hint` field), so a hint is invisible on
-    // the one path where this mistake actually bites. Proven on dev run 01KXMPRRW6Z2JJA8MTXD3Z5PPB,
-    // whose surfaced error was the message alone.
-    it('tools: ["bash"] names the confusion AND says what to type, in the message', () => {
+    // message = what's WRONG, hint = what to DO. They render together (the run page's banner,
+    // `boardwalk runs <id>`), so the fix belongs in exactly one of them — the hint. This split is
+    // only safe because the hint now reaches a hosted author (runner ≥ 0.2.8 preserves it; it used
+    // to drop it, which is why this briefly lived in the message).
+    it('tools: ["bash"] names the confusion in the message and the fix in the hint', () => {
       const err = reject({ tools: ["bash"] });
       expect(err.code).toBe("VALIDATION");
       // The old guard (`def.name.length === 0`) crashed on exactly this input.
       expect(err.message).not.toContain("Cannot read properties");
       expect(err.message).toContain("`tools`");
       expect(err.message).toContain('a string ("bash")');
-      expect(err.message).toContain('builtins: ["bash"]');
-      expect(err.message).toContain("ON by default");
       expect(err.hint).toContain('builtins: ["bash"]');
+      expect(err.hint).toContain("ON by default");
+      // The fix is NOT restated in the message — the author reads it once.
+      expect(err.message).not.toContain('builtins: ["bash"]');
     });
 
     it("special-cases only real built-in names; other strings get the ToolDef shape", () => {
-      expect(reject({ tools: ["subagent"] }).message).toContain('builtins: ["subagent"]');
+      expect(reject({ tools: ["subagent"] }).hint).toContain('builtins: ["subagent"]');
       const err = reject({ tools: ["frobnicate"] });
       expect(err.message).toContain('a string ("frobnicate")');
-      expect(err.message).toContain("{ name, description, inputSchema, execute }");
-      expect(err.message).not.toContain('builtins: ["frobnicate"]');
+      expect(err.hint).toContain("{ name, description, inputSchema, execute }");
       expect(err.hint).not.toContain('builtins: ["frobnicate"]');
     });
 
     it("catches a bare (unwrapped) `tools` value too", () => {
       expect(reject({ tools: "bash" }).message).toContain("must be an array");
-      expect(reject({ tools: "bash" }).message).toContain('builtins: ["bash"]');
+      expect(reject({ tools: "bash" }).hint).toContain('builtins: ["bash"]');
       expect(reject({ tools: {} }).message).toContain("must be an array");
     });
   });

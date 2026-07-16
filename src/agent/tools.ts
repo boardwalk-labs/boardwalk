@@ -282,25 +282,16 @@ const TOOL_DEF_HINT =
   "on by default and are scoped with `builtins`, not `tools`.";
 
 /**
- * The fix, worded for the MESSAGE — not the hint. A hosted run reports a failure as
- * `{ code, message }` (the runner's contract carries no `hint`), so on the one path where these
- * mistakes actually bite, a hint is invisible. Anything the author must *do* therefore belongs in
- * the message; `hint` stays the fuller elaboration for the engine's own paths.
+ * The fix — the one place it lives. `message` says what went WRONG; `hint` says what to DO. Keep
+ * them disjoint: both are rendered together (the run page's failure banner, `boardwalk runs <id>`),
+ * so restating the fix in the message shows the author the same sentence twice.
+ *
+ * (This split only became safe once `hint` actually reached a hosted author — the runner used to
+ * drop it, which is why the fix was briefly inlined into the message. Runner ≥ 0.2.8 preserves it.)
  *
  * A string naming a built-in is special-cased on purpose: `tools: ["bash"]` is the mistake authors
  * actually make (built-ins USED to be named there), so say exactly what to type.
  */
-function toolsFix(value: unknown): string {
-  if (!isBuiltinName(value)) {
-    return "An inline tool is { name, description, inputSchema, execute }.";
-  }
-  return (
-    `Built-in tools are ON by default, so "${value}" needs no declaration at all — ` +
-    `drop it, or write \`builtins: ["${value}"]\` to restrict this leaf to a subset.`
-  );
-}
-
-/** The fuller elaboration, for paths that surface `hint` (the engine's own supervisor, /server). */
 function toolsHint(value: unknown): string {
   if (!isBuiltinName(value)) return TOOL_DEF_HINT;
   return (
@@ -397,8 +388,7 @@ function validateProgramTools(tools: AgentOptions["tools"]): readonly unknown[] 
   if (!Array.isArray(tools)) {
     throw new EngineError(
       "VALIDATION",
-      `agent() \`tools\` must be an array of inline tool definitions — got ${describeValue(tools)}. ` +
-        toolsFix(tools),
+      `agent() \`tools\` must be an array of inline tool definitions — got ${describeValue(tools)}.`,
       toolsHint(tools),
     );
   }
@@ -412,8 +402,7 @@ function wrapProgramTool(def: unknown): ExecutableTool {
   if (typeof def !== "object" || def === null) {
     throw new EngineError(
       "VALIDATION",
-      `agent() got ${describeValue(def)} in \`tools\`, which takes inline tool definitions, not ` +
-        `names. ${toolsFix(def)}`,
+      `agent() got ${describeValue(def)} in \`tools\`, which takes inline tool definitions, not names.`,
       toolsHint(def),
     );
   }
