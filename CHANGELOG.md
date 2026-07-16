@@ -3,7 +3,10 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## Unreleased
+## 0.2.8
+
+Programmatic tool calling and progressive tool disclosure — two levers for a leaf that carries many
+tools or makes many tool calls.
 
 ### Added (progressive tool disclosure for large MCP tool sets)
 
