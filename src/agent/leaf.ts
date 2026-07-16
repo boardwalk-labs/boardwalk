@@ -49,7 +49,7 @@ import {
   type ToolOutputSink,
   type ToolSetContext,
 } from "./tools.js";
-import { runCodeSelected, subagentSelected } from "./tools/registry.js";
+import { READ_ONLY_BUILTIN_NAMES, runCodeSelected, subagentSelected } from "./tools/registry.js";
 import { makeSubagentTool } from "./tools/subagent.js";
 import { RUN_CODE_EXCLUDED_TOOLS, runCodeTool } from "./tools/run_code.js";
 import { advertisedTools, planToolDisclosure, type ToolDisclosure } from "./tool_search.js";
@@ -118,15 +118,16 @@ export const DEFAULT_MAX_ITERATIONS = 500;
 
 /**
  * No-progress guard. The repetition guard above keys on the tool-call INPUT, so it misses the subtler
- * stall a diffuse runaway is made of: the model issues DIFFERENT calls that surface nothing NEW —
- * re-reading a file it already read, re-running a search whose output it has already seen, oscillating
- * between two views of the same state. We watch the model's OBSERVATIONS instead: a turn "makes
- * progress" iff at least one of its SUCCESSFUL tool results carries content the leaf has not seen
- * before this call. Consecutive no-new-information turns accrue; at the soft threshold we nudge once,
- * at the hard threshold we end the run before it burns more tokens gathering nothing. Any genuinely
- * new observation resets the count, so a legitimately long research leaf that keeps learning never
- * trips. All-error turns are neutral here (the consecutive-error guard owns those), keeping the two
- * signals orthogonal.
+ * stall a diffuse runaway is made of: the model issues DIFFERENT read-only calls that surface nothing
+ * NEW — re-reading a file it already read, re-running a search whose output it has already seen,
+ * oscillating between two views of the same state. A turn counts as PROGRESS if it made any successful
+ * MUTATION/action call (edit/write/apply_patch/bash/…) or any non-built-in inline/MCP call — doing
+ * something is progress, however repetitive its confirmation reads (an edit returns a low-entropy
+ * "edited X (1 replacement)" that must NOT be mistaken for a stall) — OR if a read-only GATHER
+ * surfaced content the leaf hadn't seen. Only a turn whose successful calls were ALL redundant gathers
+ * is no-progress. Consecutive no-progress turns accrue; the soft threshold nudges once, the hard one
+ * ends the run before it burns more tokens gathering nothing. All-error turns are neutral (the
+ * consecutive-error guard owns those). See {@link recordProgress}.
  */
 const NO_PROGRESS_SOFT = 4;
 const NO_PROGRESS_HARD = 8;
@@ -231,25 +232,44 @@ function observationText(result: ToolResultMessage): string {
     .join("");
 }
 
+/** The read-only "gathering" built-ins (read/grep/glob/ls/…). A turn that ONLY calls these, and only
+ *  re-surfaces content already seen, is the no-progress stall; any other successful call is progress. */
+const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set(READ_ONLY_BUILTIN_NAMES);
+
 /**
  * Fold a turn's results into the running set of seen observations and report whether the turn made
- * progress: `true` iff at least one NON-error result carried content not seen before, `false` if every
- * successful result was a repeat, and `null` for an all-error (or empty) turn — neutral for the
- * no-progress counter, since the consecutive-error guard already owns those. See NO_PROGRESS_*.
+ * progress: `true`, `false` (every successful result was redundant gathering), or `null` for an
+ * all-error (or empty) turn — neutral, since the consecutive-error guard owns those. See NO_PROGRESS_*.
+ *
+ * A successful call to a MUTATION/action tool (edit/write/apply_patch/bash/…) or any non-built-in
+ * inline/MCP tool always counts as progress: it DID something, and its confirmation text is
+ * low-entropy and repeats ("edited X (1 replacement)") — hashing that would wrongly read productive
+ * editing as a stall. Only a read-only GATHER (read/grep/glob/ls/…) must surface content not seen
+ * before to count; re-reading what it already has is the stall this guard exists to catch.
  */
-function recordProgress(results: readonly ToolResultMessage[], seen: Set<string>): boolean | null {
+function recordProgress(
+  toolCalls: readonly ToolCallRequest[],
+  results: readonly ToolResultMessage[],
+  seen: Set<string>,
+): boolean | null {
+  const toolNameById = new Map(toolCalls.map((call) => [call.id, call.name]));
   let sawSuccess = false;
-  let sawNew = false;
+  let sawProgress = false;
   for (const result of results) {
     if (result.isError) continue;
     sawSuccess = true;
+    const name = toolNameById.get(result.id);
+    if (name === undefined || !READ_ONLY_TOOL_NAMES.has(name)) {
+      sawProgress = true; // a mutation/action or unknown tool did something — that's progress
+      continue;
+    }
     const key = hashString(observationText(result).trim());
     if (!seen.has(key)) {
       seen.add(key);
-      sawNew = true;
+      sawProgress = true;
     }
   }
-  return sawSuccess ? sawNew : null;
+  return sawSuccess ? sawProgress : null;
 }
 
 /**
@@ -798,7 +818,7 @@ async function runToolLoop(
     // seen? A run of turns that surface nothing new is a stall the repetition guard misses (the calls
     // differ each time). End the run at the hard threshold; nudge once at the soft one. An all-error
     // turn is neutral (progress === null) — the consecutive-error guard owns those. See NO_PROGRESS_*.
-    const progress = recordProgress(results, seenObservations);
+    const progress = recordProgress(turn.toolCalls, results, seenObservations);
     if (progress === true) noProgressTurns = 0;
     else if (progress === false) noProgressTurns += 1;
     if (noProgressTurns >= NO_PROGRESS_HARD) {
