@@ -3,6 +3,30 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.7
+
+### Fixed (a validation error states the fix once, not twice)
+
+0.2.5–0.2.6 inlined the fix into the error **message** because a hosted run dropped `hint` on the
+floor — the runner's failure contract was `{ code, message }`, so the actionable half never reached
+the author. Runner 0.2.8 now preserves `hint` end to end, and both the run page and
+`boardwalk runs <id>` render it, which turned that workaround into visible noise: the same sentence
+twice, once as the message's tail and once as the hint.
+
+The split is restored, and now it holds — **message says what is WRONG, hint says what to DO**, and
+neither restates the other:
+
+```
+Error  agent() got a string ("bash") in `tools`, which takes inline tool definitions, not names.
+Hint   Built-in tools are ON by default — "bash" needs no declaration at all. To restrict this leaf
+       to a subset of built-ins, write `builtins: ["bash"]`; `tools` is only for tools you define
+       inline.
+```
+
+`builtins: "bash"` likewise moves its "Did you mean `builtins: ["bash"]`?" back to the hint. Requires
+runner ≥ 0.2.8 to see the hint on a hosted run; on an older runner the message still names the
+mistake, it just won't say what to type.
+
 ## 0.2.6
 
 Finishes the 0.2.5 pass: the remaining untrusted `AgentOptions` field, and getting the fix in front
