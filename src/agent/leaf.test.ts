@@ -8,6 +8,7 @@ import { EngineError } from "../errors.js";
 import { startFakeMcpServer } from "../testing/fake_mcp.js";
 import {
   ContextCalibrator,
+  DEFAULT_MAX_ITERATIONS,
   extractJsonCandidate,
   runAgentLeaf,
   type LeafEventBody,
@@ -1548,7 +1549,9 @@ describe("runAgentLeaf — iteration cap + wrap-up hints", () => {
     name: "double",
     description: "Doubles a number",
     inputSchema: { type: "object", properties: { n: { type: "number" } }, required: ["n"] },
-    execute: () => Promise.resolve(0),
+    // Distinct RESULT per call (echoes the input) so neither the repetition guard (keyed on the call)
+    // nor the no-progress guard (keyed on the observation) fires — these tests exercise cap/hints only.
+    execute: (input: unknown) => Promise.resolve(`doubled ${String((input as { n: unknown }).n)}`),
   };
   // Distinct args each turn so the repetition guard never fires — these exercise the cap/hints only.
   const toolTurns = (n: number) =>
@@ -1647,6 +1650,94 @@ describe("runAgentLeaf — consecutive-error guard", () => {
       () => openAiText("survived"),
     ]);
     expect(await runAgentLeaf("go", { tools: [boom, ok] }, rec.io)).toBe("survived");
+  });
+});
+
+describe("runAgentLeaf — no-progress guard", () => {
+  // Returns the SAME content no matter its args — the model keeps "gathering" but learns nothing new,
+  // the diffuse stall the repetition guard (keyed on the CALL, which varies) can't see.
+  const reread = {
+    name: "reread",
+    description: "re-reads the same thing",
+    inputSchema: { type: "object", properties: { n: { type: "number" } } },
+    execute: () => Promise.resolve("the same unchanging content"),
+  };
+  // Returns DISTINCT content per call — genuine new information every turn.
+  const probe = {
+    name: "probe",
+    description: "surfaces something new each call",
+    inputSchema: { type: "object", properties: { n: { type: "number" } } },
+    execute: (input: unknown) => Promise.resolve(`finding #${String((input as { n: unknown }).n)}`),
+  };
+  // Distinct ARGS each turn so the repetition guard (keyed on the call) never fires — isolates the
+  // no-progress guard (keyed on the observation).
+  const varyingCalls = (tool: string, n: number) =>
+    Array.from(
+      { length: n },
+      (_, i) => () => openAiToolCalls([{ id: `c${String(i)}`, name: tool, args: { n: i } }]),
+    );
+
+  it("ends a run whose varied tool calls keep surfacing nothing new", async () => {
+    // 9 distinct calls all returning the same content: turn 1 is new, turns 2–9 add nothing, so
+    // noProgressTurns climbs to the hard stop (8) on the 9th and ends the run.
+    const rec = recordedIo(OPENAI_MODEL, varyingCalls("reread", 9));
+    await expect(runAgentLeaf("go", { tools: [reread] }, rec.io)).rejects.toThrow(
+      /surfacing anything new/,
+    );
+  });
+
+  it("does NOT trip when each turn surfaces something new (real progress)", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...varyingCalls("probe", 12),
+      () => openAiText("done — learned plenty"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [probe] }, rec.io)).toBe("done — learned plenty");
+  });
+
+  it("nudges once at the soft threshold, then recovers when a new observation arrives", async () => {
+    // 5 no-new-info turns push noProgressTurns to the soft threshold (4) on the 5th; the nudge rides
+    // the 6th request, where a probe surfaces something new and resets the count.
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...varyingCalls("reread", 5),
+      () => openAiToolCalls([{ id: "fresh", name: "probe", args: { n: 99 } }]),
+      () => openAiText("recovered"),
+    ]);
+    expect(await runAgentLeaf("go", { tools: [reread, probe] }, rec.io)).toBe("recovered");
+    expect(rec.requests[5]?.body).toContain("nothing you hadn't already seen");
+  });
+
+  it("a genuinely new observation resets the counter, so a long mixed run never trips", async () => {
+    // 3 stale reads then 1 fresh finding, repeated — noProgressTurns never reaches the hard stop
+    // because each fresh finding resets it.
+    const turns: (() => Response)[] = [];
+    for (let round = 0; round < 6; round++) {
+      turns.push(
+        () => openAiToolCalls([{ id: `r${String(round)}a`, name: "reread", args: { n: round } }]),
+        () =>
+          openAiToolCalls([{ id: `r${String(round)}b`, name: "reread", args: { n: round + 100 } }]),
+        () =>
+          openAiToolCalls([{ id: `r${String(round)}c`, name: "reread", args: { n: round + 200 } }]),
+        () => openAiToolCalls([{ id: `p${String(round)}`, name: "probe", args: { n: round } }]),
+      );
+    }
+    turns.push(() => openAiText("all good"));
+    const rec = recordedIo(OPENAI_MODEL, turns);
+    expect(await runAgentLeaf("go", { tools: [reread, probe] }, rec.io)).toBe("all good");
+  });
+
+  it("stops a capless leaf at the default backstop with a tools-withheld final answer", async () => {
+    // No maxIterations ⇒ the loop is bounded by DEFAULT_MAX_ITERATIONS. Distinct results each turn
+    // keep the repetition + no-progress guards quiet, so ONLY the backstop stops it: turns 1..500 may
+    // call tools; turn 501 withholds them, forcing the model to conclude (a soft landing).
+    const rec = recordedIo(OPENAI_MODEL, [
+      ...varyingCalls("probe", DEFAULT_MAX_ITERATIONS),
+      () => openAiText("final answer at the backstop"),
+    ]);
+    await expect(runAgentLeaf("go", { tools: [probe] }, rec.io)).resolves.toBe(
+      "final answer at the backstop",
+    );
+    expect(rec.requests).toHaveLength(DEFAULT_MAX_ITERATIONS + 1);
+    expect(rec.requests[DEFAULT_MAX_ITERATIONS]?.body).not.toContain('"tools"');
   });
 });
 

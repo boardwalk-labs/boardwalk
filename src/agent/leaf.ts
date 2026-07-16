@@ -55,12 +55,19 @@ import { RUN_CODE_EXCLUDED_TOOLS, runCodeTool } from "./tools/run_code.js";
 import { advertisedTools, planToolDisclosure, type ToolDisclosure } from "./tool_search.js";
 
 /**
- * A leaf runs UNBOUNDED by default (no fixed tool-iteration cap): the loop ends when the model stops
- * calling tools, and is otherwise bounded by the run budget (usage is reported after every call, so
- * the budget authority can terminate a long loop), the repetition guard below, and cancellation. An
- * author may set `AgentOptions.maxIterations` to cap a leaf whose scope they know — and a cap is a
- * SOFT landing, not a hard failure: the turn past the ceiling withholds tools so the model must give
- * a final answer from the work it has done. See {@link readMaxIterations} + {@link wrapUpHint}.
+ * A leaf's tool loop ends when the model stops calling tools. Four independent guards keep a loop that
+ * WON'T stop from running away — none relies on dollars, since prompt caching can keep a spinning loop
+ * cheap enough that the run budget never trips:
+ *   - the repetition guard (STALL_*) — the model re-issues the same tool call(s);
+ *   - the consecutive-error guard (CONSECUTIVE_ERROR_*) — every recent call is failing;
+ *   - the no-progress guard (NO_PROGRESS_*) — calls keep coming but surface nothing new (the diffuse
+ *     stall the repetition guard misses because each call looks different);
+ *   - a turn ceiling — the author's `AgentOptions.maxIterations` if set, else DEFAULT_MAX_ITERATIONS,
+ *     a generous backstop so the loop is ALWAYS bounded. Reaching it is a SOFT landing, not a hard
+ *     failure: the turn past the ceiling withholds tools so the model gives a final answer from the
+ *     work it has done. See {@link readMaxIterations} + {@link wrapUpHint}.
+ * Usage is still reported after every call, so the run budget can also stop a loop; these guards are
+ * what catch the loops the budget can't. See the constants below.
  */
 
 /** When a cap is set, warn the model once when this many tool-calling turns remain before it. */
@@ -69,13 +76,12 @@ const CAP_WARN_AT = 3;
 const TURN_HINT_INTERVAL = 20;
 
 /**
- * Repetition guard. A model that re-issues the SAME tool call(s) is stuck (a loop the 25-iteration
- * cap would only catch after burning every iteration + its tokens). We count how many of the last
+ * Repetition guard. A model that re-issues the SAME tool call(s) is stuck (a loop the turn ceiling
+ * would only catch after burning every iteration + its tokens). We count how many of the last
  * STALL_WINDOW turns issued the current turn's signature: at STALL_SOFT_NUDGE we inject a one-time
- * nudge to change approach (catches plain repeats AND A/B/A/B oscillation, since the window counts
- * occurrences, not just consecutive ones); at STALL_HARD_STOP we end the run before the next call.
- * A turn whose tool-call SET differs (any real progress) resets the count, so legitimate retries
- * with changed inputs never trip it.
+ * nudge to change approach; at STALL_HARD_STOP we end the run before the next call. A turn whose
+ * tool-call SET differs resets the count — so a model that VARIES its calls slips past this guard,
+ * which is exactly why the no-progress guard below watches observations rather than calls.
  */
 const STALL_WINDOW = 6;
 const STALL_SOFT_NUDGE = 3;
@@ -97,6 +103,37 @@ const CONSECUTIVE_ERROR_NUDGE_TEXT =
   "[Your last several tool calls have all failed. Step back and reconsider — try a different tool " +
   "or corrected inputs, re-read the current state to get your bearings, or produce your final " +
   "answer with what you have.]";
+
+/**
+ * Backstop ceiling on tool-calling turns when the author declares no (smaller) `maxIterations`. Most
+ * leaves finish in far under this; it exists so that even a leaf that keeps finding SOME excuse to
+ * call another tool — one the sharper repetition / no-progress guards below don't catch because every
+ * call looks a little different — cannot spin forever. Like an author-set cap it is a SOFT landing
+ * (the turn past it withholds tools so the model gives a final answer from the work it has), not a
+ * hard failure, and an author who genuinely needs a longer leaf sets a larger `maxIterations` and
+ * gets it verbatim. Generous by design — the no-progress guard catches real stalls long before here.
+ * (OpenHands defaults this to 500; Goose to 1000.) Exported for unit testing.
+ */
+export const DEFAULT_MAX_ITERATIONS = 500;
+
+/**
+ * No-progress guard. The repetition guard above keys on the tool-call INPUT, so it misses the subtler
+ * stall a diffuse runaway is made of: the model issues DIFFERENT calls that surface nothing NEW —
+ * re-reading a file it already read, re-running a search whose output it has already seen, oscillating
+ * between two views of the same state. We watch the model's OBSERVATIONS instead: a turn "makes
+ * progress" iff at least one of its SUCCESSFUL tool results carries content the leaf has not seen
+ * before this call. Consecutive no-new-information turns accrue; at the soft threshold we nudge once,
+ * at the hard threshold we end the run before it burns more tokens gathering nothing. Any genuinely
+ * new observation resets the count, so a legitimately long research leaf that keeps learning never
+ * trips. All-error turns are neutral here (the consecutive-error guard owns those), keeping the two
+ * signals orthogonal.
+ */
+const NO_PROGRESS_SOFT = 4;
+const NO_PROGRESS_HARD = 8;
+const NO_PROGRESS_NUDGE_TEXT =
+  "[No progress: your recent tool calls have surfaced nothing you hadn't already seen — you're " +
+  "likely re-reading or re-searching the same things. Act on what you already know, try a materially " +
+  "different approach, or give your final answer now.]";
 
 /**
  * Calibrates the conversation size estimate against ground truth. `estimateTokens` is a chars-based
@@ -173,12 +210,55 @@ function turnSignature(toolCalls: readonly ToolCallRequest[]): string {
     .join("|");
 }
 
+/** A small, dependency-free string hash (FNV-1a, base36) for cheap observation de-duplication. A rare
+ *  collision would only make the no-progress guard very slightly more eager — never a correctness bug. */
+function hashString(text: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(36);
+}
+
+/** The model-visible text of one tool result, for the no-progress guard's "have I seen this before?"
+ *  check. A bare string is the result verbatim; content parts contribute their text, and a file part
+ *  a stable per-mime marker so two identical attachments compare equal without hashing their bytes. */
+function observationText(result: ToolResultMessage): string {
+  if (typeof result.content === "string") return result.content;
+  return result.content
+    .map((part) => (part.type === "text" ? part.text : `[file:${part.file.mimeType}]`))
+    .join("");
+}
+
 /**
- * The optional per-call tool-iteration ceiling. Read DEFENSIVELY (via Reflect, not a typed field):
- * the engine may run a program compiled against a newer SDK that surfaced this knob after the engine
- * pinned its `@boardwalk-labs/workflow`, so we never assume the option is present on the type. A
- * finite integer `>= 1` caps the loop; anything else (absent, non-number, `< 1`, non-finite) means
- * unbounded — matching the SDK contract that only a positive integer sets a cap.
+ * Fold a turn's results into the running set of seen observations and report whether the turn made
+ * progress: `true` iff at least one NON-error result carried content not seen before, `false` if every
+ * successful result was a repeat, and `null` for an all-error (or empty) turn — neutral for the
+ * no-progress counter, since the consecutive-error guard already owns those. See NO_PROGRESS_*.
+ */
+function recordProgress(results: readonly ToolResultMessage[], seen: Set<string>): boolean | null {
+  let sawSuccess = false;
+  let sawNew = false;
+  for (const result of results) {
+    if (result.isError) continue;
+    sawSuccess = true;
+    const key = hashString(observationText(result).trim());
+    if (!seen.has(key)) {
+      seen.add(key);
+      sawNew = true;
+    }
+  }
+  return sawSuccess ? sawNew : null;
+}
+
+/**
+ * The author's per-call tool-iteration ceiling, or undefined when unset. Read DEFENSIVELY (via
+ * Reflect, not a typed field): the engine may run a program compiled against a newer SDK that surfaced
+ * this knob after the engine pinned its `@boardwalk-labs/workflow`, so we never assume the option is
+ * present on the type. A finite integer `>= 1` is the cap; anything else (absent, non-number, `< 1`,
+ * non-finite) is undefined — the caller then falls back to DEFAULT_MAX_ITERATIONS, so the loop is
+ * always bounded even when the author sets nothing.
  */
 function readMaxIterations(opts: AgentOptions | undefined): number | undefined {
   if (opts === undefined) return undefined;
@@ -188,18 +268,20 @@ function readMaxIterations(opts: AgentOptions | undefined): number | undefined {
 
 /**
  * A wrap-up nudge to append after a completed tool-calling turn, or null for no nudge this turn.
- * Capped: a concrete countdown as the ceiling nears (`CAP_WARN_AT` turns out). Unbounded: a periodic
- * reminder every `TURN_HINT_INTERVAL` turns so a long loop is prompted to conclude if it already
- * can. Append-only, so the cache-stable prefix is untouched (like the STALL nudge). It never forces
- * a stop — a capped run's hard backstop is the tools-withheld final turn; an uncapped run's is the
- * budget + repetition guard.
+ * Near the ceiling: a concrete countdown (`CAP_WARN_AT` turns out). Otherwise: a periodic reminder
+ * every `TURN_HINT_INTERVAL` turns so a long loop is prompted to conclude if it already can. Every
+ * leaf now has a cap (the author's or DEFAULT_MAX_ITERATIONS), so both apply — the countdown for a
+ * tight author cap, the periodic reminder for a long run under the generous backstop. Append-only, so
+ * the cache-stable prefix is untouched (like the STALL nudge). It never forces a stop — the hard
+ * backstop is the tools-withheld final turn at the cap; real stalls are caught by the repetition and
+ * no-progress guards.
  */
-function wrapUpHint(iteration: number, cap: number | undefined): string | null {
-  if (cap !== undefined) {
-    return cap - iteration === CAP_WARN_AT
-      ? `[${String(CAP_WARN_AT)} more tool-calling turns before this agent() call must wrap up. ` +
-          `Prioritize finishing now and be ready to give your final answer.]`
-      : null;
+function wrapUpHint(iteration: number, cap: number): string | null {
+  if (cap - iteration === CAP_WARN_AT) {
+    return (
+      `[${String(CAP_WARN_AT)} more tool-calling turns before this agent() call must wrap up. ` +
+      `Prioritize finishing now and be ready to give your final answer.]`
+    );
   }
   return iteration % TURN_HINT_INTERVAL === 0
     ? `[You've now taken ${String(iteration)} tool-calling turns. If you already have what you ` +
@@ -627,16 +709,20 @@ async function runToolLoop(
   const recentSignatures: string[] = [];
   // Consecutive turns whose every tool call errored (see CONSECUTIVE_ERROR_*). Reset by any success.
   let consecutiveErrorTurns = 0;
+  // Observation hashes seen so far + the run of turns that surfaced nothing new (see NO_PROGRESS_*).
+  const seenObservations = new Set<string>();
+  let noProgressTurns = 0;
   // Learns how our size estimate compares to the provider's real input-token count (see the class).
   const calibrator = new ContextCalibrator();
   // The resolved model's context window, once the seam tells us (see ModelTurnResult.contextTokens).
   // Until then the budget falls back to a conservative absolute; a router lane learns it on turn 1.
   let contextTokens: number | undefined;
-  // Optional per-call ceiling on tool-calling turns (undefined ⇒ unbounded; see readMaxIterations).
-  const cap = readMaxIterations(opts);
-  // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran).
-  // Unbounded when `cap` is undefined; otherwise one turn PAST the cap runs to force a conclusion.
-  for (let iteration = startIteration + 1; cap === undefined || iteration <= cap + 1; iteration++) {
+  // Per-call ceiling on tool-calling turns: the author's `maxIterations` if set, else a generous
+  // backstop so no leaf can spin forever (see readMaxIterations + DEFAULT_MAX_ITERATIONS).
+  const cap = readMaxIterations(opts) ?? DEFAULT_MAX_ITERATIONS;
+  // Resume continues from the iteration AFTER the parked turn (whose tools the caller re-ran). One
+  // turn PAST the cap runs with tools withheld to force a conclusion (a soft landing, not a failure).
+  for (let iteration = startIteration + 1; iteration <= cap + 1; iteration++) {
     // The single turn past the ceiling withholds tools so the model MUST give a final answer — a
     // soft landing instead of a hard "exceeded N iterations" failure that discards the work done.
     // Otherwise ADVERTISE the active subset (progressive disclosure hides deferred-and-unsearched MCP
@@ -708,26 +794,44 @@ async function runToolLoop(
       );
     }
 
-    // Nudge ONCE, when the stall first crosses the soft threshold (an appended message, so the
-    // cache-stable prefix is untouched). If the model keeps repeating, `repeats` climbs to the hard
-    // stop above on a later turn.
+    // No-progress guard: did THIS turn's successful results surface anything the leaf hadn't already
+    // seen? A run of turns that surface nothing new is a stall the repetition guard misses (the calls
+    // differ each time). End the run at the hard threshold; nudge once at the soft one. An all-error
+    // turn is neutral (progress === null) — the consecutive-error guard owns those. See NO_PROGRESS_*.
+    const progress = recordProgress(results, seenObservations);
+    if (progress === true) noProgressTurns = 0;
+    else if (progress === false) noProgressTurns += 1;
+    if (noProgressTurns >= NO_PROGRESS_HARD) {
+      throw new EngineError(
+        "PROGRAM_ERROR",
+        "agent() kept calling tools without surfacing anything new — it appears stuck gathering information without making progress.",
+        "Give the model a way to act on what it has (or a tighter, better-scoped task), or split the work across calls.",
+      );
+    }
+
+    // Nudge ONCE, when a stall first crosses its soft threshold (an appended message, so the
+    // cache-stable prefix is untouched). If the model keeps at it, the count climbs to the hard stop
+    // above on a later turn.
     if (repeats === STALL_SOFT_NUDGE) {
       messages.push({ role: "user", content: io.redactor.redact(STALL_NUDGE_TEXT) });
     }
     if (consecutiveErrorTurns === CONSECUTIVE_ERROR_SOFT) {
       messages.push({ role: "user", content: io.redactor.redact(CONSECUTIVE_ERROR_NUDGE_TEXT) });
     }
+    if (noProgressTurns === NO_PROGRESS_SOFT) {
+      messages.push({ role: "user", content: io.redactor.redact(NO_PROGRESS_NUDGE_TEXT) });
+    }
 
     // Wrap-up hint: as tool-calling turns pile up, remind the model to conclude (append-only, so the
-    // cache-stable prefix is untouched). A cap gives a concrete countdown near the ceiling; an
-    // unbounded loop gets a periodic reminder. Never forces a stop (see wrapUpHint).
+    // cache-stable prefix is untouched). A concrete countdown near the ceiling; a periodic reminder on
+    // a long run under the generous backstop. Never forces a stop (see wrapUpHint).
     const hint = wrapUpHint(iteration, cap);
     if (hint !== null) {
       messages.push({ role: "user", content: io.redactor.redact(hint) });
     }
   }
-  // Unreachable: an unbounded loop only exits via a return above, and a capped loop returns on its
-  // forced-final turn. Kept as a defensive terminal for the type checker.
+  // Unreachable: the loop is always bounded (author cap or backstop) and returns on its forced-final
+  // turn; a model that stops calling tools returns earlier. Kept as a defensive terminal for tsc.
   throw new EngineError("INTERNAL", "agent() tool loop exited without producing an answer.");
 }
 
