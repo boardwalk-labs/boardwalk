@@ -41,6 +41,18 @@ describe("buildToolUseGuidance", () => {
     expect(out).not.toContain("confirm an edit");
   });
 
+  it("adds the pull-in-only-what-you-need line for a reading tool, with the bash clause only when bash is present", () => {
+    // read/grep present, no bash: the narrowing line appears without the "prefer over bash" clause.
+    const readOnly = buildToolUseGuidance(named("read", "grep"));
+    expect(readOnly).toContain("Pull in only what you need");
+    expect(readOnly).not.toContain("Prefer the read/grep/glob tools");
+    // Adding bash brings in the shell-out clause.
+    const withBash = buildToolUseGuidance(named("read", "grep", "bash"));
+    expect(withBash).toContain("Prefer the read/grep/glob tools over");
+    // A leaf with neither read nor grep gets no such line.
+    expect(buildToolUseGuidance(named("bash", "todo"))).not.toContain("Pull in only what you need");
+  });
+
   it("mentions apply_patch only when apply_patch is present, edit-match only when edit is", () => {
     const patchOnly = buildToolUseGuidance(named("apply_patch"));
     expect(patchOnly).toContain("apply_patch to make several edits");

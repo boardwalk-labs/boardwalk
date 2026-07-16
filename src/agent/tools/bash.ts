@@ -23,7 +23,10 @@
 // separately (stdout/stderr), bounded by a byte cap and a wall-clock timeout.
 
 import { spawn } from "node:child_process";
-import { sep } from "node:path";
+import { randomUUID } from "node:crypto";
+import { writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, sep } from "node:path";
 import { EngineError } from "../../errors.js";
 import type { ExecutableTool, RichToolResult, ToolOutputSink } from "../tools.js";
 import { capEventText } from "./result.js";
@@ -42,6 +45,49 @@ const MAX_TIMEOUT_MS = 600_000;
  * smaller cap would have discarded more of the verdict, which is the part worth having.
  */
 const MAX_OUTPUT_BYTES = 32 * 1024;
+
+/** Ceiling on the saved full-output copy — bounds the memory held + disk a runaway command consumes. */
+const SPILL_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Accumulates a command's FULL output so, IF it ends up truncated in-context, we can save it to an
+ * ephemeral temp file the model can grep/sed for the elided middle — the model can't redirect output
+ * to a file itself, since `>` is a blocked construct. Output is buffered in memory (bounded by
+ * {@link SPILL_MAX_BYTES}); the file is written only on {@link save}, which the caller calls ONLY when
+ * truncation actually happened, so a normal command never touches disk. Best-effort: a write failure
+ * just yields no path and the command still returns its bounded result.
+ */
+class OutputSpill {
+  private readonly chunks: Buffer[] = [];
+  private size = 0;
+  /** True once the buffer hit its cap and stopped growing (so even the saved copy is incomplete). */
+  capped = false;
+
+  add(chunk: Buffer): void {
+    if (this.size >= SPILL_MAX_BYTES) {
+      this.capped = true;
+      return;
+    }
+    const room = SPILL_MAX_BYTES - this.size;
+    const take = chunk.length <= room ? chunk : chunk.subarray(0, room);
+    this.chunks.push(take);
+    this.size += take.length;
+    if (this.size >= SPILL_MAX_BYTES) this.capped = true;
+  }
+
+  /** Write the accumulated output to a fresh temp file; returns its path, or undefined if there was
+   *  nothing to save or the write failed. Call only when the in-context output was actually clipped. */
+  async save(): Promise<string | undefined> {
+    if (this.chunks.length === 0) return undefined;
+    const path = join(tmpdir(), `boardwalk-cmd-${randomUUID()}.log`);
+    try {
+      await writeFile(path, Buffer.concat(this.chunks));
+      return path;
+    } catch {
+      return undefined;
+    }
+  }
+}
 
 /**
  * Root commands allowed to start a segment. A coding-agent set: VCS, the JS/Python toolchains,
@@ -290,6 +336,8 @@ async function runBash(
     });
     const stdout = new BoundedBuffer(MAX_OUTPUT_BYTES);
     const stderr = new BoundedBuffer(MAX_OUTPUT_BYTES);
+    // Buffer the FULL output (both streams) in memory; saved to a file only if we end up truncating.
+    const spill = new OutputSpill();
     // Stream chunks live (bounded to the same per-stream cap as the final result, so a runaway
     // command can't flood the event stream). The final result still carries the full bounded output.
     let outStreamed = 0;
@@ -307,10 +355,12 @@ async function runBash(
 
     child.stdout.on("data", (chunk: Buffer) => {
       stdout.push(chunk);
+      spill.add(chunk);
       outStreamed = stream("stdout", chunk, outStreamed);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr.push(chunk);
+      spill.add(chunk);
       errStreamed = stream("stderr", chunk, errStreamed);
     });
     child.on("error", (err) => {
@@ -328,9 +378,27 @@ async function runBash(
         );
         return;
       }
-      resolvePromise(
-        buildBashResult(command, code, signal, stdout, stderr, Date.now() - startedAt),
-      );
+      const durationMs = Date.now() - startedAt;
+      // Save the full output to a file ONLY when the in-context copy was actually clipped — otherwise
+      // the head+tail already carries everything and there's nothing to recover.
+      if (!(stdout.wasTruncated() || stderr.wasTruncated())) {
+        resolvePromise(buildBashResult(command, code, signal, stdout, stderr, durationMs));
+        return;
+      }
+      void spill.save().then((spillPath) => {
+        resolvePromise(
+          buildBashResult(
+            command,
+            code,
+            signal,
+            stdout,
+            stderr,
+            durationMs,
+            spillPath,
+            spill.capped,
+          ),
+        );
+      });
     });
   });
 }
@@ -344,12 +412,14 @@ function buildBashResult(
   stdout: BoundedBuffer,
   stderr: BoundedBuffer,
   durationMs: number,
+  spillPath?: string,
+  spillCapped?: boolean,
 ): RichToolResult {
   const out = capEventText(stdout.text());
   const err = capEventText(stderr.text());
   const exit = signal !== null ? `signal ${signal}` : `exit ${String(code ?? 0)}`;
   return {
-    llmText: formatResult(code, signal, stdout, stderr),
+    llmText: formatResult(code, signal, stdout, stderr, spillPath, spillCapped),
     event: {
       kind: "shell",
       humanSummary: `$ ${commandSummary(command)} → ${exit}`,
@@ -361,6 +431,7 @@ function buildBashResult(
         stderr: err.text,
         truncated: stdout.wasTruncated() || stderr.wasTruncated() || out.truncated || err.truncated,
         durationMs,
+        ...(spillPath !== undefined ? { outputFile: spillPath } : {}),
       },
     },
   };
@@ -597,6 +668,8 @@ function formatResult(
   signal: NodeJS.Signals | null,
   stdout: BoundedBuffer,
   stderr: BoundedBuffer,
+  spillPath?: string,
+  spillCapped?: boolean,
 ): string {
   const parts: string[] = [];
   const exit = signal !== null ? `signal ${signal}` : `exit code ${String(code ?? 0)}`;
@@ -605,6 +678,14 @@ function formatResult(
   const err = stderr.text();
   parts.push(`stdout:\n${out.length > 0 ? out : "(empty)"}${stdout.truncatedNote()}`);
   parts.push(`stderr:\n${err.length > 0 ? err : "(empty)"}${stderr.truncatedNote()}`);
+  if (spillPath !== undefined) {
+    const capNote =
+      spillCapped === true ? ` (first ${String(SPILL_MAX_BYTES / (1024 * 1024))}MB)` : "";
+    parts.push(
+      `[full output saved to ${spillPath}${capNote} — inspect the elided middle by running e.g. ` +
+        `\`grep PATTERN ${spillPath}\` or \`sed -n 'START,ENDp' ${spillPath}\`, or re-run with a narrower filter.]`,
+    );
+  }
   return parts.join("\n");
 }
 

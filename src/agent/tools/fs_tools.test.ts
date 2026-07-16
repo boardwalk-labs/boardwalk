@@ -285,6 +285,42 @@ describe("grep", () => {
       /no such path "nope"\. Pass a single path, or an array of paths/,
     );
   });
+
+  it("output_mode files_with_matches returns distinct paths, not match lines", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "NEEDLE one\nNEEDLE two\n"); // two matches, one file
+    writeFileSync(join(dir, "src/b.ts"), "NEEDLE three\n");
+    const out = rich(
+      await grepTool(dir).execute({ pattern: "NEEDLE", output_mode: "files_with_matches" }),
+    ).llmText;
+    expect(out).toContain("src/a.ts");
+    expect(out).toContain("src/b.ts");
+    expect(out).not.toContain("NEEDLE one"); // paths only, no line text
+    expect(out.match(/src\/a\.ts/g)).toHaveLength(1); // deduped despite two matches
+  });
+
+  it("output_mode count returns per-file counts and a total", async () => {
+    const dir = ws();
+    mkdirSync(join(dir, "src"));
+    writeFileSync(join(dir, "src/a.ts"), "NEEDLE one\nNEEDLE two\n");
+    writeFileSync(join(dir, "src/b.ts"), "NEEDLE three\n");
+    const out = rich(
+      await grepTool(dir).execute({ pattern: "NEEDLE", output_mode: "count" }),
+    ).llmText;
+    expect(out).toContain("src/a.ts: 2");
+    expect(out).toContain("src/b.ts: 1");
+    expect(out).toContain("3 matches across 2 files");
+  });
+
+  it("an unknown output_mode falls back to content (matching lines)", async () => {
+    const dir = ws();
+    writeFileSync(join(dir, "a.ts"), "NEEDLE here\n");
+    const out = rich(
+      await grepTool(dir).execute({ pattern: "NEEDLE", output_mode: "bogus" }),
+    ).llmText;
+    expect(out).toContain("a.ts:1:NEEDLE here");
+  });
 });
 
 describe("glob", () => {

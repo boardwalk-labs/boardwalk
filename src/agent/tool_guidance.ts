@@ -45,6 +45,24 @@ export function buildToolUseGuidance(tools: readonly { name: string }[]): string
         : ""),
   );
 
+  // Pull in only what's needed. A whole large file (or an unfiltered command dump) read into context
+  // is the single biggest source of wasted tokens — it then rides in context for the rest of the loop.
+  // Gated on the reading tools; the bash clause only when the model could shell out instead.
+  if (has("read") || has("grep")) {
+    const parts = [
+      "Pull in only what you need: read a large file with `read` offset/limit — or locate the span " +
+        "with `grep` — rather than reading it whole, and start a search narrow before widening it.",
+    ];
+    if (has("bash")) {
+      parts.push(
+        "Prefer the read/grep/glob tools over `cat`/`grep`/`find` in bash: they cap and format their " +
+          "output, so one call can't flood your context with a whole file.",
+      );
+    }
+    parts.push("Refer to code by path and line rather than pasting large file contents back.");
+    lines.push(`- ${parts.join(" ")}`);
+  }
+
   // Editing discipline — only when the leaf can modify files.
   if (canEdit || has("write")) {
     const parts = [

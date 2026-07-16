@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -212,6 +212,37 @@ describe("bash tool — execution + traversal", () => {
     expect(result.event.data).toMatchObject({ command: "echo hello-world", exitCode: 0 });
     expect(result.event.data?.["stdout"]).toContain("hello-world");
     expect(typeof result.event.data?.["durationMs"]).toBe("number");
+  });
+
+  it("saves the full output to a temp file when truncated, so the elided middle is recoverable", async () => {
+    const dir = ws();
+    // A file whose middle carries a marker that lands in the elided region (head 30% + tail 70% of
+    // 32KB, so an offset of 50k is dropped from the in-context copy).
+    const big = "a".repeat(50_000) + "MIDDLE_MARKER" + "a".repeat(50_000);
+    writeFileSync(join(dir, "big.txt"), big);
+    const result = rich(await bashTool({ workspaceDir: dir }).execute({ command: "cat big.txt" }));
+
+    // In-context output is clipped and the marker is gone from it.
+    expect(result.llmText).toContain("head + tail kept, middle elided");
+    expect(result.llmText).not.toContain("MIDDLE_MARKER");
+
+    // ...but it points at a saved file that holds the FULL output.
+    const m = result.llmText.match(/full output saved to (\S+)/);
+    expect(m).not.toBeNull();
+    const spillPath = m?.[1] ?? "";
+    expect(spillPath.startsWith(tmpdir())).toBe(true);
+    expect(result.event.data?.["outputFile"]).toBe(spillPath);
+    cleanups.push(() => rmSync(spillPath, { force: true }));
+    const saved = readFileSync(spillPath, "utf8");
+    expect(saved).toContain("MIDDLE_MARKER");
+    expect(saved.length).toBe(big.length);
+  });
+
+  it("leaves no saved-output file for a command whose output fits", async () => {
+    const result = rich(await bashTool({ workspaceDir: ws() }).execute({ command: "echo small" }));
+    expect(result.llmText).toContain("small");
+    expect(result.llmText).not.toContain("full output saved to");
+    expect(result.event.data?.["outputFile"]).toBeUndefined();
   });
 
   it("streams stdout chunks to the onOutput sink as they arrive", async () => {

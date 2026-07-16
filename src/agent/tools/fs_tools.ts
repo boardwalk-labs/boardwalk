@@ -85,6 +85,8 @@ function fileEditResult(
 
 /** A long read/listing/search result is capped so one tool call can't flood model context. */
 const MAX_GREP_MATCHES = 100;
+/** files_with_matches / count survey modes return only paths, so they can afford a higher cap. */
+const MAX_GREP_FILES = 500;
 const MAX_GLOB_RESULTS = 500;
 const MAX_LS_ENTRIES = 1000;
 /**
@@ -475,8 +477,11 @@ export function grepTool(workspaceDir: string): ExecutableTool {
   return {
     name: "grep",
     description:
-      "Search the workspace for a regular expression. Returns matching lines as `path:line:text`, " +
-      `capped at ${String(MAX_GREP_MATCHES)} matches. Uses ripgrep when available, else a built-in scan.`,
+      "Search the workspace for a regular expression. `output_mode` controls what comes back: " +
+      `"content" (default) returns matching lines as \`path:line:text\`, capped at ${String(MAX_GREP_MATCHES)}; ` +
+      `"files_with_matches" returns just the matching file paths (capped at ${String(MAX_GREP_FILES)}); ` +
+      '"count" returns a per-file match count plus the total. Use "files_with_matches" or "count" to ' +
+      "survey broadly without pulling match lines into context. Uses ripgrep when available, else a built-in scan.",
     inputSchema: {
       type: "object",
       properties: {
@@ -486,6 +491,14 @@ export function grepTool(workspaceDir: string): ExecutableTool {
             "Workspace-relative director(ies) or file(s) to search — a single path OR an array of " +
             "paths. Defaults to the whole workspace.",
           anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+        },
+        output_mode: {
+          type: "string",
+          enum: ["content", "files_with_matches", "count"],
+          description:
+            'What to return: "content" (matching lines, default), "files_with_matches" (matching ' +
+            'file paths only), or "count" (per-file match counts + total). The latter two are much ' +
+            "cheaper for a broad survey.",
         },
       },
       required: ["pattern"],
@@ -514,10 +527,43 @@ export function grepTool(workspaceDir: string): ExecutableTool {
       if (matches.length === 0) {
         return outputResult("search", `grep "${pattern}" (no matches)`, "(no matches)", extra);
       }
+      const mode = grepOutputMode(input["output_mode"]);
+      if (mode === "files_with_matches") {
+        const files = [...new Set(matches.map(grepMatchPath))];
+        const shownFiles = files.slice(0, MAX_GREP_FILES);
+        const fnote =
+          files.length > MAX_GREP_FILES
+            ? `\n…[${String(files.length - MAX_GREP_FILES)} more files truncated — narrow the pattern or scope]`
+            : "";
+        return outputResult(
+          "search",
+          `grep "${pattern}" (${plural(files.length, "file")})`,
+          shownFiles.join("\n") + fnote,
+          extra,
+        );
+      }
+      if (mode === "count") {
+        const perFile = new Map<string, number>();
+        for (const m of matches)
+          perFile.set(grepMatchPath(m), (perFile.get(grepMatchPath(m)) ?? 0) + 1);
+        const entries = [...perFile.entries()];
+        const shownCounts = entries.slice(0, MAX_GREP_FILES).map(([p, c]) => `${p}: ${String(c)}`);
+        const cnote =
+          entries.length > MAX_GREP_FILES
+            ? `\n…[${String(entries.length - MAX_GREP_FILES)} more files truncated]`
+            : "";
+        const total = `\n${plural(matches.length, "match", "matches")} across ${plural(entries.length, "file")}`;
+        return outputResult(
+          "search",
+          `grep "${pattern}" (${plural(matches.length, "match", "matches")} in ${plural(entries.length, "file")})`,
+          shownCounts.join("\n") + cnote + total,
+          extra,
+        );
+      }
       const shown = matches.slice(0, MAX_GREP_MATCHES);
       const note =
         matches.length > MAX_GREP_MATCHES
-          ? `\n…[${String(matches.length - MAX_GREP_MATCHES)} more matches truncated]`
+          ? `\n…[${String(matches.length - MAX_GREP_MATCHES)} more matches truncated — use output_mode "files_with_matches"/"count", or narrow the pattern]`
           : "";
       return outputResult(
         "search",
@@ -527,6 +573,22 @@ export function grepTool(workspaceDir: string): ExecutableTool {
       );
     },
   };
+}
+
+/** The requested grep result shape; anything but the two survey modes is the default `content`. */
+function grepOutputMode(raw: unknown): "content" | "files_with_matches" | "count" {
+  return raw === "files_with_matches" || raw === "count" ? raw : "content";
+}
+
+/** The path portion of a `path:line:text` match line (everything before the first colon). */
+function grepMatchPath(match: string): string {
+  const colon = match.indexOf(":");
+  return colon === -1 ? match : match.slice(0, colon);
+}
+
+/** "1 file" / "3 files" — a count with a singular/plural noun. */
+function plural(n: number, singular: string, pluralForm = `${singular}s`): string {
+  return `${String(n)} ${n === 1 ? singular : pluralForm}`;
 }
 
 export function globTool(workspaceDir: string): ExecutableTool {
