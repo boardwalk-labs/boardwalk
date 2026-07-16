@@ -19,8 +19,9 @@
 // it then degrades per-file when no language server is installed. Only an EXPLICIT name list fails
 // on an unknown name.
 
+import { z } from "zod";
 import type { AgentOptions } from "@boardwalk-labs/workflow";
-import { EngineError } from "../../errors.js";
+import { describeValue, EngineError } from "../../errors.js";
 import type { LspService } from "../lsp/index.js";
 import type { ExecutableTool } from "../tools.js";
 import { applyPatchTool } from "./apply_patch.js";
@@ -111,6 +112,42 @@ function registry(ctx: BuiltinContext): Map<string, ExecutableTool> {
 }
 
 /**
+ * The call's `builtins` selection, shape-checked and defaulted. Like every AgentOptions field this
+ * is untrusted runtime input (author programs are never type-checked — see tools.ts), and a wrong
+ * shape used to fail obscurely INSIDE the selection loop: `builtins: "bash"` iterated the string's
+ * CHARACTERS and reported `Built-in tool "b" is not available`, while `builtins: {}` crashed on
+ * "selection is not iterable".
+ */
+const builtinsSchema = z.union([
+  z.literal("all"),
+  z.literal("read-only"),
+  z.literal("none"),
+  z.array(z.string().min(1)),
+]);
+
+// Typed `unknown`, not AgentOptions["builtins"]: the declared type is precisely what cannot be
+// trusted here, and narrowing against it would let TS "prove" the impossible cases away.
+function validateBuiltins(builtins: unknown): "all" | "read-only" | "none" | readonly string[] {
+  if (builtins === undefined || builtins === null) return "all";
+  const parsed = builtinsSchema.safeParse(builtins);
+  if (parsed.success) return parsed.data;
+  // A bare built-in name is the near-miss worth naming: the author wanted a one-tool set and just
+  // forgot the array, so say exactly what to type rather than only listing the legal forms.
+  const arrayHint =
+    typeof builtins === "string" && ALL_BUILTIN_NAMES.includes(builtins)
+      ? ` Did you mean \`builtins: ["${builtins}"]\`?`
+      : "";
+  const got = Array.isArray(builtins)
+    ? "an array with a non-string or empty entry"
+    : describeValue(builtins);
+  throw new EngineError(
+    "VALIDATION",
+    `agent() \`builtins\` must be "all", "read-only", "none", or an array of built-in names — got ${got}.`,
+    `Known built-ins: ${ALL_BUILTIN_NAMES.join(", ")}.${arrayHint}`,
+  );
+}
+
+/**
  * Select the built-in tools for a call from `opts.builtins` (default "all"). Returns the chosen
  * ExecutableTools; the caller adds inline ToolDefs on top and asserts name uniqueness.
  */
@@ -119,7 +156,7 @@ export function selectBuiltins(
   ctx: BuiltinContext,
 ): ExecutableTool[] {
   const available = registry(ctx);
-  const selection = builtins ?? "all";
+  const selection = validateBuiltins(builtins);
 
   if (selection === "none") return [];
 

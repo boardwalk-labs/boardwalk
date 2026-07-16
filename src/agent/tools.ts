@@ -12,7 +12,13 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { z } from "zod";
-import type { AgentOptions, McpServerRef, ToolDef, ToolReturn } from "@boardwalk-labs/workflow";
+import type {
+  AgentOptions,
+  JsonSchema,
+  McpServerRef,
+  ToolDef,
+  ToolReturn,
+} from "@boardwalk-labs/workflow";
 import { loadAgentsMd } from "./agents_md.js";
 import { buildEnvContext, workspaceOrientation } from "./env_context.js";
 import { buildToolUseGuidance } from "./tool_guidance.js";
@@ -22,14 +28,14 @@ import {
   loadSkillCatalogEntry,
   loadSkillResource,
 } from "./skills.js";
-import { EngineError } from "../errors.js";
+import { describeValue, EngineError } from "../errors.js";
 import { McpConnection, type McpCallResult } from "../mcp/client.js";
 import { HttpTransport } from "../mcp/transport_http.js";
 import { StdioTransport } from "../mcp/transport_stdio.js";
 import type { ContentPart, ToolSpec } from "./conversation.js";
 import type { LspService } from "./lsp/index.js";
 import type { Redactor } from "./redact.js";
-import { selectBuiltins } from "./tools/registry.js";
+import { ALL_BUILTIN_NAMES, selectBuiltins, SUBAGENT_TOOL_NAME } from "./tools/registry.js";
 import { containedPath as containedWorkspacePath } from "./tools/sandbox.js";
 import type { ToolHost } from "./tools/host_tools.js";
 
@@ -140,7 +146,7 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
     host: ctx.host,
     lspService: ctx.lspService,
   });
-  for (const def of opts?.tools ?? []) {
+  for (const def of validateProgramTools(opts?.tools)) {
     tools.push(wrapProgramTool(def));
   }
 
@@ -163,7 +169,7 @@ export function buildToolSet(opts: AgentOptions | undefined, ctx: ToolSetContext
   // validating every pinned skill resolves NOW (fail loud before any model call) — and add the
   // built-in `skill` tool the model calls to load a skill's full body on demand. Bundled resources
   // beside each SKILL.md are reachable with the ordinary file tools.
-  const skills = opts?.skills ?? [];
+  const skills = validateSkills(opts?.skills);
   if (skills.length > 0) {
     preamble.push(buildSkillCatalog(skills, ctx.skillsDir));
     tools.push(skillTool(skills, ctx.skillsDir));
@@ -252,19 +258,112 @@ export function assertUniqueToolNames(tools: readonly ExecutableTool[]): void {
 }
 
 // ----------------------------------------------------------------------------
+// Shape validation (AgentOptions is untrusted runtime input)
+// ----------------------------------------------------------------------------
+
+// Every AgentOptions field is UNTRUSTED RUNTIME INPUT, despite being typed. Author programs reach
+// an engine WITHOUT ever being type-checked: the control plane's deploy gate is syntax-only by
+// design, and the CLI bundles with esbuild, which strips types without checking them. So a
+// type-invalid program (`tools: ["bash"]` — a TS error) deploys clean and arrives here intact.
+// The TS types are author-side ergonomics, not a runtime guarantee: shape-check a field BEFORE
+// dereferencing it, and make the message name the actual mistake — the author has no type error
+// to read, only what this throws.
+
+/** Whether a string names a built-in — i.e. the author reached for the wrong field, not a typo. */
+function isBuiltinName(value: unknown): value is string {
+  return (
+    typeof value === "string" && (ALL_BUILTIN_NAMES.includes(value) || value === SUBAGENT_TOOL_NAME)
+  );
+}
+
+const TOOL_DEF_HINT =
+  "An inline tool is an object: { name, description, inputSchema, execute }. Built-in tools are " +
+  "on by default and are scoped with `builtins`, not `tools`.";
+
+/**
+ * The fix pointer for a bad `tools` entry. A string naming a built-in gets special-cased on
+ * purpose: `tools: ["bash"]` is the mistake authors actually make (built-ins USED to be named
+ * there), so say exactly what to type instead of describing the ToolDef shape at them.
+ */
+function toolsHint(value: unknown): string {
+  if (!isBuiltinName(value)) return TOOL_DEF_HINT;
+  return (
+    `Built-in tools are ON by default — "${value}" needs no declaration at all. To restrict this ` +
+    `leaf to a subset of built-ins, write \`builtins: ["${value}"]\`; \`tools\` is only for tools ` +
+    `you define inline.`
+  );
+}
+
+// A JSON Schema / a function, validated by predicate and passed through BY REFERENCE — z.custom
+// never reshapes its input, so a tool's `execute` stays the same closure and its `inputSchema`
+// reaches the provider byte-identical to what the program wrote.
+const jsonSchemaValue = z.custom<JsonSchema>(
+  (v) => typeof v === "object" && v !== null && !Array.isArray(v),
+  { error: "must be a JSON Schema object" },
+);
+
+const toolDefSchema = z.object({
+  name: z.string().min(1),
+  description: z.string(),
+  inputSchema: jsonSchemaValue,
+  execute: z.custom<ToolDef["execute"]>((v) => typeof v === "function", {
+    error: "must be a function",
+  }),
+});
+
+/** Flatten Zod issues into one line: `name: expected string, received number`. */
+function issueText(error: z.ZodError): string {
+  return error.issues
+    .map((issue) => {
+      const path = issue.path.join(".");
+      return path === "" ? issue.message : `${path}: ${issue.message}`;
+    })
+    .join("; ");
+}
+
+// ----------------------------------------------------------------------------
 // Program-defined tools
 // ----------------------------------------------------------------------------
 
-function wrapProgramTool(def: ToolDef): ExecutableTool {
-  if (def.name.length === 0) {
-    throw new EngineError("VALIDATION", "A program-defined tool has an empty name.");
+/** The call's inline ToolDefs. `tools` is ONLY for tools the program defines itself. */
+function validateProgramTools(tools: AgentOptions["tools"]): readonly unknown[] {
+  if (tools === undefined || tools === null) return [];
+  if (!Array.isArray(tools)) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() \`tools\` must be an array of inline tool definitions — got ${describeValue(tools)}.`,
+      toolsHint(tools),
+    );
   }
+  return tools;
+}
+
+function wrapProgramTool(def: unknown): ExecutableTool {
+  // Shape-check BEFORE dereferencing. This guard may not assume `def` is even an object: it used to
+  // open with `def.name.length === 0`, so `tools: ["bash"]` crashed the guard itself with a bare
+  // "Cannot read properties of undefined (reading 'length')" rather than being caught by it.
+  if (typeof def !== "object" || def === null) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() got ${describeValue(def)} in \`tools\`, which takes inline tool definitions, not names.`,
+      toolsHint(def),
+    );
+  }
+  const parsed = toolDefSchema.safeParse(def);
+  if (!parsed.success) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() got a malformed inline tool in \`tools\` — ${issueText(parsed.error)}.`,
+      TOOL_DEF_HINT,
+    );
+  }
+  const tool = parsed.data;
   return {
-    name: def.name,
-    description: def.description,
-    inputSchema: def.inputSchema,
+    name: tool.name,
+    description: tool.description,
+    inputSchema: tool.inputSchema,
     async execute(input: Record<string, unknown>): Promise<string> {
-      const result = await def.execute(input);
+      const result = await tool.execute(input);
       if (result === undefined || result === null) return "";
       return typeof result === "string" ? result : JSON.stringify(result);
     },
@@ -277,6 +376,10 @@ function wrapProgramTool(def: ToolDef): ExecutableTool {
 
 // Server names prefix tool names (`<server>__<tool>`) — keep them tool-name-shaped.
 const MCP_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+const MCP_REF_HINT =
+  'An MCP server is { name, transport: "stdio", command, args?, env? } or ' +
+  '{ name, transport: "http", url, headers? }.';
 
 // AgentOptions comes straight from user program code — the TS types are aspirational at
 // runtime, so each ref is Zod-checked before anything spawns or connects.
@@ -302,17 +405,29 @@ const mcpServerRefSchema = z.discriminatedUnion("transport", [
 ]);
 
 function validateMcpRefs(refs: readonly McpServerRef[] | undefined): readonly McpServerRef[] {
-  const out = refs ?? [];
+  if (refs === undefined || refs === null) return [];
+  if (!Array.isArray(refs)) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() \`mcp\` must be an array of MCP server refs — got ${describeValue(refs)}.`,
+      MCP_REF_HINT,
+    );
+  }
+  const out: readonly McpServerRef[] = refs;
   const seen = new Set<string>();
   for (const ref of out) {
     const parsed = mcpServerRefSchema.safeParse(ref);
     if (!parsed.success) {
+      // `ref` is untrusted: read its name only once it is known to be an object, or naming the bad
+      // ref in the message would itself throw (`mcp: [null]` → "cannot read properties of null").
+      const named =
+        typeof ref === "object" && ref !== null && typeof ref.name === "string"
+          ? ` "${ref.name}"`
+          : "";
       throw new EngineError(
         "VALIDATION",
-        `agent() got a malformed MCP server ref${typeof ref.name === "string" ? ` "${ref.name}"` : ""}: ` +
-          `${parsed.error.issues.map((issue) => issue.message).join("; ")}.`,
-        'An MCP server is { name, transport: "stdio", command, args?, env? } or ' +
-          '{ name, transport: "http", url, headers? }.',
+        `agent() got a malformed MCP server ref${named}: ${issueText(parsed.error)}.`,
+        MCP_REF_HINT,
       );
     }
     if (seen.has(ref.name)) {
@@ -471,6 +586,28 @@ function transportFor(ref: McpServerRef, io: McpConnectIo): HttpTransport | Stdi
 // Skills (folder-per-skill, progressive disclosure — see ./skills.ts)
 // ----------------------------------------------------------------------------
 
+const skillsSchema = z.array(z.string().min(1));
+
+/**
+ * The call's pinned skill names. Shape-checked because a wrong shape here used to DEGRADE SILENTLY
+ * rather than fail: `skills: {}` has no `.length`, so `length > 0` was false and every pinned skill
+ * was dropped — the leaf ran on with no skills and no complaint, which is exactly what the
+ * capability-presence rule forbids.
+ */
+function validateSkills(skills: AgentOptions["skills"]): readonly string[] {
+  if (skills === undefined || skills === null) return [];
+  const parsed = skillsSchema.safeParse(skills);
+  if (!parsed.success) {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() \`skills\` must be an array of skill names — got ${describeValue(skills)}.`,
+      'Pin skills by name: `skills: ["code-review"]`, each resolved from `skills/<name>/SKILL.md` ' +
+        "in the package deployed with the program.",
+    );
+  }
+  return parsed.data;
+}
+
 const skillToolInput = z.object({
   name: z.string().min(1),
   // Treat an empty `file` as omitted. Models routinely send "" for an optional string field (and the
@@ -558,6 +695,15 @@ function resolveMemoryDir(memory: string, ctx: ToolSetContext): { absoluteDir: s
   // Deliberately resolved against the workspace ROOT even when the leaf sets `cwd`: a memory dir
   // is a stable cross-run identity — re-rooting it would silently "lose" memories whenever a
   // checkout directory is renamed, and agents sharing one memory across different cwds would break.
+  // Type first: MEMORY_PATH_RE.test() would COERCE a non-string (`memory: 123` tests as "123" and
+  // passes), so without this the crash landed on `.includes` a line later.
+  if (typeof memory !== "string") {
+    throw new EngineError(
+      "VALIDATION",
+      `agent() \`memory\` must be a string naming a workspace-relative directory — got ${describeValue(memory)}.`,
+      'Name a directory the engine persists across runs, e.g. `memory: "notes"`.',
+    );
+  }
   if (!MEMORY_PATH_RE.test(memory) || memory.includes("\\")) {
     throw new EngineError(
       "VALIDATION",

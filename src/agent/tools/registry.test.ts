@@ -137,6 +137,52 @@ describe("selectBuiltins", () => {
   });
 });
 
+describe("selectBuiltins — type-invalid `builtins` (untrusted runtime input)", () => {
+  /** Select with a value the TS types forbid, as an untyped author program would pass. */
+  function reject(builtins: unknown): EngineError {
+    try {
+      selectBuiltins(builtins as Parameters<typeof selectBuiltins>[0], {
+        workspaceDir: WS,
+        host: undefined,
+        lspService,
+      });
+    } catch (err) {
+      if (err instanceof EngineError) return err;
+      throw new Error(`expected an EngineError, got ${String(err)}`);
+    }
+    throw new Error("expected selectBuiltins to throw");
+  }
+
+  it("rejects a bare built-in name and points at the array form", () => {
+    // `builtins: "bash"` used to iterate the string's CHARACTERS: `Built-in tool "b" is not
+    // available on this engine` — a true statement about a mistake the author never made.
+    const err = reject("bash");
+    expect(err.code).toBe("VALIDATION");
+    expect(err.message).toContain("`builtins`");
+    expect(err.message).toContain('a string ("bash")');
+    expect(err.hint).toContain('Did you mean `builtins: ["bash"]`?');
+  });
+
+  it("rejects other wrong shapes without crashing on a non-iterable", () => {
+    // `builtins: {}` fell through the enum checks into `for (const name of selection)`.
+    expect(reject({}).message).toContain("`builtins`");
+    expect(reject(123).message).toContain("a number (123)");
+    expect(reject([123]).message).toContain("non-string or empty entry");
+    expect(reject([null]).message).toContain("non-string or empty entry");
+    expect(reject([""]).message).toContain("non-string or empty entry");
+    expect(reject("read-onlyy").hint).not.toContain("Did you mean");
+  });
+
+  it("still accepts every legal shape", () => {
+    expect(() => names(undefined, undefined)).not.toThrow();
+    expect(() => names("all", undefined)).not.toThrow();
+    expect(() => names("read-only", undefined)).not.toThrow();
+    expect(() => names("none", undefined)).not.toThrow();
+    expect(names([], undefined)).toEqual([]);
+    expect(names(["read"], undefined)).toEqual(["read"]);
+  });
+});
+
 describe("subagentSelected", () => {
   it('is default-on under "all"/undefined, off for "none"/"read-only"', () => {
     expect(subagentSelected(undefined)).toBe(true);
