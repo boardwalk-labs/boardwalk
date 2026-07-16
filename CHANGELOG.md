@@ -3,6 +3,27 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.10
+
+### Changed (tighter tool-output hygiene — survey greps, bash overflow-to-file, narrowing guidance)
+
+Three refinements so a broad search or a huge command dump can't bloat the leaf's context. All bound
+output at the tool executor (prompt-cache-safe), rather than truncating the conversation after the fact:
+
+- `grep` gains an `output_mode`: `"files_with_matches"` (matching paths only, capped at 500) and
+  `"count"` (per-file match counts + total) beside the default `"content"`, so a model can survey
+  broadly without pulling match lines into context.
+- `bash` now saves the FULL output of a truncated command to an ephemeral temp file and points the
+  model at it (grep/sed the elided middle) — it can't redirect to a file itself, since `>` is a blocked
+  construct. The output is buffered in memory (≤ 8 MB) and written only when the in-context copy is
+  actually clipped, so a normal command never touches disk.
+- The tool-use preamble gains a "pull in only what you need" line: page with `read` offset/limit,
+  locate with `grep`, prefer the read/grep/glob tools over raw `cat`/`grep`/`find`, and reference paths
+  rather than re-dumping file contents.
+
+(The cache-blind runaway guards — the observation-based no-progress guard and the generous default
+tool-iteration backstop — shipped in 0.2.9.)
+
 ## 0.2.9
 
 ### Changed (`run_code` now runs in a worker thread — a runaway loop is hard-bounded)
