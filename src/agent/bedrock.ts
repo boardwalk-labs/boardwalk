@@ -22,6 +22,7 @@ import { isJsonValue, isPlainObject } from "../json_value.js";
 import type { ChatTurn, ToolCallRequest } from "./conversation.js";
 import {
   anthropicMessagesBody,
+  anthropicPromptTokens,
   parseToolInput,
   ProviderHttpError,
   withRetry,
@@ -52,7 +53,13 @@ const bedrockResponseSchema = z.looseObject({
   stop_reason: z.string().nullable().optional(),
   usage: z
     .looseObject({
+      // `input_tokens` counts only the UNCACHED remainder; cache-served/written tokens are separate
+      // counters. Sum them (anthropicPromptTokens) — the leaf sizes its context from this number, so
+      // reporting the delta alone would stop compaction firing. Same wire schema as the Anthropic
+      // adapter, so the two agree.
       input_tokens: z.number().int().nonnegative().optional(),
+      cache_read_input_tokens: z.number().int().nonnegative().optional(),
+      cache_creation_input_tokens: z.number().int().nonnegative().optional(),
       output_tokens: z.number().int().nonnegative().optional(),
     })
     .optional(),
@@ -122,11 +129,14 @@ export async function chatBedrock(args: ChatArgs, io: ProviderIo = {}): Promise<
   if (text.length > 0) io.onDelta?.(text);
 
   const usage = parsed.data.usage;
+  // The uncached remainder + cache reads + cache writes. See the schema note: the leaf sizes its
+  // context from this, so the delta alone would silently disable compaction.
+  const promptTokens = usage === undefined ? undefined : anthropicPromptTokens(usage);
   return {
     text,
     toolCalls,
     usage: {
-      ...(usage?.input_tokens !== undefined ? { inputTokens: usage.input_tokens } : {}),
+      ...(promptTokens !== undefined ? { inputTokens: promptTokens } : {}),
       ...(usage?.output_tokens !== undefined ? { outputTokens: usage.output_tokens } : {}),
     },
     wantsTools: parsed.data.stop_reason === "tool_use" || toolCalls.length > 0,

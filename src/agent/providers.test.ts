@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { describe, expect, it } from "vitest";
-import { anthropicMessagesBody, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
+import {
+  anthropicMessagesBody,
+  anthropicPromptTokens,
+  chatOpenAi,
+  type ChatArgs,
+  type ProviderIo,
+} from "./providers.js";
+import type { ChatMessage } from "./conversation.js";
 
 function baseArgs(overrides: Partial<ChatArgs> = {}): ChatArgs {
   return {
@@ -317,5 +324,119 @@ describe("multimodal content", () => {
         file: { file_data: "data:application/pdf;base64,JVBER", filename: "report.pdf" },
       },
     ]);
+  });
+});
+
+describe("anthropicMessagesBody — prompt caching", () => {
+  const tool = { name: "read", description: "read a file", inputSchema: { type: "object" } };
+  const loop: ChatMessage[] = [
+    { role: "user", content: "TASK: fix the tests" },
+    { role: "assistant", text: "", toolCalls: [{ id: "c1", name: "read", input: { path: "a" } }] },
+    { role: "tool_results", results: [{ id: "c1", content: "FILE BODY", isError: false }] },
+  ];
+
+  /** Every block that carries a breakpoint, as `role[blockIndex]` for readable assertions. */
+  function markedBlocks(body: Record<string, unknown>): string[] {
+    const out: string[] = [];
+    const messages = body.messages as Record<string, unknown>[];
+    messages.forEach((m, mi) => {
+      const content = m.content;
+      if (!Array.isArray(content)) return;
+      content.forEach((b, bi) => {
+        if ((b as Record<string, unknown>)?.cache_control !== undefined) {
+          out.push(`${String(m.role)}[${String(mi)}.${String(bi)}]`);
+        }
+      });
+    });
+    return out;
+  }
+
+  it("marks the last tool, the first message's tail, and the LAST message's tail", () => {
+    const body = anthropicMessagesBody({ messages: loop, tools: [tool] });
+    const tools = body.tools as Record<string, unknown>[];
+    expect(tools[tools.length - 1]?.cache_control).toEqual({ type: "ephemeral" });
+    // First message (the stable task) and the last (the rolling tail that grows each turn).
+    expect(markedBlocks(body)).toEqual(["user[0.0]", "user[2.0]"]);
+  });
+
+  /** The whole point: the breakpoint must ROLL, or the cached prefix freezes at the task message and
+   *  every turn re-reads the transcript at full price. */
+  it("rolls the tail breakpoint forward as the conversation grows", () => {
+    const grown: ChatMessage[] = [
+      ...loop,
+      {
+        role: "assistant",
+        text: "",
+        toolCalls: [{ id: "c2", name: "read", input: { path: "b" } }],
+      },
+      { role: "tool_results", results: [{ id: "c2", content: "MORE", isError: false }] },
+    ];
+    expect(markedBlocks(anthropicMessagesBody({ messages: grown, tools: [tool] }))).toEqual([
+      "user[0.0]",
+      "user[4.0]", // moved from index 2 → 4
+    ]);
+  });
+
+  it("never exceeds Anthropic's 4-breakpoint limit", () => {
+    const long: ChatMessage[] = [{ role: "user", content: "t" }];
+    for (let i = 0; i < 30; i++) {
+      long.push({
+        role: "assistant",
+        text: "",
+        toolCalls: [{ id: `c${String(i)}`, name: "read", input: {} }],
+      });
+      long.push({
+        role: "tool_results",
+        results: [{ id: `c${String(i)}`, content: "x", isError: false }],
+      });
+    }
+    const body = anthropicMessagesBody({ messages: long, tools: [tool, tool] });
+    const toolMarks = (body.tools as Record<string, unknown>[]).filter(
+      (t) => t.cache_control !== undefined,
+    ).length;
+    expect(toolMarks + markedBlocks(body).length).toBeLessThanOrEqual(4);
+  });
+
+  /** A cache WRITE costs a ~25% premium. A genuine single-shot has no later turn to read it back. */
+  it("does not mark a single-shot with no tools and no conversation", () => {
+    const body = anthropicMessagesBody({ messages: [{ role: "user", content: "hi" }], tools: [] });
+    expect(markedBlocks(body)).toEqual([]);
+  });
+
+  it("marks a toolless request once a conversation is under way", () => {
+    const body = anthropicMessagesBody({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", text: "yo", toolCalls: [] },
+      ],
+      tools: [],
+    });
+    expect(markedBlocks(body).length).toBeGreaterThan(0);
+  });
+});
+
+describe("anthropicPromptTokens", () => {
+  /**
+   * The coupling that makes caching safe. Anthropic's `input_tokens` counts only the UNCACHED
+   * remainder, so with caching on it collapses to the per-turn delta. The leaf sizes its context from
+   * this number to decide when to compact — report the delta alone and compaction never fires and the
+   * request grows past the model's window.
+   */
+  it("sums the uncached remainder with cache reads and cache writes", () => {
+    expect(
+      anthropicPromptTokens({
+        input_tokens: 500,
+        cache_read_input_tokens: 90_000,
+        cache_creation_input_tokens: 1_000,
+      }),
+    ).toBe(91_500);
+  });
+
+  it("is the plain input_tokens when nothing cached", () => {
+    expect(anthropicPromptTokens({ input_tokens: 1234 })).toBe(1234);
+  });
+
+  it("is undefined when the provider reports no counters at all", () => {
+    expect(anthropicPromptTokens({})).toBeUndefined();
   });
 });

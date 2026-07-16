@@ -101,20 +101,74 @@ export function anthropicMessagesBody(args: {
   // Extended thinking: an effort level becomes a token budget (Anthropic takes a budget, not an
   // effort), and max_tokens is grown when needed to stay strictly above it. Off when no reasoning.
   const thinking = reasoningToAnthropicThinking(args.reasoning, baseMaxTokens);
+  const messages = anthropicMessages(args.messages);
+  const tools = args.tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  }));
+  // Prompt caching. Unlike the OpenAI-family endpoints — which cache implicitly, so an append-only
+  // loop earns the discount for free — Anthropic caches NOTHING without an explicit breakpoint. A
+  // tool loop re-sends its whole transcript every turn, so uncached that is quadratic spend at full
+  // price. Mark in place, only when a later turn could actually read the write (see shouldCache).
+  if (shouldCacheAnthropic(args.messages, args.tools)) {
+    markAnthropicBreakpoints(messages, tools);
+  }
   return {
     max_tokens: thinking?.maxTokens ?? baseMaxTokens,
-    messages: anthropicMessages(args.messages),
+    messages,
     ...(thinking !== undefined ? { thinking: thinking.thinking } : {}),
-    ...(args.tools.length > 0
-      ? {
-          tools: args.tools.map((tool) => ({
-            name: tool.name,
-            description: tool.description,
-            input_schema: tool.inputSchema,
-          })),
-        }
-      : {}),
+    ...(tools.length > 0 ? { tools } : {}),
   };
+}
+
+/**
+ * Whether this request's cache WRITE could ever be read back. A write costs a ~25% premium, so a
+ * genuine single-shot (no tools, no conversation yet) should not pay it — nothing will re-send this
+ * prefix. Tools present ⇒ the leaf can take another turn that re-sends and reads this prefix; an
+ * assistant turn present ⇒ a conversation is already accreting. Mirrors the managed lane's
+ * `requestCanReuseCachedPrefix` so both lanes make the same call.
+ */
+function shouldCacheAnthropic(
+  messages: readonly ChatMessage[],
+  tools: readonly ToolSpec[],
+): boolean {
+  return tools.length > 0 || messages.some((m) => m.role === "assistant");
+}
+
+/** Attach an ephemeral cache breakpoint to an Anthropic content block, in place. */
+function markCacheControl(block: unknown): void {
+  if (typeof block === "object" && block !== null) {
+    (block as Record<string, unknown>).cache_control = { type: "ephemeral" };
+  }
+}
+
+/**
+ * Place the cache breakpoints, IN PLACE. Anthropic caches the prefix up to and including each marked
+ * block, and allows at most 4 breakpoints — it reads the LONGEST matching prefix among them, so the
+ * useful shape is a couple of stable anchors plus one that rolls with the conversation:
+ *
+ *  1. the LAST tool definition — the tool schemas are big and byte-identical every turn;
+ *  2. the LAST block of the FIRST message — the task + preamble, fixed for the leaf's lifetime;
+ *  3. the LAST block of the LAST message — rolls forward each turn, so the growing transcript
+ *     caches too. Without this the cached prefix would freeze at the task and every turn would
+ *     re-read the whole transcript at full price — the bug this exists to avoid.
+ *
+ * Markers are placed fresh on each request (the body is rebuilt per turn), so a stale marker can
+ * never pin a breakpoint to a frozen offset — the thing that has to be stripped when a caller mutates
+ * a retained body instead.
+ */
+function markAnthropicBreakpoints(messages: unknown[], tools: Record<string, unknown>[]): void {
+  const lastTool = tools[tools.length - 1];
+  if (lastTool !== undefined) markCacheControl(lastTool);
+
+  const anchors = [messages[0], messages[messages.length - 1]];
+  for (const message of anchors) {
+    if (typeof message !== "object" || message === null) continue;
+    const content = (message as Record<string, unknown>).content;
+    if (!Array.isArray(content) || content.length === 0) continue;
+    markCacheControl(content[content.length - 1]);
+  }
 }
 
 /** A file's MIME type → the modality an adapter renders it as. `image/*` is a native image block on
@@ -179,10 +233,41 @@ function anthropicMessages(messages: readonly ChatMessage[]): unknown[] {
 }
 
 const frameHeadSchema = z.looseObject({ type: z.string() });
+/**
+ * Anthropic splits the prompt across THREE counters: `input_tokens` counts only the UNCACHED
+ * remainder, while cache-served and cache-written tokens are reported separately. So `input_tokens`
+ * alone is not the context size — with caching on it collapses to the per-turn delta.
+ *
+ * That distinction is load-bearing, not cosmetic. The leaf calibrates its context estimate against
+ * the input tokens a turn reports (leaf.ts), and it decides when to compact from that. Report only
+ * `input_tokens` and the conversation looks tiny, compaction never fires, and the request grows past
+ * the model's window — exactly the overflow the token budget exists to prevent, reintroduced by
+ * turning caching on. The OpenAI-family `prompt_tokens` already INCLUDES its cached subset, so
+ * summing here also makes the two protocols mean the same thing.
+ */
+const anthropicUsageSchema = z.looseObject({
+  input_tokens: z.number().int().nonnegative().optional(),
+  cache_read_input_tokens: z.number().int().nonnegative().optional(),
+  cache_creation_input_tokens: z.number().int().nonnegative().optional(),
+});
+
+/** Total prompt tokens for a turn: the uncached remainder plus everything served from, or written
+ *  to, the cache. Exported for unit testing + reuse by the Bedrock adapter (same wire schema). */
+export function anthropicPromptTokens(usage: {
+  input_tokens?: number | undefined;
+  cache_read_input_tokens?: number | undefined;
+  cache_creation_input_tokens?: number | undefined;
+}): number | undefined {
+  const parts = [
+    usage.input_tokens,
+    usage.cache_read_input_tokens,
+    usage.cache_creation_input_tokens,
+  ].filter((n): n is number => typeof n === "number");
+  return parts.length === 0 ? undefined : parts.reduce((a, b) => a + b, 0);
+}
+
 const messageStartSchema = z.looseObject({
-  message: z.looseObject({
-    usage: z.looseObject({ input_tokens: z.number().int().nonnegative().optional() }),
-  }),
+  message: z.looseObject({ usage: anthropicUsageSchema }),
 });
 const contentBlockStartSchema = z.looseObject({
   content_block: z.looseObject({
@@ -241,7 +326,9 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
     switch (head.data.type) {
       case "message_start": {
         const frame = messageStartSchema.safeParse(json);
-        if (frame.success) inputTokens = frame.data.message.usage.input_tokens ?? inputTokens;
+        if (frame.success) {
+          inputTokens = anthropicPromptTokens(frame.data.message.usage) ?? inputTokens;
+        }
         break;
       }
       case "content_block_start": {
