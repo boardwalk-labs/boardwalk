@@ -132,8 +132,10 @@ function validateBuiltins(builtins: unknown): "all" | "read-only" | "none" | rea
   const parsed = builtinsSchema.safeParse(builtins);
   if (parsed.success) return parsed.data;
   // A bare built-in name is the near-miss worth naming: the author wanted a one-tool set and just
-  // forgot the array, so say exactly what to type rather than only listing the legal forms.
-  const arrayHint =
+  // forgot the array, so say exactly what to type rather than only listing the legal forms. It goes
+  // in the MESSAGE, not the hint — a hosted run reports `{ code, message }` and drops the hint, so
+  // the one field the author reads must carry the fix (see toolsFix in tools.ts).
+  const didYouMean =
     typeof builtins === "string" && ALL_BUILTIN_NAMES.includes(builtins)
       ? ` Did you mean \`builtins: ["${builtins}"]\`?`
       : "";
@@ -142,8 +144,9 @@ function validateBuiltins(builtins: unknown): "all" | "read-only" | "none" | rea
     : describeValue(builtins);
   throw new EngineError(
     "VALIDATION",
-    `agent() \`builtins\` must be "all", "read-only", "none", or an array of built-in names — got ${got}.`,
-    `Known built-ins: ${ALL_BUILTIN_NAMES.join(", ")}.${arrayHint}`,
+    `agent() \`builtins\` must be "all", "read-only", "none", or an array of built-in names — ` +
+      `got ${got}.${didYouMean}`,
+    `Known built-ins: ${ALL_BUILTIN_NAMES.join(", ")}.`,
   );
 }
 

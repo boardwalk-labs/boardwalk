@@ -153,14 +153,15 @@ describe("selectBuiltins — type-invalid `builtins` (untrusted runtime input)",
     throw new Error("expected selectBuiltins to throw");
   }
 
-  it("rejects a bare built-in name and points at the array form", () => {
+  it("rejects a bare built-in name and points at the array form, in the message", () => {
     // `builtins: "bash"` used to iterate the string's CHARACTERS: `Built-in tool "b" is not
     // available on this engine` — a true statement about a mistake the author never made.
     const err = reject("bash");
     expect(err.code).toBe("VALIDATION");
     expect(err.message).toContain("`builtins`");
     expect(err.message).toContain('a string ("bash")');
-    expect(err.hint).toContain('Did you mean `builtins: ["bash"]`?');
+    // In the MESSAGE, not the hint — a hosted run surfaces `{ code, message }` only.
+    expect(err.message).toContain('Did you mean `builtins: ["bash"]`?');
   });
 
   it("rejects other wrong shapes without crashing on a non-iterable", () => {
@@ -170,7 +171,7 @@ describe("selectBuiltins — type-invalid `builtins` (untrusted runtime input)",
     expect(reject([123]).message).toContain("non-string or empty entry");
     expect(reject([null]).message).toContain("non-string or empty entry");
     expect(reject([""]).message).toContain("non-string or empty entry");
-    expect(reject("read-onlyy").hint).not.toContain("Did you mean");
+    expect(reject("read-onlyy").message).not.toContain("Did you mean");
   });
 
   it("still accepts every legal shape", () => {

@@ -282,10 +282,25 @@ const TOOL_DEF_HINT =
   "on by default and are scoped with `builtins`, not `tools`.";
 
 /**
- * The fix pointer for a bad `tools` entry. A string naming a built-in gets special-cased on
- * purpose: `tools: ["bash"]` is the mistake authors actually make (built-ins USED to be named
- * there), so say exactly what to type instead of describing the ToolDef shape at them.
+ * The fix, worded for the MESSAGE — not the hint. A hosted run reports a failure as
+ * `{ code, message }` (the runner's contract carries no `hint`), so on the one path where these
+ * mistakes actually bite, a hint is invisible. Anything the author must *do* therefore belongs in
+ * the message; `hint` stays the fuller elaboration for the engine's own paths.
+ *
+ * A string naming a built-in is special-cased on purpose: `tools: ["bash"]` is the mistake authors
+ * actually make (built-ins USED to be named there), so say exactly what to type.
  */
+function toolsFix(value: unknown): string {
+  if (!isBuiltinName(value)) {
+    return "An inline tool is { name, description, inputSchema, execute }.";
+  }
+  return (
+    `Built-in tools are ON by default, so "${value}" needs no declaration at all — ` +
+    `drop it, or write \`builtins: ["${value}"]\` to restrict this leaf to a subset.`
+  );
+}
+
+/** The fuller elaboration, for paths that surface `hint` (the engine's own supervisor, /server). */
 function toolsHint(value: unknown): string {
   if (!isBuiltinName(value)) return TOOL_DEF_HINT;
   return (
@@ -382,7 +397,8 @@ function validateProgramTools(tools: AgentOptions["tools"]): readonly unknown[] 
   if (!Array.isArray(tools)) {
     throw new EngineError(
       "VALIDATION",
-      `agent() \`tools\` must be an array of inline tool definitions — got ${describeValue(tools)}.`,
+      `agent() \`tools\` must be an array of inline tool definitions — got ${describeValue(tools)}. ` +
+        toolsFix(tools),
       toolsHint(tools),
     );
   }
@@ -396,7 +412,8 @@ function wrapProgramTool(def: unknown): ExecutableTool {
   if (typeof def !== "object" || def === null) {
     throw new EngineError(
       "VALIDATION",
-      `agent() got ${describeValue(def)} in \`tools\`, which takes inline tool definitions, not names.`,
+      `agent() got ${describeValue(def)} in \`tools\`, which takes inline tool definitions, not ` +
+        `names. ${toolsFix(def)}`,
       toolsHint(def),
     );
   }
