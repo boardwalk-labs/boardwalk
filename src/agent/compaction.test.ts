@@ -3,6 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   CONTEXT_RESERVE_TOKENS,
+  SMALL_WINDOW_BUDGET_FRACTION,
   UNKNOWN_WINDOW_BUDGET_TOKENS,
   compactionBudget,
   dedupeFileReads,
@@ -238,6 +239,46 @@ describe("compactionBudget", () => {
     }
   });
 
+  /**
+   * THE invariant. A budget at or above the window can never fire in time: the loop checks, decides
+   * it is in budget, appends a turn, and the provider rejects the request -- the run dies of the
+   * exact overflow this guardrail exists to prevent. A flat floor did this to every model below a
+   * ~32k window (16k model -> 32k budget, twice its window). Reserve room that EXISTS.
+   */
+  it("never budgets past the window, at any window size", () => {
+    const windows = [
+      1_000, 4_095, 8_192, 16_384, 32_768, 65_536, 96_000, 128_000, 200_000, 1_000_000,
+    ];
+    for (const window of windows) {
+      const budget = compactionBudget(window);
+      expect(budget).toBeLessThan(window);
+      // Room left is never a rounding sliver: the flat reserve, or half the window when the window
+      // can't spare that much.
+      const roomOwed = Math.min(CONTEXT_RESERVE_TOKENS, Math.floor(window * 0.5));
+      expect(window - budget).toBeGreaterThanOrEqual(roomOwed);
+    }
+  });
+
+  it("holds back HALF a window too small to spare the flat reserve", () => {
+    // 16k model: 16_384 - 64_000 is negative, so the proportional reserve takes over.
+    expect(compactionBudget(16_384)).toBe(Math.floor(16_384 * SMALL_WINDOW_BUDGET_FRACTION));
+    expect(compactionBudget(32_768)).toBe(16_384);
+    expect(compactionBudget(4_095)).toBe(2_047);
+  });
+
+  it("crosses over from proportional to flat reserve at 2x the reserve", () => {
+    // Below 128k the half-window reserve is larger; above it the flat 64k is. Monotonic either way.
+    expect(compactionBudget(128_000)).toBe(64_000); // both rules agree exactly here
+    expect(compactionBudget(96_000)).toBe(48_000); // proportional wins
+    expect(compactionBudget(200_000)).toBe(136_000); // flat wins
+  });
+
+  it("is monotonic in the window — a bigger model never gets a smaller budget", () => {
+    const windows = [1_000, 8_192, 16_384, 32_768, 65_536, 128_000, 200_000, 400_000, 1_000_000];
+    const budgets = windows.map(compactionBudget);
+    expect(budgets).toEqual([...budgets].sort((a, b) => a - b));
+  });
+
   it("falls back to a conservative absolute when the window is unknown", () => {
     // No catalog (boardwalk dev / BYO), or turn 1 on a router lane.
     expect(compactionBudget(undefined)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
@@ -250,8 +291,8 @@ describe("compactionBudget", () => {
     expect(compactionBudget(Number.POSITIVE_INFINITY)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
   });
 
-  it("floors a tiny window instead of compacting on every turn", () => {
+  it("keeps a tiny window usable rather than budgeting past it", () => {
     // window < reserve would otherwise yield a negative budget.
-    expect(compactionBudget(8_000)).toBe(32_000);
+    expect(compactionBudget(8_000)).toBe(4_000);
   });
 });

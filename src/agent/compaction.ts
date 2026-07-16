@@ -25,20 +25,30 @@ export const CONTEXT_RESERVE_TOKENS = 64_000;
 /** Budget when the window is unknown: no catalog (`boardwalk dev`, BYO), or turn 1 on a router lane. */
 export const UNKNOWN_WINDOW_BUDGET_TOKENS = 150_000;
 
-/** Floor, so a small or bogus reported window can't make the loop compact every turn. */
-export const MIN_COMPACTION_BUDGET_TOKENS = 32_000;
+/** Share of a SMALL window the conversation may occupy, when the flat reserve won't fit inside it.
+ *  Below a ~128k window the reserve becomes proportional rather than absolute. */
+export const SMALL_WINDOW_BUDGET_FRACTION = 0.5;
 
 /**
- * Tokens a conversation may reach before compacting: the model's window minus a reserve.
+ * Tokens a conversation may reach before compacting: the model's window minus room for what lands
+ * next.
  *
  * Scale with the window rather than fixing a number — compacting a 1M-capable run at a fixed 100k
  * discards context the model could simply have held, and pays a summary call to do it.
+ *
+ * The reserve is the flat {@link CONTEXT_RESERVE_TOKENS} where the window can spare it, and half the
+ * window where it can't. A flat floor would exceed a small window outright (a 16k model would get a
+ * 32k budget and never compact before the provider rejected the request); a reserve can only ever be
+ * held back from room that exists.
  */
 export function compactionBudget(contextTokens: number | undefined): number {
   if (contextTokens === undefined || !Number.isFinite(contextTokens) || contextTokens <= 0) {
     return UNKNOWN_WINDOW_BUDGET_TOKENS;
   }
-  return Math.max(MIN_COMPACTION_BUDGET_TOKENS, contextTokens - CONTEXT_RESERVE_TOKENS);
+  return Math.max(
+    contextTokens - CONTEXT_RESERVE_TOKENS,
+    Math.floor(contextTokens * SMALL_WINDOW_BUDGET_FRACTION),
+  );
 }
 
 /**
