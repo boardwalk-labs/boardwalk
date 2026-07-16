@@ -105,6 +105,28 @@ export const DEFAULT_BASH_ALLOWLIST: ReadonlySet<string> = new Set([
   "jq",
   "basename",
   "dirname",
+  // encoding + binary inspection (pure stdin→stdout — no exec, no network, no write). base64 -d
+  // can't smuggle execution: its output only runs via substitution/redirection (refused) or
+  // eval/exec (denied), so it stays a text transform.
+  "base64",
+  "xxd",
+  "hexdump",
+  "od",
+  // hashing — verify a downloaded artifact or compare files (read-only)
+  "sha256sum",
+  "sha1sum",
+  "md5sum",
+  "shasum",
+  "cksum",
+  // more text processing (read-only, siblings of sort/uniq/cut above)
+  "tac",
+  "rev",
+  "nl",
+  "paste",
+  "comm",
+  "column",
+  "fold",
+  "fmt",
   // misc shell builtins-as-commands that are harmless and useful in pipelines
   "echo",
   "printf",
@@ -212,7 +234,8 @@ export function bashTool(options: BashToolOptions): ExecutableTool {
     description:
       "Run a shell command in the run's workspace, via an allowlist of common dev tools: git, gh, " +
       "node/npm/npx/pnpm/yarn, tsc/vitest/eslint/prettier, python/pip/pytest/ruff, make/cargo/go, cd, " +
-      "and read-only file/text tools (ls, cat, grep, rg, find, sed, awk, jq, …). Pipelines of allowed " +
+      "read-only file/text tools (ls, cat, grep, rg, find, sed, awk, jq, …), and encoding/hashing " +
+      "(base64, xxd, sha256sum, …). Pipelines of allowed " +
       "commands work; stdout and stderr come back separately. The following are NOT allowed — use the " +
       "alternative instead: (1) I/O redirection (>, >>, 2>&1) — output is already returned to you " +
       "separately, and to SAVE output to a file use the write tool; (2) command/process substitution " +

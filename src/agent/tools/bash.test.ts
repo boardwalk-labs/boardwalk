@@ -74,6 +74,47 @@ describe("bash — allowlist / denylist", () => {
     expect(() => assertEverySegmentAllowed("cd sub && pnpm test", ALLOW)).not.toThrow();
   });
 
+  it("allows the read-only encoding/hashing/text tools (base64 and its safe siblings)", () => {
+    for (const cmd of [
+      "base64 file.bin",
+      "cat x | base64 -d",
+      "xxd file.bin | head",
+      "hexdump -C file",
+      "od -c file",
+      "sha256sum dist.tgz",
+      "sha1sum a b",
+      "md5sum a",
+      "shasum -a 256 a",
+      "cksum a",
+      "tac log.txt",
+      "cat a | rev",
+      "nl file",
+      "paste a b",
+      "comm a b",
+      "ls -l | column -t",
+      "fold -w 80 file",
+      "fmt file",
+    ]) {
+      expect(() => assertEverySegmentAllowed(cmd, ALLOW), cmd).not.toThrow();
+    }
+  });
+
+  it("does NOT admit command-wrappers, which would exec their argument past the root-only check", () => {
+    // The checker inspects only each segment's ROOT command. A wrapper whose argument IS a command
+    // (xargs/timeout/nohup/env<cmd>) would run a denied command with the wrapper as the allowed root,
+    // so these stay off the list. (find/awk/sed already do this via -exec/system/e — known + accepted;
+    // the microVM is the isolation boundary. Don't extend the set of such vectors.)
+    for (const cmd of [
+      "xargs rm",
+      "timeout 5 rm -rf .",
+      "nohup rm x",
+      "nice rm x",
+      "stdbuf -o0 rm x",
+    ]) {
+      expect(() => assertEverySegmentAllowed(cmd, ALLOW), cmd).toThrow(/not on the allowlist/);
+    }
+  });
+
   it("rejects a command not on the allowlist", () => {
     expect(() => assertEverySegmentAllowed("mysterytool --do-it", ALLOW)).toThrow(
       /not on the allowlist/,

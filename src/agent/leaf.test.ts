@@ -313,7 +313,9 @@ describe("runAgentLeaf — plain inference", () => {
     );
     const body = rec.requests[0]?.body ?? "";
     expect(body).toContain("https://example.com/y.png");
-    expect(body).not.toContain("base64");
+    // Not fetched-and-re-encoded into a data URI. Assert the data-URI marker specifically — the bare
+    // word "base64" now legitimately appears in the bash tool's own description.
+    expect(body).not.toContain(";base64,");
   });
 
   it("keeps the first user message a bare string when there are no attachments", async () => {
