@@ -3,6 +3,38 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.5
+
+### Fixed (a wrong-shaped `agent()` option names the mistake instead of crashing)
+
+`agent("...", { tools: ["bash"] })` deployed cleanly and then died at run time with a bare
+`TypeError: Cannot read properties of undefined (reading 'length')`, naming nothing. The line that
+threw _was_ the validation guard: it read `def.name` without first checking `def` was a tool object,
+so a wrong-shaped input crashed the guard rather than being caught by it.
+
+Nothing catches this earlier, by contract: author programs are never type-checked before they run
+(the deploy gate is syntax-only; bundlers strip types without checking them). So **every
+`AgentOptions` field is untrusted runtime input** — the TS types are author-side ergonomics, not a
+runtime guarantee. Every field is now shape-validated at the boundary, and the message names the
+field and the fix rather than restating the rule.
+
+- **`tools` given a built-in name is called out by name.** `tools` is only for tools you define
+  inline; built-ins are default-on and scoped with `builtins`. Because naming built-ins in `tools`
+  is the mistake authors actually make, that exact case now says what to type instead: built-ins
+  are on by default, so `"bash"` needs no declaration at all, and a leaf is narrowed to a subset
+  with `builtins: ["bash"]`. `builtins: "bash"` gets the mirror-image hint (it used to iterate the
+  string's _characters_ and report `Built-in tool "b" is not available`).
+- **Two silent failures now fail loudly.** `skills: {}` dropped every pinned skill and ran on
+  without complaint (`({}).length > 0` is false) — the exact silent degrade the capability-presence
+  rule forbids. A tool with a non-string `name` was advertised to the provider as-is.
+- **`builtins` / `skills` / `memory` / `mcp` / `tools` all reject wrong shapes** with a `VALIDATION`
+  error instead of a `TypeError` from deep inside assembly. A malformed `mcp` ref no longer crashes
+  while formatting its own error message.
+
+Validation never reshapes what it validates: a tool's `execute` stays the same closure and its
+`inputSchema` reaches the provider byte-identical. Echoed values are clipped, so a validation error
+can't become a channel for dumping a huge value into run events.
+
 ## 0.2.2
 
 ### Fixed (agent context is budgeted in tokens; a long loop no longer outgrows its model)
