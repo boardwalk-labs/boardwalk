@@ -318,7 +318,22 @@ export type LeafEventBody =
   | { kind: "tool_call_executing"; toolCallId: string }
   | { kind: "tool_output_delta"; toolCallId: string; stream: "stdout" | "stderr"; text: string }
   | { kind: "tool_call_result"; toolCallId: string; result: ToolReturn }
-  | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } };
+  | { kind: "tool_call_error"; toolCallId: string; error: { code: string; message: string } }
+  | ({
+      kind: "compaction_started";
+      tokens: number;
+      budget: number;
+      contextTokens?: number;
+    } & AgentIdentity)
+  | ({
+      kind: "compaction_ended";
+      tokens: number;
+      reclaimed: number;
+      method: CompactionMethod;
+    } & AgentIdentity);
+
+/** What a compaction pass actually did — see the SDK's `compaction_ended`. */
+export type CompactionMethod = "deduped" | "summarized" | "none";
 
 /**
  * One model turn the leaf asks for, in neutral terms — no endpoint, no key. `model`/`provider`
@@ -595,7 +610,7 @@ async function runToolLoop(
     // no model call), then — only if still over budget — summarize the oldest middle, reusing the
     // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
-    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator, contextTokens);
+    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator, contextTokens, turnId);
 
     // Snapshot what we PREDICTED for exactly the messages this call sends, so the provider's reported
     // input-token count can be compared against it once the turn returns.
@@ -698,35 +713,68 @@ async function reduceContextIfNeeded(
   io: LeafIo,
   calibrator: ContextCalibrator,
   contextTokens: number | undefined,
+  turnId: string,
 ): Promise<void> {
   // Sized from the resolved model's window when the seam has reported one (compactionBudget).
   const budget = compactionBudget(contextTokens);
-  if (calibrator.estimate(messages) <= budget) return;
+  const before = calibrator.estimate(messages);
+  if (before <= budget) return; // the normal path: no events, nothing happened
 
+  // Announce BEFORE the work: reduceContext may spend a summarization model call taking seconds,
+  // and without this frame a viewer sees an unexplained pause and a token charge with no turn.
+  io.emit(turnId, {
+    kind: "compaction_started",
+    ...io.identity,
+    tokens: Math.round(before),
+    budget: Math.round(budget),
+    ...(contextTokens !== undefined ? { contextTokens } : {}),
+  });
+  const method = await reduceContext(messages, tools, opts, io, calibrator, budget);
+  const after = calibrator.estimate(messages);
+  io.emit(turnId, {
+    kind: "compaction_ended",
+    ...io.identity,
+    tokens: Math.round(after),
+    reclaimed: Math.max(0, Math.round(before - after)),
+    method,
+  });
+}
+
+/** Reduce `messages` in place, reporting what it took. Cheap pass first; a model call only if that
+ *  wasn't enough. Every bail-out is honest — `none` means the context is unchanged. */
+async function reduceContext(
+  messages: ChatMessage[],
+  tools: readonly ExecutableTool[],
+  opts: AgentOptions | undefined,
+  io: LeafIo,
+  calibrator: ContextCalibrator,
+  budget: number,
+): Promise<CompactionMethod> {
   // Cheap pass: drop stale duplicate file reads (no model call). Re-check before summarizing.
-  dedupeFileReads(messages);
-  if (calibrator.estimate(messages) <= budget) return;
+  const deduped = dedupeFileReads(messages) > 0 ? "deduped" : "none";
+  if (calibrator.estimate(messages) <= budget) return deduped;
 
   // planCompaction re-checks the budget against the RAW estimate, so hand it the budget in raw terms
   // (i.e. undo the calibration) — otherwise a calibrated-up conversation would be judged in-budget by
   // the planner and return null even though we are over.
   const plan = planCompaction(messages, budget / calibrator.scale());
-  if (plan === null) return;
+  if (plan === null) return deduped;
   const rangeTokens = messages
     .slice(plan.start, plan.end + 1)
     .reduce((sum, message) => sum + calibrator.estimateOne(message), 0);
-  if (rangeTokens < MIN_COMPACTION_RECLAIM_TOKENS) return; // not worth a model call
+  if (rangeTokens < MIN_COMPACTION_RECLAIM_TOKENS) return deduped; // not worth a model call
 
   const summary = await summarizeForCompaction(messages, tools, opts, io);
   // Shrink guard: a digest no smaller than what it replaces is churn (and covers a model that
   // ignored the instruction and echoed the transcript) — skip the splice. Compared in tokens, on the
   // same footing as the range it would replace (a `user` message, so prose density).
   const summaryTokens = calibrator.estimateOne({ role: "user", content: summary });
-  if (summaryTokens >= rangeTokens) return;
+  if (summaryTokens >= rangeTokens) return deduped;
   messages.splice(plan.start, plan.end - plan.start + 1, {
     role: "user",
     content: io.redactor.redact(summary),
   });
+  return "summarized";
 }
 
 /** The instruction that turns the conversation so far into a forward-useful digest. */

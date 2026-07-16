@@ -1251,6 +1251,79 @@ describe("runAgentLeaf — context compaction", () => {
     });
   });
 
+  it("brackets the work with compaction_started/ended carrying the numbers behind it", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c2", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c3", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c4", name: "read_big", args: {} }]),
+      () => openAiText("SUMMARY: four big docs.", { in: 900, out: 30 }),
+      () => openAiText("final answer", { in: 20, out: 5 }),
+    ]);
+    await runAgentLeaf("THE-ORIGINAL-TASK", { tools: [bigReader] }, rec.io);
+
+    const started = rec.events.filter((e) => e.body.kind === "compaction_started");
+    const ended = rec.events.filter((e) => e.body.kind === "compaction_ended");
+    // Always bracketed: every started gets an ended, whatever the pass managed to do.
+    expect(started.length).toBe(ended.length);
+    expect(started.length).toBeGreaterThan(0);
+
+    // started: the size that tripped it, and the budget it crossed.
+    const s = started[0]?.body as { tokens: number; budget: number; agentId?: string };
+    expect(s.tokens).toBeGreaterThan(s.budget);
+    expect(s.agentId).toBeDefined(); // required by the SDK schema; concurrent leaves must be separable
+
+    // Exactly ONE pass paid for a digest — matching the single summarization request the loop made.
+    const methods = ended.map((e) => (e.body as { method: string }).method);
+    expect(methods.filter((m) => m === "summarized")).toHaveLength(1);
+
+    // Compare WITHIN a pair: passes interleave with turns, so the conversation grows between them.
+    const i = methods.indexOf("summarized");
+    const paidStart = started[i]?.body as { tokens: number };
+    const paidEnd = ended[i]?.body as { tokens: number; reclaimed: number };
+    expect(paidEnd.reclaimed).toBeGreaterThan(0);
+    expect(paidEnd.tokens).toBeLessThan(paidStart.tokens);
+    expect(paidEnd.reclaimed).toBe(paidStart.tokens - paidEnd.tokens);
+
+    /**
+     * This payload's recent tail ALONE outweighs the budget, so later iterations go over, find
+     * nothing worth reclaiming, and report `none`. That is the documented loop-safety path (proceed
+     * and let the provider speak) -- and it is worth surfacing: a run reporting `none` every turn is
+     * thrashing at its ceiling, which is precisely the diagnostic these events exist to give.
+     */
+    for (const m of methods) expect(["summarized", "deduped", "none"]).toContain(m);
+  });
+
+  it("reports the window that sized the budget, and omits it when the seam never said", async () => {
+    // The local seam reports no contextTokens ⇒ the conservative fallback budget ⇒ no window to show.
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c2", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c3", name: "read_big", args: {} }]),
+      () => openAiToolCalls([{ id: "c4", name: "read_big", args: {} }]),
+      () => openAiText("SUMMARY", { in: 9, out: 3 }),
+      () => openAiText("done", { in: 1, out: 1 }),
+    ]);
+    await runAgentLeaf("task", { tools: [bigReader] }, rec.io);
+    const started = rec.events.find((e) => e.body.kind === "compaction_started");
+    expect(started?.body).not.toHaveProperty("contextTokens");
+  });
+
+  it("emits NOTHING when the conversation is in budget — silence is the normal path", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () => openAiToolCalls([{ id: "c1", name: "double", args: { n: 21 } }]),
+      () => openAiText("42"),
+    ]);
+    const doubler = {
+      name: "double",
+      description: "Doubles",
+      inputSchema: { type: "object" },
+      execute: () => Promise.resolve("42"),
+    };
+    await runAgentLeaf("double 21", { tools: [doubler] }, rec.io);
+    expect(rec.events.some((e) => e.body.kind.startsWith("compaction_"))).toBe(false);
+  });
+
   it("does NOT compact a normal-length conversation (the budget is a safety valve, not routine)", async () => {
     const rec = recordedIo(OPENAI_MODEL, [
       () => openAiToolCalls([{ id: "c1", name: "double", args: { n: 21 } }]),
