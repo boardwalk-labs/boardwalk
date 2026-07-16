@@ -3,6 +3,43 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.2.6
+
+Finishes the 0.2.5 pass: the remaining untrusted `AgentOptions` field, and getting the fix in front
+of the person who needs it.
+
+### Fixed (`attachments` — a wrong shape billed five model calls)
+
+`agent({ attachments })` was the one field 0.2.5 missed (it is consumed in the leaf, not in tool-set
+assembly), and it failed worse than the rest. `attachments: {}` or `"x"` died with
+`TypeError: attachments.map is not a function`; `[null]` crashed reading `mimeType`. Worst,
+`attachments: [{}]` sailed past the engine to the **provider**, failed there, and the leaf **retried
+the doomed request five times** before surfacing an internal
+`Cannot read properties of undefined (reading 'startsWith')` — a wrong shape billed five model calls
+to produce an error that named nothing.
+
+Attachments are now shape-checked beside the tool set, so every sync check on untrusted options
+completes before an MCP server spawns or a single model call is billed: a bad shape costs zero.
+`data`/`url` are enforced as exactly-one (the SDK documented it; nothing checked it).
+
+### Fixed (the actionable half of a validation error now reaches the author)
+
+A hosted run reports a failure as `{ code, message }` — the runner's contract carries no `hint` — so
+on the one path where these mistakes actually bite, `hint` is invisible. Every engine hint has always
+been dropped there, not just the new ones. Anything the author must _do_ therefore moved into the
+message:
+
+```
+agent() got a string ("bash") in `tools`, which takes inline tool definitions, not names.
+Built-in tools are ON by default, so "bash" needs no declaration at all — drop it, or write
+`builtins: ["bash"]` to restrict this leaf to a subset.
+
+agent() `builtins` must be "all", "read-only", "none", or an array of built-in names — got a
+string ("bash"). Did you mean `builtins: ["bash"]`?
+```
+
+`hint` remains the fuller elaboration for the paths that surface it.
+
 ## 0.2.5
 
 ### Fixed (a wrong-shaped `agent()` option names the mistake instead of crashing)
