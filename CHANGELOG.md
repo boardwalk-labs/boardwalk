@@ -3,7 +3,7 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## Unreleased
+## 0.2.9
 
 ### Changed (`run_code` now runs in a worker thread — a runaway loop is hard-bounded)
 
