@@ -10,10 +10,12 @@ import {
   ContextCalibrator,
   DEFAULT_MAX_ITERATIONS,
   extractJsonCandidate,
+  rebuildSeenObservations,
   runAgentLeaf,
   type LeafEventBody,
   type LeafIo,
   type ModelTurnRequest,
+  type ModelTurnResult,
 } from "./leaf.js";
 import type { ChatMessage } from "./conversation.js";
 import { chatAnthropic, chatOpenAi, type ChatArgs, type ProviderIo } from "./providers.js";
@@ -1412,7 +1414,11 @@ describe("runAgentLeaf — context compaction", () => {
     const paidEnd = ended[i]?.body as { tokens: number; reclaimed: number };
     expect(paidEnd.reclaimed).toBeGreaterThan(0);
     expect(paidEnd.tokens).toBeLessThan(paidStart.tokens);
-    expect(paidEnd.reclaimed).toBe(paidStart.tokens - paidEnd.tokens);
+    // reclaimed = round(before-after); tokens are round(before) and round(after) — three INDEPENDENT
+    // roundings, so the identity holds only to within 1 (don't assert exact equality; it's flaky).
+    expect(Math.abs(paidEnd.reclaimed - (paidStart.tokens - paidEnd.tokens))).toBeLessThanOrEqual(
+      1,
+    );
 
     /**
      * This payload's recent tail ALONE outweighs the budget, so later iterations go over, find
@@ -1744,6 +1750,139 @@ describe("runAgentLeaf — no-progress guard", () => {
     );
     expect(rec.requests).toHaveLength(DEFAULT_MAX_ITERATIONS + 1);
     expect(rec.requests[DEFAULT_MAX_ITERATIONS]?.body).not.toContain('"tools"');
+  });
+
+  it("does NOT trip when the model re-reads content compaction evicted (guard tracks the live context)", async () => {
+    // The false positive that killed the docs-cleanup workflow's big reconcile jobs: as a leaf's
+    // conversation grows, compaction summarizes early read/grep results OUT of context. Re-fetching
+    // that evicted content is legitimate NEW work (the model can no longer see it) — but if the
+    // guard's "seen" set were an ever-growing side-record, every post-compaction re-read would score
+    // as "nothing new" and the run of them would trip the hard stop. The fix realigns "seen" to the
+    // live transcript after each compaction. Here 8 big DISTINCT docs are gathered (progress each),
+    // compaction evicts the early ones, then all 8 are re-read — with the fix the run finishes.
+    const docFor = (doc: number): string => `DOC-${String(doc)}-` + "X".repeat(300_000); // ~105k tok
+    const bigGrep = {
+      name: "grep", // a read-only GATHER name; builtins:"none" keeps it off the real builtin
+      description: "returns a large document selected by `doc`",
+      inputSchema: {
+        type: "object",
+        properties: { doc: { type: "number" }, seq: { type: "number" } },
+      },
+      execute: (input: unknown) => Promise.resolve(docFor((input as { doc: number }).doc)),
+    };
+    // 8 distinct docs gathered, then the SAME 8 re-read. `seq` makes every tool-call signature unique
+    // so the repetition guard (keyed on the call) stays out of it — this isolates the no-progress one.
+    const gathers: Record<string, unknown>[] = [
+      ...Array.from({ length: 8 }, (_, i) => ({ doc: i + 1, seq: i })),
+      ...Array.from({ length: 8 }, (_, i) => ({ doc: i + 1, seq: i + 8 })),
+    ];
+
+    const rec = recordedIo(OPENAI_MODEL, [() => openAiText("unused")]);
+    const usage = { inputTokens: 5, outputTokens: 5 };
+    let step = 0;
+    // Bespoke seam: drive the scripted gathers, answer the internal summarization call with a tiny
+    // digest (so compaction actually shrinks the context), then give the final answer.
+    rec.io.streamModel = (req): Promise<ModelTurnResult> => {
+      const last = req.messages.at(-1);
+      const isSummary =
+        last?.role === "user" &&
+        typeof last.content === "string" &&
+        last.content.startsWith("Compact the conversation");
+      if (isSummary) {
+        return Promise.resolve({
+          turn: { text: "DIGEST: gathered several docs.", toolCalls: [], usage, wantsTools: false },
+          modelRef: "m",
+        });
+      }
+      const args = step < gathers.length ? gathers[step] : undefined;
+      if (args !== undefined) {
+        step += 1;
+        return Promise.resolve({
+          turn: {
+            text: "",
+            toolCalls: [{ id: `g${String(step)}`, name: "grep", input: args }],
+            usage,
+            wantsTools: true,
+          },
+          modelRef: "m",
+        });
+      }
+      return Promise.resolve({
+        turn: { text: "done", toolCalls: [], usage, wantsTools: false },
+        modelRef: "m",
+      });
+    };
+
+    const result = await runAgentLeaf(
+      "reconcile the docs",
+      { tools: [bigGrep], builtins: "none" },
+      rec.io,
+    );
+    expect(result).toBe("done");
+    // The path was genuinely exercised: compaction actually EVICTED content via the summarize splice
+    // (not just fired) — that eviction is the whole precondition for the re-reads to be new again.
+    // Without it this test would prove nothing (and the guard's realignment couldn't matter).
+    const summarized = rec.events.filter(
+      (e) =>
+        e.body.kind === "compaction_ended" &&
+        (e.body as { method: string }).method === "summarized",
+    );
+    expect(summarized.length).toBeGreaterThan(0);
+  });
+});
+
+describe("rebuildSeenObservations", () => {
+  const asst = (id: string, name: string): ChatMessage => ({
+    role: "assistant",
+    text: "",
+    toolCalls: [{ id, name, input: {} }],
+  });
+  const results = (...rs: { id: string; content: string; isError?: boolean }[]): ChatMessage => ({
+    role: "tool_results",
+    results: rs.map((r) => ({ id: r.id, content: r.content, isError: r.isError ?? false })),
+  });
+
+  it("includes only successful READ-ONLY gather results", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: "go" },
+      asst("a", "grep"),
+      results({ id: "a", content: "GREP-OUT" }),
+      asst("b", "write"), // a MUTATION — excluded (mutations never consult the seen set)
+      results({ id: "b", content: "edited file (1 replacement)" }),
+      asst("c", "read"),
+      results({ id: "c", content: "FILE-BODY" }),
+    ];
+    const seen = rebuildSeenObservations(messages);
+    // grep + read results are in; the write result is not.
+    expect(seen.size).toBe(2);
+    // A subsequent re-read of the SAME content would hash-match one of these.
+    const again = rebuildSeenObservations([
+      asst("z", "read"),
+      results({ id: "z", content: "FILE-BODY" }),
+    ]);
+    expect(seen.has([...again][0] ?? "")).toBe(true);
+  });
+
+  it("excludes errored results and results whose naming turn was summarized away", () => {
+    const messages: ChatMessage[] = [
+      asst("a", "grep"),
+      results({ id: "a", content: "boom", isError: true }), // errored — not "seen"
+      // A tool_results whose assistant turn is gone (compaction split the pair) — unmatchable, skipped.
+      results({ id: "orphan", content: "ORPHANED-READ" }),
+    ];
+    expect(rebuildSeenObservations(messages).size).toBe(0);
+  });
+
+  it("drops an observation that is no longer present after compaction", () => {
+    const before = rebuildSeenObservations([
+      asst("a", "read"),
+      results({ id: "a", content: "DOC-1" }),
+    ]);
+    expect(before.size).toBe(1);
+    // Compaction replaced that read with a digest (a plain user message): the content is gone, so
+    // the guard must no longer consider it "seen" — a re-read of DOC-1 is new work again.
+    const after = rebuildSeenObservations([{ role: "user", content: "DIGEST: read DOC-1" }]);
+    expect(after.size).toBe(0);
   });
 });
 

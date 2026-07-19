@@ -128,6 +128,11 @@ export const DEFAULT_MAX_ITERATIONS = 500;
  * is no-progress. Consecutive no-progress turns accrue; the soft threshold nudges once, the hard one
  * ends the run before it burns more tokens gathering nothing. All-error turns are neutral (the
  * consecutive-error guard owns those). See {@link recordProgress}.
+ *
+ * The "already seen" memory is realigned to the live transcript after every compaction (see
+ * {@link rebuildSeenObservations}): once compaction drops a read/grep result from the context,
+ * re-fetching it is new work, not a stall — without that realignment a long, legitimately-working
+ * leaf on a large task would trip this guard on files it had to re-read.
  */
 const NO_PROGRESS_SOFT = 4;
 const NO_PROGRESS_HARD = 8;
@@ -270,6 +275,40 @@ function recordProgress(
     }
   }
   return sawSuccess ? sawProgress : null;
+}
+
+/**
+ * Recompute the no-progress guard's "seen" observation set from the messages STILL present, mirroring
+ * {@link recordProgress}'s rule: only successful read-only GATHER results (read/grep/glob/ls/…)
+ * populate it. Called after compaction changes the conversation.
+ *
+ * WHY: the guard fires when read-only calls keep re-surfacing content the leaf has ALREADY seen. But
+ * compaction (dedupeFileReads + the summarize splice) DROPS earlier read/grep results out of the
+ * conversation — so content the model can no longer see gets re-fetched, which is legitimate NEW work,
+ * not a stall. If the seen-set were an ever-growing side-record it would score every post-compaction
+ * re-read as no-progress and kill long, legitimately-working leaves — the exact false positive a big
+ * multi-file task hits, where compaction fires repeatedly and the model must re-read what was
+ * summarized away. Deriving the set from the live transcript keeps the guard's memory aligned with
+ * what the model can actually still see. Exported for unit testing.
+ */
+export function rebuildSeenObservations(messages: readonly ChatMessage[]): Set<string> {
+  const seen = new Set<string>();
+  const readOnlyCallIds = new Set<string>();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      for (const call of message.toolCalls) {
+        if (READ_ONLY_TOOL_NAMES.has(call.name)) readOnlyCallIds.add(call.id);
+      }
+    } else if (message.role === "tool_results") {
+      for (const result of message.results) {
+        // A read-only result whose naming turn was summarized away can't be matched here; leaving it
+        // out is safe — it errs toward "not seen" (progress), never toward a spurious stall.
+        if (result.isError || !readOnlyCallIds.has(result.id)) continue;
+        seen.add(hashString(observationText(result).trim()));
+      }
+    }
+  }
+  return seen;
 }
 
 /**
@@ -730,7 +769,8 @@ async function runToolLoop(
   // Consecutive turns whose every tool call errored (see CONSECUTIVE_ERROR_*). Reset by any success.
   let consecutiveErrorTurns = 0;
   // Observation hashes seen so far + the run of turns that surfaced nothing new (see NO_PROGRESS_*).
-  const seenObservations = new Set<string>();
+  // Realigned to the live transcript after compaction (see rebuildSeenObservations), so it is `let`.
+  let seenObservations = new Set<string>();
   let noProgressTurns = 0;
   // Learns how our size estimate compares to the provider's real input-token count (see the class).
   const calibrator = new ContextCalibrator();
@@ -756,7 +796,21 @@ async function runToolLoop(
     // no model call), then — only if still over budget — summarize the oldest middle, reusing the
     // loop's prefix so the summary call reads the prompt cache. Task framing + recent tail stay
     // verbatim. Both passes run ONLY on overflow, so a normal run is untouched and cache-stable.
-    await reduceContextIfNeeded(messages, turnTools, opts, io, calibrator, contextTokens, turnId);
+    const compaction = await reduceContextIfNeeded(
+      messages,
+      turnTools,
+      opts,
+      io,
+      calibrator,
+      contextTokens,
+      turnId,
+    );
+    // Compaction dropped/summarized content out of the model's context. Realign the no-progress
+    // guard's memory to what remains, so a later re-read of evicted content scores as new work, not a
+    // stall — otherwise a long, legitimately-working leaf trips the guard on files it had to re-read
+    // because the earlier read was compacted away. Only on an actual reduction; a normal turn is
+    // untouched (method "none"), keeping the guard's accrual intact between compactions.
+    if (compaction !== "none") seenObservations = rebuildSeenObservations(messages);
 
     // Snapshot what we PREDICTED for exactly the messages this call sends, so the provider's reported
     // input-token count can be compared against it once the turn returns.
@@ -878,11 +932,11 @@ async function reduceContextIfNeeded(
   calibrator: ContextCalibrator,
   contextTokens: number | undefined,
   turnId: string,
-): Promise<void> {
+): Promise<CompactionMethod> {
   // Sized from the resolved model's window when the seam has reported one (compactionBudget).
   const budget = compactionBudget(contextTokens);
   const before = calibrator.estimate(messages);
-  if (before <= budget) return; // the normal path: no events, nothing happened
+  if (before <= budget) return "none"; // the normal path: no events, nothing happened
 
   // Announce BEFORE the work: reduceContext may spend a summarization model call taking seconds,
   // and without this frame a viewer sees an unexplained pause and a token charge with no turn.
@@ -902,6 +956,7 @@ async function reduceContextIfNeeded(
     reclaimed: Math.max(0, Math.round(before - after)),
     method,
   });
+  return method;
 }
 
 /** Reduce `messages` in place, reporting what it took. Cheap pass first; a model call only if that
