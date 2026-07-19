@@ -3,7 +3,7 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## Unreleased
+## 0.2.12
 
 ### Added (the agent's reasoning/thinking now surfaces as a live trace)
 
