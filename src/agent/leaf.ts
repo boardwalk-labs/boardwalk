@@ -457,6 +457,9 @@ export type LeafEventBody =
   | { kind: "text_start"; blockId: string }
   | { kind: "text_delta"; blockId: string; text: string }
   | { kind: "text_end"; blockId: string }
+  // The model's reasoning/thinking, streamed as it arrives. Its own kind (not a text block): the
+  // consumer renders it as a separate, muted "Thinking" trace, never as the assistant's answer.
+  | { kind: "reasoning_delta"; text: string }
   | { kind: "tool_call_start"; toolCallId: string; toolName: string }
   | { kind: "tool_call_input_complete"; toolCallId: string; input: Record<string, unknown> }
   | { kind: "tool_call_executing"; toolCallId: string }
@@ -1053,6 +1056,11 @@ async function modelTurn(
         io.emit(turnId, { kind: "text_start", blockId });
       }
       io.emit(turnId, { kind: "text_delta", blockId, text: io.redactor.redact(text) });
+    },
+    // Reasoning is redacted like every other piece of model context — a secret can't reach the LLM
+    // (the leaf redacts it from the prompt/tools), but defense-in-depth keeps the trace clean too.
+    onReasoningDelta: (text) => {
+      io.emit(turnId, { kind: "reasoning_delta", text: io.redactor.redact(text) });
     },
   };
   // The author's reasoning-effort control (string sugar expanded, no-ops dropped) rides every real

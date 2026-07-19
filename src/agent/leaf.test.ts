@@ -267,6 +267,59 @@ describe("runAgentLeaf — plain inference", () => {
     expect(rec.memoryUsed).toEqual([]);
   });
 
+  it("emits reasoning_delta for streamed thinking, kept separate from the answer text", async () => {
+    const rec = recordedIo(OPENAI_MODEL, [
+      () =>
+        openAiSse(
+          { choices: [{ delta: { reasoning: "let me " }, finish_reason: null }] },
+          { choices: [{ delta: { reasoning: "think" }, finish_reason: null }] },
+          { choices: [{ delta: { content: "the answer" }, finish_reason: null }] },
+          { choices: [{ delta: {}, finish_reason: "stop" }] },
+        ),
+    ]);
+    const result = await runAgentLeaf("q", undefined, rec.io);
+
+    expect(result).toBe("the answer");
+    // Thinking rides its own kind and never lands inside the text block.
+    expect(kinds(rec)).toEqual([
+      "reasoning_delta",
+      "reasoning_delta",
+      "text_start",
+      "text_delta",
+      "text_end",
+      "turn_ended",
+    ]);
+    const reasoning = rec.events
+      .filter((e) => e.body.kind === "reasoning_delta")
+      .map((e) => (e.body.kind === "reasoning_delta" ? e.body.text : ""));
+    expect(reasoning).toEqual(["let me ", "think"]);
+  });
+
+  it("redacts secret values from the reasoning trace, like every other model output", async () => {
+    const redactor = new Redactor();
+    redactor.add("GH_TOKEN", "ghp_supersecret99");
+    const rec = recordedIo(
+      OPENAI_MODEL,
+      [
+        () =>
+          openAiSse(
+            {
+              choices: [
+                { delta: { reasoning: "the key is ghp_supersecret99" }, finish_reason: null },
+              ],
+            },
+            { choices: [{ delta: { content: "done" }, finish_reason: "stop" }] },
+          ),
+      ],
+      { redactor },
+    );
+    await runAgentLeaf("q", undefined, rec.io);
+
+    const event = rec.events.find((e) => e.body.kind === "reasoning_delta");
+    const text = event?.body.kind === "reasoning_delta" ? event.body.text : "";
+    expect(text).toBe("the key is [redacted:GH_TOKEN]");
+  });
+
   it("stamps the leaf's agentName onto turn_ended when the call was named", async () => {
     const rec = recordedIo(OPENAI_MODEL, [() => openAiText("hi", { in: 1, out: 1 })], {
       agentName: "reviewer",

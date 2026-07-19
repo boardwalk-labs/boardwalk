@@ -3,6 +3,35 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+### Added (the agent's reasoning/thinking now surfaces as a live trace)
+
+The `agent()` leaf now captures the model's reasoning/thinking stream and emits it as a distinct
+`reasoning_delta` event, so a run's viewer can show what the model was thinking, not just its answer.
+Both wire adapters were streaming thinking off the model and dropping it on the floor:
+
+- Anthropic (and Bedrock): extended-thinking `thinking_delta` chunks (and the whole-block Bedrock
+  path) now drive a new `ProviderIo.onReasoningDelta`. `signature_delta` (the continuity signature,
+  nothing human-readable) stays dropped.
+- OpenAI-compatible: `delta.reasoning` (OpenRouter, our managed lane) and `delta.reasoning_content`
+  (vLLM/DeepSeek-style) now drive the same hook.
+
+Thinking never mixes into the assistant answer (`ChatTurn.text` and the conversation history are
+unchanged) and is redacted exactly like every other piece of model output. The event carries only
+`{ text }`; a consumer renders it as its own muted trace. Additive and default-on — no manifest field,
+no author opt-in.
+
+### Fixed (no-progress guard follows the live context after compaction)
+
+The no-progress guard held a Set of already-seen read/grep observation hashes that grew for the whole
+leaf, while compaction (dedupeFileReads + the summarize splice) DROPS earlier results out of the
+conversation. So a large task that compacted and then legitimately re-read summarized-out content was
+scored "already seen → no progress"; the redundant-gather counter climbed to the hard stop and a
+productively-working run was killed (only the fat multi-file jobs that trigger compaction died). The
+guard now rebuilds its seen-set from the surviving messages after any reduction, so the rule becomes
+"you re-surfaced content that is STILL in your context," not "ever."
+
 ## 0.2.11
 
 ### Fixed (no-progress guard no longer flags productive editing as a stall)

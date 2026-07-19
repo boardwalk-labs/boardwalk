@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   anthropicMessagesBody,
   anthropicPromptTokens,
+  chatAnthropic,
   chatOpenAi,
   type ChatArgs,
   type ProviderIo,
@@ -76,6 +77,41 @@ describe("chatOpenAi streaming", () => {
     expect(turn.wantsTools).toBe(false);
   });
 
+  it("streams reasoning deltas via onReasoningDelta, keeping them out of the answer text", async () => {
+    const reasoning: string[] = [];
+    const deltas: string[] = [];
+    const io: ProviderIo = {
+      fetchImpl: sseFetch(
+        { choices: [{ delta: { reasoning: "Let me " }, finish_reason: null }] },
+        { choices: [{ delta: { reasoning: "think." }, finish_reason: null }] },
+        { choices: [{ delta: { content: "42" }, finish_reason: null }] },
+        { choices: [{ delta: {}, finish_reason: "stop" }] },
+      ),
+      sleepImpl: () => Promise.resolve(),
+      onDelta: (t) => deltas.push(t),
+      onReasoningDelta: (t) => reasoning.push(t),
+    };
+    const turn = await chatOpenAi(baseArgs(), io);
+    expect(reasoning).toEqual(["Let me ", "think."]);
+    expect(deltas).toEqual(["42"]);
+    expect(turn.text).toBe("42");
+  });
+
+  it("accepts `reasoning_content` as the reasoning field when a provider uses it", async () => {
+    const reasoning: string[] = [];
+    const io: ProviderIo = {
+      fetchImpl: sseFetch(
+        { choices: [{ delta: { reasoning_content: "hmm" }, finish_reason: null }] },
+        { choices: [{ delta: { content: "ok" }, finish_reason: "stop" }] },
+      ),
+      sleepImpl: () => Promise.resolve(),
+      onReasoningDelta: (t) => reasoning.push(t),
+    };
+    const turn = await chatOpenAi(baseArgs(), io);
+    expect(reasoning).toEqual(["hmm"]);
+    expect(turn.text).toBe("ok");
+  });
+
   it("assembles streamed tool calls from indexed argument fragments", async () => {
     const io: ProviderIo = {
       fetchImpl: sseFetch(
@@ -109,6 +145,31 @@ describe("chatOpenAi streaming", () => {
     );
     expect(turn.wantsTools).toBe(true);
     expect(turn.toolCalls).toEqual([{ id: "c1", name: "search", input: { q: "cats" } }]);
+  });
+});
+
+describe("chatAnthropic streaming", () => {
+  it("routes thinking_delta chunks to onReasoningDelta, never into the answer text", async () => {
+    const reasoning: string[] = [];
+    const deltas: string[] = [];
+    const io: ProviderIo = {
+      fetchImpl: sseFetch(
+        { type: "content_block_start", content_block: { type: "thinking" } },
+        { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "Let me " } },
+        { type: "content_block_delta", delta: { type: "thinking_delta", thinking: "think." } },
+        { type: "content_block_delta", delta: { type: "signature_delta", signature: "sig==" } },
+        { type: "content_block_start", content_block: { type: "text" } },
+        { type: "content_block_delta", delta: { type: "text_delta", text: "42" } },
+        { type: "message_delta", delta: { stop_reason: "end_turn" }, usage: { output_tokens: 3 } },
+      ),
+      sleepImpl: () => Promise.resolve(),
+      onDelta: (t) => deltas.push(t),
+      onReasoningDelta: (t) => reasoning.push(t),
+    };
+    const turn = await chatAnthropic(baseArgs(), io);
+    expect(reasoning).toEqual(["Let me ", "think."]);
+    expect(deltas).toEqual(["42"]);
+    expect(turn.text).toBe("42");
   });
 });
 

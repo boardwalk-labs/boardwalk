@@ -66,6 +66,10 @@ export interface ProviderIo {
   sleepImpl?: (ms: number) => Promise<void>;
   /** Streamed text chunks, in order, as they arrive (drives text_delta events). */
   onDelta?: (text: string) => void;
+  /** Streamed reasoning/thinking chunks, in order (drives reasoning_delta events). Kept separate
+   *  from onDelta: thinking is the model's private scratch, not its answer, so it never mixes into
+   *  the assistant text or the conversation history — it only surfaces as its own "Thinking" trace. */
+  onReasoningDelta?: (text: string) => void;
 }
 
 const DEFAULT_MAX_TOKENS = 8192;
@@ -280,6 +284,10 @@ const contentBlockDeltaSchema = z.looseObject({
   delta: z.looseObject({
     type: z.string(),
     text: z.string().optional(),
+    // Extended-thinking deltas: `thinking_delta` frames carry the reasoning text here (a separate
+    // field from `text`). `signature_delta` frames carry only a cryptographic signature for
+    // multi-turn thinking continuity — nothing human-readable — so we don't surface it.
+    thinking: z.string().optional(),
     partial_json: z.string().optional(),
   }),
 });
@@ -349,6 +357,12 @@ export async function chatAnthropic(args: ChatArgs, io: ProviderIo = {}): Promis
         if (chunk !== undefined && chunk.length > 0) {
           text += chunk;
           io.onDelta?.(chunk);
+        }
+        // Thinking rides its own delta field and never accretes into `text` (it is the model's
+        // private reasoning, not the answer that feeds the conversation) — it only drives the trace.
+        const thinking = frame.data.delta.thinking;
+        if (thinking !== undefined && thinking.length > 0) {
+          io.onReasoningDelta?.(thinking);
         }
         if (frame.data.delta.partial_json !== undefined && openToolCall !== null) {
           openToolCall.partialJson += frame.data.delta.partial_json;
@@ -508,6 +522,11 @@ const openAiStreamChunkSchema = z.looseObject({
         delta: z
           .looseObject({
             content: z.string().nullable().optional(),
+            // Streamed reasoning: OpenRouter (our managed lane) emits `reasoning`; other
+            // OpenAI-compatible endpoints (vLLM, DeepSeek-style) emit `reasoning_content`. Either
+            // carries the thinking text; neither is part of the assistant answer.
+            reasoning: z.string().nullable().optional(),
+            reasoning_content: z.string().nullable().optional(),
             tool_calls: z
               .array(
                 z.looseObject({
@@ -591,6 +610,12 @@ export async function chatOpenAi(args: ChatArgs, io: ProviderIo = {}): Promise<C
       if (chunk !== undefined && chunk !== null && chunk.length > 0) {
         text += chunk;
         io.onDelta?.(chunk);
+      }
+      // Reasoning, never mixed into `text`: prefer OpenRouter's `reasoning`, fall back to the
+      // `reasoning_content` other endpoints use. A provider streams one or the other, not both.
+      const reasoningChunk = choice.delta?.reasoning ?? choice.delta?.reasoning_content;
+      if (reasoningChunk !== undefined && reasoningChunk !== null && reasoningChunk.length > 0) {
+        io.onReasoningDelta?.(reasoningChunk);
       }
       for (const tc of choice.delta?.tool_calls ?? []) {
         const cur = toolAcc.get(tc.index) ?? { id: "", name: "", args: "" };

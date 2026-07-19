@@ -44,6 +44,8 @@ const bedrockResponseSchema = z.looseObject({
       z.looseObject({
         type: z.string(),
         text: z.string().optional(),
+        // Extended-thinking blocks carry their reasoning here (separate from `text`).
+        thinking: z.string().optional(),
         id: z.string().optional(),
         name: z.string().optional(),
         input: z.unknown().optional(),
@@ -111,10 +113,13 @@ export async function chatBedrock(args: ChatArgs, io: ProviderIo = {}): Promise<
   }
 
   let text = "";
+  let reasoning = "";
   const toolCalls: ToolCallRequest[] = [];
   for (const block of parsed.data.content ?? []) {
     if (block.type === "text") {
       text += block.text ?? "";
+    } else if (block.type === "thinking") {
+      reasoning += block.thinking ?? "";
     } else if (block.type === "tool_use") {
       toolCalls.push({
         id: block.id ?? `call-${String(toolCalls.length + 1)}`,
@@ -125,8 +130,10 @@ export async function chatBedrock(args: ChatArgs, io: ProviderIo = {}): Promise<
       });
     }
   }
-  // v1: emit the whole assistant text once so the stream still shows it (no per-token deltas).
+  // v1: emit the whole assistant text once so the stream still shows it (no per-token deltas); the
+  // reasoning trace rides the same one-shot path (thinking stays out of the answer `text`).
   if (text.length > 0) io.onDelta?.(text);
+  if (reasoning.length > 0) io.onReasoningDelta?.(reasoning);
 
   const usage = parsed.data.usage;
   // The uncached remainder + cache reads + cache writes. See the schema note: the leaf sizes its

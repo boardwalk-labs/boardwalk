@@ -97,6 +97,28 @@ describe("chatBedrock", () => {
     expect(deltas).toEqual(["hi there"]);
   });
 
+  it("surfaces a thinking block via onReasoningDelta, keeping it out of the answer text", async () => {
+    const { io } = recordingFetch([
+      anthropicJson({
+        content: [
+          { type: "thinking", thinking: "weighing the options" },
+          { type: "text", text: "the answer" },
+        ],
+        stop_reason: "end_turn",
+      }),
+    ]);
+    const deltas: string[] = [];
+    const reasoning: string[] = [];
+    const turn = await chatBedrock(baseArgs(), {
+      ...io,
+      onDelta: (t) => deltas.push(t),
+      onReasoningDelta: (t) => reasoning.push(t),
+    });
+    expect(turn.text).toBe("the answer");
+    expect(deltas).toEqual(["the answer"]);
+    expect(reasoning).toEqual(["weighing the options"]);
+  });
+
   it("signs in the session token when temporary credentials are present", async () => {
     const { io, requests } = recordingFetch([
       anthropicJson({ content: [{ type: "text", text: "ok" }], stop_reason: "end_turn" }),
