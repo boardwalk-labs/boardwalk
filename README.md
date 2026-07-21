@@ -10,10 +10,12 @@ cron scheduling, durable run semantics, SQLite run history, and a local run log,
 own with no account. Same engine and same run semantics as the hosted Boardwalk platform; this is
 the part you run yourself.
 
-> **Status: pre-release.** This repo is being built in the open ahead of its first published
-> release. The contracts it implements are stable (see [`@boardwalk-labs/workflow`](https://www.npmjs.com/package/@boardwalk-labs/workflow));
-> the engine itself is under active construction. See [`SPEC.md`](./SPEC.md) for the
-> architecture and the definition of done.
+> **Status: pre-1.0.** Published and usable today — the engine ships as
+> [`@boardwalk-labs/engine`](https://www.npmjs.com/package/@boardwalk-labs/engine) and the
+> `ghcr.io/boardwalk-labs/boardwalk` Docker image. The contracts it implements are stable (see
+> [`@boardwalk-labs/workflow`](https://www.npmjs.com/package/@boardwalk-labs/workflow)); APIs may
+> still change before 1.0, and changes ship as patch releases (see [`CHANGELOG.md`](./CHANGELOG.md)).
+> See [`SPEC.md`](./SPEC.md) for the architecture.
 
 ## What it is
 
@@ -43,12 +45,12 @@ docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 ```
 
 Then open `http://localhost:8080` for the run log, or hit the JSON API
-(`/api/workflows`, `/api/runs`). Webhook triggers land on `/hooks/<workflow>/<trigger-id>`.
+(`/api/workflows`, `/api/runs`). Webhook triggers land on `/hooks/<workflow>/<trigger-index>`.
 
 ### Deploying a workflow
 
 Build your workflow to a single file and drop it in the engine's **workflows directory** — it's
-deployed on boot (re-synced every boot; idempotent by manifest name):
+deployed on boot (re-synced every boot; idempotent by manifest slug):
 
 ```sh
 npx @boardwalk-labs/cli build index.ts --out ./data/workflows/my-routine.mjs
@@ -58,8 +60,8 @@ docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 The default workflows directory is `<data-dir>/workflows` (`/data/workflows` in Docker); override
 it with `BOARDWALK_WORKFLOWS_DIR`. Each `.mjs`/`.js` file is one workflow — single-file, with
 `@boardwalk-labs/workflow` left external (exactly what `boardwalk build` emits). From there the
-manifest's triggers take over: cron fires on schedule, `POST /api/workflows/<name>/runs` triggers
-a manual run, and webhooks land on `/hooks/<workflow>/<trigger-id>`.
+manifest's triggers take over: cron fires on schedule, `POST /api/workflows/<slug>/runs` triggers
+a manual run, and webhooks land on `/hooks/<workflow>/<trigger-index>`.
 
 ### Configuration
 
@@ -99,7 +101,7 @@ For OAuth-protected MCP servers an `agent()` call connects to, `engine.authorize
 - [`sdk`](https://github.com/boardwalk-labs/sdk) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports.
 - [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, run locally, deploy.
 - [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`).
-- [`plugins`](https://github.com/boardwalk-labs/plugins) — skills + MCP server for Claude Code, Codex, Cursor, OpenClaw, OpenCode.
+- [`plugins`](https://github.com/boardwalk-labs/plugins) — coding-agent skills (Claude Code, Codex, Cursor, OpenClaw, OpenCode) + a control-plane MCP server.
 - [`runner`](https://github.com/boardwalk-labs/runner) — self-hosted runner: your machines execute hosted-scheduled runs.
 - [`runner-images`](https://github.com/boardwalk-labs/runner-images) — reproducible base images hosted runners execute in.
 
