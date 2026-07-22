@@ -22,8 +22,8 @@ body:
     attributes:
       label: Which engine mode?
       options:
-        - boardwalk dev (CLI)
         - Self-hosted server (docker / boardwalk-server)
+        - Embedded (@boardwalk-labs/engine as a library)
     validations:
       required: true
   - type: input
