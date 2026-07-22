@@ -2,7 +2,7 @@
 
 // @boardwalk-labs/engine — the open-source single-node runtime.
 //
-// Two consumers, one implementation (SPEC §1): the CLI embeds it for `boardwalk dev`
+// Two consumers, one implementation (SPEC §1): embedding hosts construct it in-process
 // (construct → runOnce → close), the server binary runs it long-lived (construct → start).
 
 export {

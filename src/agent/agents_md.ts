@@ -16,7 +16,7 @@
 //      — a bundled workflow has no meaningful runtime subtree (the program is one inlined module, and
 //      package source like `lib/foo.ts` is bundled away), so a nested AGENTS.md in the package would
 //      describe source that no longer exists at run time. Reading just the root file also makes this
-//      tier identical on every engine: `boardwalk dev` writes one file at the package root, and the
+//      tier identical on every engine: a local engine reads one file at the package root, and the
 //      hosted platform extracts one at the artifact root — same bytes, same single read.
 //   2. WORKSPACE — an AGENTS.md the run produced (e.g. a codebase it cloned into /workspace), root
 //      PLUS nested subtree files (the repo hierarchy). Lives under `workspaceDir`.

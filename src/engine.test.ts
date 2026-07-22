@@ -87,7 +87,7 @@ describe("Engine facade", () => {
     expect(() => engine.startRun("ghost")).toThrowError(EngineError);
   });
 
-  it("runOnce — the boardwalk dev path — deploys, runs, and returns the terminal row", async () => {
+  it("runOnce — the embedded one-shot path — deploys, runs, and returns the terminal row", async () => {
     const engine = makeEngine();
     const row = await engine.runOnce({ program: ECHO_PROGRAM, input: { from: "dev" } });
     expect(row.status).toBe("completed");

@@ -507,7 +507,7 @@ export interface ModelTurnResult {
    * The resolved model's context window, when the seam knows it — the leaf never resolves a model,
    * so this is its only way to learn the window. See {@link compactionBudget}.
    *
-   * Optional and may arrive LATE: a host with no catalog (`boardwalk dev`, BYO) omits it, and a
+   * Optional and may arrive LATE: a host with no catalog (local engines, BYO) omits it, and a
    * router lane isn't knowable until the first response. Learn-when-told, not a precondition.
    */
   contextTokens?: number;

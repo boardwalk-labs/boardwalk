@@ -906,7 +906,7 @@ export class RunSupervisor {
   ): Promise<{ accessToken: string | null; hint?: string }> {
     const hint =
       `No usable OAuth token for this MCP server — authorize it once with ` +
-      `engine.authorizeMcpServer("${serverUrl}") (boardwalk dev / the server UI expose this), ` +
+      `engine.authorizeMcpServer("${serverUrl}") (embedding hosts / the server UI expose this), ` +
       `then re-run.`;
     const entry = this.mcpTokens.get(serverUrl);
     if (entry === null) return { accessToken: null, hint };

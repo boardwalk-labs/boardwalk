@@ -280,7 +280,7 @@ describe("compactionBudget", () => {
   });
 
   it("falls back to a conservative absolute when the window is unknown", () => {
-    // No catalog (boardwalk dev / BYO), or turn 1 on a router lane.
+    // No catalog (local engines / BYO), or turn 1 on a router lane.
     expect(compactionBudget(undefined)).toBe(UNKNOWN_WINDOW_BUDGET_TOKENS);
   });
 

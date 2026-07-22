@@ -23,8 +23,8 @@ The engine runs a workflow two ways:
 
 - **Server mode** — `docker run ghcr.io/boardwalk-labs/boardwalk`: a long-lived process that schedules cron
   workflows, accepts webhooks, keeps run history in SQLite, and serves a local run log.
-- **Embedded mode** — `@boardwalk-labs/engine` as a library: one run, in-process supervision; this is
-  what `boardwalk dev` uses.
+- **Embedded mode** — `@boardwalk-labs/engine` as a library: one run, in-process supervision, for
+  hosts that embed the engine in their own process.
 
 Same engine, same semantics as the Boardwalk platform: one run = one process, `sleep` holds the
 process, a crash restarts the run from the top, `workflows.call` re-attaches idempotently.
@@ -83,7 +83,7 @@ Provider API keys come from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KE
 
 ### Embedded mode
 
-The same engine as a library — this is what `boardwalk dev` does:
+The same engine as a library — construct, run, close, all in your own process:
 
 ```ts
 import { Engine } from "@boardwalk-labs/engine";

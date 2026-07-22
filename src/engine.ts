@@ -3,7 +3,7 @@
 // The engine facade — the one object both consumers construct (SPEC §1):
 //   - SERVER mode: `start()` boots the recovery sweep + the cron scheduler loop and the
 //     process stays up (the HTTP surface sits on top of this object).
-//   - EMBEDDED mode: construct, `runOnce()`, `close()` — what `boardwalk dev` does. No
+//   - EMBEDDED mode: construct, `runOnce()`, `close()` — what embedding hosts do. No
 //     scheduler loop, no recovery thread; one run, in-process supervision, exit.
 //
 // Layering: this file only wires store + supervisor + scheduler together and translates
@@ -280,8 +280,8 @@ export class Engine {
   }
 
   /**
-   * Embedded one-shot (the `boardwalk dev` path): deploy, run, await terminal. The workflow
-   * persists in the data dir like any other — dev reuses a throwaway dir per invocation.
+   * Embedded one-shot: deploy, run, await terminal. The workflow persists in the data dir
+   * like any other — an embedder wanting a clean slate uses a throwaway dir per invocation.
    */
   async runOnce(args: DeployArgs & { input?: JsonValue }): Promise<RunRow> {
     const workflow = this.deployWorkflow(args);

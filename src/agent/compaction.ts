@@ -22,7 +22,7 @@ import type { ChatMessage, ContentPart } from "./conversation.js";
  *  plus its tool results (worst case a parallel `read` fan-out). What keeps a 200k model safe. */
 export const CONTEXT_RESERVE_TOKENS = 64_000;
 
-/** Budget when the window is unknown: no catalog (`boardwalk dev`, BYO), or turn 1 on a router lane. */
+/** Budget when the window is unknown: no catalog (local engines, BYO), or turn 1 on a router lane. */
 export const UNKNOWN_WINDOW_BUDGET_TOKENS = 150_000;
 
 /** Share of a SMALL window the conversation may occupy, when the flat reserve won't fit inside it.

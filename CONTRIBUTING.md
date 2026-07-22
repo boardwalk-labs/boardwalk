@@ -1,13 +1,13 @@
 # Contributing to @boardwalk-labs/engine
 
-Thanks for helping build the Boardwalk engine — the single-node runtime behind `boardwalk dev`
-and the self-hosted server. It implements the run semantics every Boardwalk engine must honor,
+Thanks for helping build the Boardwalk engine — the single-node runtime behind the self-hosted
+server and embedding hosts. It implements the run semantics every Boardwalk engine must honor,
 so changes here are measured against the contract, not just the diff.
 
 ## Ground rules
 
-- **Parity is the product.** A workflow file must behave identically under `dev`, the self-hosted
-  server, and hosted Boardwalk (modulo the documented engine-dependent resolution). Any change to
+- **Parity is the product.** A workflow file must behave identically under the self-hosted
+  server, embedded mode, and hosted Boardwalk (modulo the documented engine-dependent resolution). Any change to
   run semantics ships with a [conformance test](./conformance) — that suite is the parity
   authority, and the hosted platform runs it too.
 - **The SDK owns the contract.** The manifest schema, run-event wire format, and primitive

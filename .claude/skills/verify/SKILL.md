@@ -7,7 +7,7 @@ description: Drive a real agent() loop against the LOCAL engine build to observe
 
 The surface is **`bin/boardwalk-server.js`** — the self-hosted single-node server. It runs your
 LOCAL `dist/` build, so it actually exercises your diff. The installed `boardwalk` CLI does NOT: it
-bundles a published engine, so `boardwalk dev` verifies nothing about local changes.
+only drives remote engines, so it verifies nothing about local changes.
 
 ## The credential problem, and the way around it
 

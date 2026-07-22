@@ -38,7 +38,7 @@ export function isLoopbackHost(host: string): boolean {
 
 /**
  * Build (but do not bind) the HTTP server for an engine. Separate from the Engine itself so
- * embedded consumers (`boardwalk dev`) never pay for an HTTP layer they don't use.
+ * embedding hosts never pay for an HTTP layer they don't use.
  */
 export function createEngineServer(engine: Engine, opts: EngineServerOptions = {}): EngineServer {
   const log =
