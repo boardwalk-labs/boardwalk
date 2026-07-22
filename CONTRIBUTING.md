@@ -11,7 +11,7 @@ so changes here are measured against the contract, not just the diff.
   run semantics ships with a [conformance test](./conformance) — that suite is the parity
   authority, and the hosted platform runs it too.
 - **The SDK owns the contract.** The manifest schema, run-event wire format, and primitive
-  semantics live in [`@boardwalk-labs/workflow`](https://github.com/boardwalk-labs/sdk). The
+  semantics live in [`@boardwalk-labs/workflow`](https://github.com/boardwalk-labs/sdk-typescript). The
   engine consumes them; it does not fork or redefine them.
 - **The open-core line is hard.** The Auto-lane router (model selection, route-mix policy,
   calibration) lives in hosted Boardwalk and must never appear here — this engine _forwards_ to

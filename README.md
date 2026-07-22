@@ -98,7 +98,7 @@ For OAuth-protected MCP servers an `agent()` call connects to, `engine.authorize
 
 ## The Boardwalk repos
 
-- [`sdk`](https://github.com/boardwalk-labs/sdk) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports.
+- [`sdk-typescript`](https://github.com/boardwalk-labs/sdk-typescript) — `@boardwalk-labs/workflow`, the TypeScript API a workflow program imports.
 - [`cli`](https://github.com/boardwalk-labs/cli) — `boardwalk`: scaffold, validate, run locally, deploy.
 - [`examples`](https://github.com/boardwalk-labs/examples) — copyable workflow templates (`boardwalk init --template`).
 - [`plugins`](https://github.com/boardwalk-labs/plugins) — coding-agent skills (Claude Code, Codex, Cursor, OpenClaw, OpenCode) + a control-plane MCP server.
