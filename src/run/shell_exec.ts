@@ -43,6 +43,10 @@ export function shellExec(
       cwd,
       env: { ...process.env, ...(opts?.env ?? {}) },
       stdio: ["ignore", "pipe", "pipe"],
+      // Own process GROUP: `sh -c` may not exec-optimize, leaving the real command a GRANDCHILD
+      // holding the stdio pipes — killing only the shell would leak it and `close` would not
+      // fire until the grandchild exits. Group-kill reaches the whole tree.
+      detached: true,
     });
 
     let stdout = "";
@@ -50,11 +54,21 @@ export function shellExec(
     let killTimer: NodeJS.Timeout | null = null;
     let graceTimer: NodeJS.Timeout | null = null;
 
+    const killTree = (signal: NodeJS.Signals): void => {
+      // Negative pid = the process group (see `detached` above). Fall back to the direct child
+      // when the group is already gone.
+      try {
+        if (child.pid !== undefined) process.kill(-child.pid, signal);
+        else child.kill(signal);
+      } catch {
+        child.kill(signal);
+      }
+    };
     const kill = (): void => {
-      child.kill("SIGTERM");
+      killTree("SIGTERM");
       // A process ignoring SIGTERM still ends: SIGKILL after a short grace.
       graceTimer = setTimeout(() => {
-        child.kill("SIGKILL");
+        killTree("SIGKILL");
       }, KILL_GRACE_MS);
       graceTimer.unref();
     };
