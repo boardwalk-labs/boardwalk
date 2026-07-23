@@ -12,25 +12,28 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { isTerminal } from "../src/index.js";
-import { createEngine, disposeEngines, kindsOf, waitForStatus } from "./harness.js";
+import { createEngine, descriptor, disposeEngines, kindsOf, waitForStatus } from "./harness.js";
 
 afterEach(disposeEngines);
 
 describe("conformance: workflows.call / workflows.run", () => {
-  it("the parent receives the child's declared output", async () => {
+  it("the parent receives the child's returned output", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "double", triggers: [{ kind: "manual" }] }),
       program: `
-        import { input, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "double", triggers: [{ kind: "manual" }] };
-        output({ doubled: input.n * 2 });
+        export default async function run(input) {
+          return { doubled: input.n * 2 };
+        }
       `,
     });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "caller", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "caller", triggers: [{ kind: "manual" }] };
-        output(await workflows.call("double", { n: 21 }));
+        import { workflows } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          return await workflows.call("double", { n: 21 });
+        }
       `,
     });
 
@@ -46,24 +49,27 @@ describe("conformance: workflows.call / workflows.run", () => {
     // The child appends to a file OUTSIDE its per-run workspace, so executions are countable
     // across runs and restarts.
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "child-counter", triggers: [{ kind: "manual" }] }),
       program: `
         import { appendFileSync } from "node:fs";
-        import { input, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "child-counter", triggers: [{ kind: "manual" }] };
-        appendFileSync(input.countFile, "x");
-        output("child-result");
+        export default async function run(input) {
+          appendFileSync(input.countFile, "x");
+          return "child-result";
+        }
       `,
     });
     // Parent: call the child, then crash once AFTER the call returned. The restarted pass
     // re-runs the same workflows.call site and must re-attach instead of re-executing.
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "crashy-parent", triggers: [{ kind: "manual" }] }),
       program: `
         import { existsSync, writeFileSync } from "node:fs";
-        import { input, output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "crashy-parent", triggers: [{ kind: "manual" }] };
-        const result = await workflows.call("child-counter", { countFile: input.countFile });
-        if (!existsSync("crashed-once")) { writeFileSync("crashed-once", "1"); process.exit(9); }
-        output({ childSaid: result });
+        import { workflows } from "@boardwalk-labs/workflow";
+        export default async function run(input) {
+          const result = await workflows.call("child-counter", { countFile: input.countFile });
+          if (!existsSync("crashed-once")) { writeFileSync("crashed-once", "1"); process.exit(9); }
+          return { childSaid: result };
+        }
       `,
     });
 
@@ -86,18 +92,22 @@ describe("conformance: workflows.call / workflows.run", () => {
     // surface shows what it is doing, then back on the child's finalize.
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "slow-child", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "slow-child", triggers: [{ kind: "manual" }] };
-        await sleep(600);
-        output("child-done");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          await sleep(600);
+          return "child-done";
+        }
       `,
     });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "waiter", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "waiter", triggers: [{ kind: "manual" }] };
-        output({ said: await workflows.call("slow-child", {}) });
+        import { workflows } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          return { said: await workflows.call("slow-child", {}) };
+        }
       `,
     });
 
@@ -129,18 +139,22 @@ describe("conformance: workflows.call / workflows.run", () => {
   it("workflows.run returns the child's run id without holding for its result", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "slow-child", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "slow-child", triggers: [{ kind: "manual" }] };
-        await sleep(1_200);
-        output("late");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          await sleep(1_200);
+          return "late";
+        }
       `,
     });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "fire-and-forget", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, workflows } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "fire-and-forget", triggers: [{ kind: "manual" }] };
-        output({ childRunId: await workflows.run("slow-child", {}) });
+        import { workflows } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          return { childRunId: await workflows.run("slow-child", {}) };
+        }
       `,
     });
 

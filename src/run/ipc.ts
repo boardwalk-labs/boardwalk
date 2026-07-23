@@ -12,7 +12,8 @@
 // across crash-restarts without the child knowing about them.
 
 import { z } from "zod";
-import type { RunEvent, WorkflowManifest, JsonValue } from "@boardwalk-labs/workflow";
+import type { RunEvent } from "@boardwalk-labs/workflow";
+import { contextDataSchema, type ContextData } from "@boardwalk-labs/workflow/runtime";
 
 /** A run event minus its envelope — what the child emits, before the supervisor stamps it. */
 export type RunEventBody = RunEvent extends infer E
@@ -35,18 +36,21 @@ export type IpcErrorShape = z.infer<typeof errorShapeSchema>;
 export interface InitMessage {
   type: "init";
   runId: string;
-  /** Absolute path to the bundled program (ESM, `@boardwalk-labs/workflow` external). */
+  /** Absolute path to the built program (ESM, `@boardwalk-labs/workflow` external, default-exporting
+   *  `run`). */
   programPath: string;
-  /** The run's isolated working directory (the child chdirs here before importing the program). */
+  /** The run's isolated working directory (the child chdirs here before invoking the program). */
   workspaceDir: string;
   /** The deployed workflow PACKAGE root (program + skills/ + a bundled AGENTS.md), or null when this
    *  workflow has no package. AGENTS.md discovery reads its bundled tier before the workspace tier. */
   programDir: string | null;
   /** Where this workflow's deployed skills live, or null when none were deployed. */
   skillsDir: string | null;
+  /** The run's raw JSON input — served to the program via the host protocol's `bootstrap`. */
   input: unknown;
-  config: Record<string, JsonValue>;
-  manifest: WorkflowManifest;
+  /** The read-only run metadata (`run`'s second parameter) as wire DATA — the supervisor builds
+   *  it from the run row; the SDK constructs the live `Context` (synthesizing `signal`). */
+  context: ContextData;
 }
 
 export interface HostResultMessage {
@@ -55,8 +59,10 @@ export interface HostResultMessage {
   result: { ok: true; value: unknown } | { ok: false; error: IpcErrorShape };
 }
 
-// The child validates only the discriminator + the fields it dereferences; the manifest was
-// already validated by the store and `unknown` payloads are narrowed at their use sites.
+// The child validates only the discriminator + the fields it dereferences; `unknown` payloads
+// are narrowed at their use sites. `context` IS fully validated — it crosses a second boundary
+// (the host protocol's `bootstrap`) whose schema the SDK enforces, so a malformed one is
+// better rejected here than surfaced as a bootstrap failure inside the program.
 export const parentToChildSchema = z.union([
   z.object({
     type: z.literal("init"),
@@ -66,8 +72,7 @@ export const parentToChildSchema = z.union([
     programDir: z.string().min(1).nullable(),
     skillsDir: z.string().min(1).nullable(),
     input: z.unknown(),
-    config: z.record(z.string(), z.unknown()),
-    manifest: z.record(z.string(), z.unknown()),
+    context: contextDataSchema,
   }),
   z.object({
     type: z.literal("host_result"),
@@ -93,6 +98,9 @@ export const HOST_METHODS = [
   "web_search",
   "resolve_model",
   "mcp_token",
+  // Live budget snapshot (usage.get) — the supervisor is the budget authority, so the child
+  // asks it rather than tallying a second copy.
+  "usage",
   // Human-in-the-loop gate: the call HOLDS (the promise stays pending, the process stays alive)
   // until a person answers via the control surface; the supervisor resolves it with the
   // validated response. The run's crash model is restart-from-top, so nothing is memoized —
@@ -143,16 +151,13 @@ export const childToParentSchema = z.union([
   }),
   z.object({
     type: z.literal("done"),
+    // run()'s reported return, canonically encoded by the SDK (`void` ⇒ null). The return IS
+    // the run's output — there is no separate "declared" flag in the function model.
     output: z.unknown(),
-    outputDeclared: z.boolean(),
   }),
   z.object({
     type: z.literal("failed"),
     error: errorShapeSchema,
-    // Output declared (output()) BEFORE the program threw still counts — a watch/check often
-    // output()s its verdict and then throws to mark the run failed. Mirrors `done`.
-    output: z.unknown(),
-    outputDeclared: z.boolean(),
   }),
 ]);
 export type ChildToParent = z.infer<typeof childToParentSchema>;

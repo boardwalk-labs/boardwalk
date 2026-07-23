@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createEngine,
+  descriptor,
   disposeEngines,
   localInference,
   startFakeProvider,
@@ -19,12 +20,15 @@ import {
 
 afterEach(disposeEngines);
 
-const ASK_PROGRAM = `
-  import { agent, output } from "@boardwalk-labs/workflow";
-  export const meta = { slug: "ask", triggers: [{ kind: "manual" }] };
-  const decision = await agent("Decide whether to ship.", { model: "test-model", humanInput: true });
-  output(decision);
-`;
+const ASK = {
+  descriptor: descriptor({ slug: "ask", triggers: [{ kind: "manual" }] }),
+  program: `
+  import { agent } from "@boardwalk-labs/workflow";
+  export default async function run() {
+    return await agent("Decide whether to ship.", { model: "test-model", humanInput: true });
+  }
+`,
+};
 
 describe("conformance: tool-level human_input", () => {
   it("the model's human_input tool holds the leaf mid-loop and continues with the answer", async () => {
@@ -46,7 +50,7 @@ describe("conformance: tool-level human_input", () => {
     provider.respondWith("shipped", { in: 1, out: 1 });
     try {
       const { engine } = createEngine({ inference: localInference(provider) });
-      engine.deployWorkflow({ program: ASK_PROGRAM });
+      engine.deployWorkflow(ASK);
 
       const run = engine.startRun("ask");
       await waitForStatus(engine, run.id, "awaiting_input");
@@ -91,7 +95,7 @@ describe("conformance: tool-level human_input", () => {
     provider.respondWith("done", { in: 1, out: 1 });
     try {
       const { engine } = createEngine({ inference: localInference(provider) });
-      engine.deployWorkflow({ program: ASK_PROGRAM });
+      engine.deployWorkflow(ASK);
       const run = engine.startRun("ask");
       await waitForStatus(engine, run.id, "awaiting_input");
 

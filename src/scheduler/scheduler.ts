@@ -13,10 +13,10 @@
 //     run for any number of missed fires (the manifest has no catch_up field — this is
 //     engine-operational policy, so it lives in the engine's deploy-time config).
 //     Never silent, never a thundering herd.
-//   - Concurrency modes gate DISPATCH, not queueing: `serial` / `serial_by_key` hold queued
-//     runs until the group's active run reaches a terminal status.
+//   - Concurrency modes gate DISPATCH, not queueing: `serial` (with or without a key) holds
+//     queued runs until the group's active run reaches a terminal status.
 
-import type { WorkflowManifest } from "@boardwalk-labs/workflow";
+import type { CronTrigger, WorkflowManifest } from "@boardwalk-labs/workflow";
 import { systemClock, type Clock } from "../clock.js";
 import { nextFire, parseCron, type CronSchedule } from "../cron/cron.js";
 import type { RunRow, Store, WorkflowRow } from "../store/store.js";
@@ -126,10 +126,10 @@ export class Scheduler {
     workflow.manifest.triggers.forEach((trigger, index) => {
       if (trigger.kind !== "cron") return;
       const schedule = this.schedule(trigger.expr, trigger.timezone);
-      let anchor = this.ensureAnchor(workflow, index, schedule, trigger.timezone, now);
+      let anchor = this.ensureAnchor(workflow, index, trigger, schedule, now);
       let due = nextFire(schedule, anchor, trigger.timezone);
       while (due !== null && due <= now) {
-        this.fireOnce(workflow, index, due);
+        this.fireOnce(workflow, index, trigger, due);
         anchor = due;
         due = nextFire(schedule, anchor, trigger.timezone);
       }
@@ -138,9 +138,23 @@ export class Scheduler {
   }
 
   /** Create the run + the fire record atomically; a duplicate fire is impossible by schema. */
-  private fireOnce(workflow: WorkflowRow, triggerIndex: number, fireTime: number): void {
+  private fireOnce(
+    workflow: WorkflowRow,
+    triggerIndex: number,
+    trigger: CronTrigger,
+    fireTime: number,
+  ): void {
     const runId = this.store.transaction(() => {
-      const { run } = this.store.createRun({ workflowId: workflow.id, triggerKind: "cron" });
+      const { run } = this.store.createRun({
+        workflowId: workflow.id,
+        triggerKind: "cron",
+        // The scheduler is the one surface that knows WHICH rule fired — record it so
+        // `context.actor` and `trigger.source` are exact.
+        actor: { type: "cron", rule: trigger.expr },
+        // The trigger's static input (validated as data by the manifest schema; this engine
+        // derives no input schema to check it against — the untyped floor).
+        ...(trigger.input !== undefined ? { input: trigger.input } : {}),
+      });
       this.store.recordCronFire({ workflowId: workflow.id, triggerIndex, fireTime, runId: run.id });
       return run.id;
     });
@@ -156,10 +170,11 @@ export class Scheduler {
   private ensureAnchor(
     workflow: WorkflowRow,
     triggerIndex: number,
+    trigger: CronTrigger,
     schedule: CronSchedule,
-    timezone: string | undefined,
     now: number,
   ): number {
+    const timezone = trigger.timezone;
     const key = anchorKey(workflow.id, triggerIndex);
     const existing = this.anchors.get(key);
     if (existing !== undefined) return existing;
@@ -189,7 +204,7 @@ export class Scheduler {
       const counted =
         missedCount >= MISSED_SCAN_CAP ? `≥${String(missedCount)}` : String(missedCount);
       if (mode === "once") {
-        this.fireOnce(workflow, triggerIndex, latestMissed);
+        this.fireOnce(workflow, triggerIndex, trigger, latestMissed);
         this.log(
           `[scheduler] ${workflow.slug}: ${counted} missed cron fire(s) while the engine was down; ran once (catch_up: "once").`,
         );
@@ -260,7 +275,10 @@ function catchUpMode(workflow: WorkflowRow): "skip" | "once" {
 /** The dispatch-gate group for a workflow, or null for unlimited concurrency. */
 function concurrencyGroup(workflow: WorkflowRow): string | null {
   const concurrency: WorkflowManifest["concurrency"] = workflow.manifest.concurrency;
-  if (concurrency === undefined || concurrency.mode === "unlimited") return null;
-  if (concurrency.mode === "serial") return workflow.id;
-  return `${workflow.id}:${concurrency.key}`;
+  if (concurrency.mode === "unlimited") return null;
+  // `serial` — with or without a key. The key is a RUNTIME-INTERPOLATED template over the
+  // run's input, resolved at run creation on the hosted control plane; this engine does not
+  // resolve it yet and serializes the workflow GLOBALLY instead (fail-safe: you asked for
+  // per-key serialization, so the ambiguity must never mean MORE concurrency than one).
+  return workflow.id;
 }

@@ -1,26 +1,39 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // The run-process entry point. Spawned by the supervisor with an IPC channel; never run
-// directly. Protocol: wait for `init`, install the SDK host + run inputs, then IMPORT the
-// program bundle — the module body is the program, so importing the file IS running it
-// (no entrypoint convention). Report `done`/`failed`, exit. A thrown error
-// anywhere is reported over IPC when possible — the supervisor treats an exit without a
-// report as a crash (which triggers restart-from-the-top, the documented semantics).
+// directly. Protocol: wait for `init`, then drive the run the way every Boardwalk engine
+// does — the LOADER flow of the SDK host protocol:
+//
+//   1. Start the protocol server (host_server.ts) over the engine's local capability
+//      implementations (child_host.ts) and export its socket as BOARDWALK_HOST_SOCK.
+//   2. Connect the SDK's protocol client (the SAME `@boardwalk-labs/workflow` instance the
+//      program will import — the run dir's node_modules symlink guarantees it), and
+//      `bootstrap()` → { input, context }.
+//   3. Import the program entry and call its DEFAULT-EXPORT `run(input, context)` —
+//      positional, Lambda-style; a run() declaring fewer params is fine. Importing only
+//      DEFINES `run`; execution is the explicit call (the module-body model is gone).
+//   4. Report the return via `reportReturn` (`void` ⇒ null) and send `done` over IPC.
+//
+// A thrown error anywhere is reported over IPC when possible — the supervisor treats an exit
+// without a report as a crash (which triggers restart-from-the-top, the documented
+// semantics). SIGTERM is the cooperative-cancellation edge: it pushes the protocol `cancel`
+// notification (aborting `context.signal`) and unwinds local holds; the supervisor's
+// SIGKILL-after-grace remains the backstop.
 
 import { pathToFileURL } from "node:url";
-import {
-  installConfig,
-  installHost,
-  installInput,
-  takeDeclaredOutput,
-} from "@boardwalk-labs/workflow/runtime";
 import type { JsonValue } from "@boardwalk-labs/workflow";
+import {
+  connectHost,
+  HOST_SOCK_ENV,
+  type ContextData,
+  type HostClient,
+} from "@boardwalk-labs/workflow/runtime";
 import type { AgentIdentity } from "../agent/leaf.js";
 import { LspService } from "../agent/lsp/index.js";
 import type { Redactor } from "../agent/redact.js";
-import { EngineError, toErrorShape } from "../errors.js";
-import { asJsonValue } from "../json_value.js";
+import { EngineError } from "../errors.js";
 import { createChildHost, errorFromIpc } from "./child_host.js";
+import { WorkflowHostServer } from "./host_server.js";
 import { parentToChildSchema, type ChildToParent, type RunEventBody } from "./ipc.js";
 
 interface PendingCall {
@@ -60,30 +73,34 @@ process.on("message", (raw: unknown) => {
 
   if (initialized) return; // A second init is a protocol violation; ignore.
   initialized = true;
-  void runProgram(
-    msg.programPath,
-    msg.workspaceDir,
-    msg.programDir,
-    msg.skillsDir,
-    msg.input,
-    msg.config,
-  );
+  void runProgram(msg);
 });
 
-async function runProgram(
-  programPath: string,
-  workspaceDir: string,
-  programDir: string | null,
-  skillsDir: string | null,
-  input: unknown,
-  config: Record<string, unknown>,
-): Promise<void> {
+interface InitData {
+  programPath: string;
+  workspaceDir: string;
+  programDir: string | null;
+  skillsDir: string | null;
+  input: unknown;
+  context: ContextData;
+}
+
+async function runProgram(init: InitData): Promise<void> {
   let redactor: Redactor | undefined;
   // Per-run, engine-native LSP: spawns a language server in the workspace on first relevant edit,
   // reused across the run, shut down in the finally so no language-server child outlives the run.
-  const lspService = new LspService({ workspaceDir });
+  const lspService = new LspService({ workspaceDir: init.workspaceDir });
+  // Cancellation plumbing: SIGTERM → abort local holds + push the protocol `cancel`
+  // notification so `context.signal` fires in the program.
+  const cancelController = new AbortController();
+  let server: WorkflowHostServer | null = null;
+  let client: HostClient | null = null;
+  process.on("SIGTERM", () => {
+    cancelController.abort();
+    server?.notifyCancel();
+  });
   try {
-    process.chdir(workspaceDir);
+    process.chdir(init.workspaceDir);
     const childHost = createChildHost(
       {
         request(method, args) {
@@ -106,51 +123,79 @@ async function runProgram(
           send({ type: "memory_used", dir });
         },
       },
-      { workspaceDir, skillsDir, lspService, ...(programDir !== null ? { programDir } : {}) },
+      {
+        workspaceDir: init.workspaceDir,
+        skillsDir: init.skillsDir,
+        lspService,
+        ...(init.programDir !== null ? { programDir: init.programDir } : {}),
+      },
+      { cancelSignal: cancelController.signal },
     );
     redactor = childHost.redactor;
-    installHost(childHost.host);
-    installInput(input);
-    installConfig(narrowConfig(config));
 
-    // Importing IS running: the module body is the program; top-level await is the norm; the
-    // run completes when evaluation finishes and fails when the body throws.
-    const programModule: unknown = await import(pathToFileURL(programPath).href);
-    warnOnLegacyDefaultExport(programModule);
-
-    const declared = takeDeclaredOutput();
-    send({
-      type: "done",
-      output: declared === null ? null : declared.value,
-      outputDeclared: declared !== null,
+    // The protocol server: the program's capability imports reach these local implementations
+    // over the same wire they'd speak on any other Boardwalk engine.
+    server = new WorkflowHostServer({
+      capabilities: childHost.capabilities,
+      bootstrap: {
+        // Boundary cast: the input arrived as JSON over IPC (the run row's trigger payload),
+        // so it is wire-safe by construction.
+        input: (init.input ?? null) as JsonValue,
+        context: init.context,
+      },
     });
+    const sockPath = await server.listen();
+    // The ONE platform-owned env key a program keeps: how its SDK (and any subprocess speaking
+    // the protocol) finds the host — the documented discovery contract.
+    process.env[HOST_SOCK_ENV] = sockPath;
+
+    // Connect eagerly and install as the SDK's active host: the program's capability imports
+    // (same module instance, via the run-dir symlink) share this client instead of lazily
+    // opening a second connection.
+    client = await connectHost({ sockPath });
+    const { input, context } = await client.bootstrap();
+
+    const programModule: unknown = await import(pathToFileURL(init.programPath).href);
+    const runFn = (programModule as { default?: unknown }).default;
+    if (typeof runFn !== "function") {
+      throw new EngineError(
+        "VALIDATION",
+        "The workflow entry has no `run` function default export.",
+        "Export the entry as `export default async function run(input, context) { … }`.",
+      );
+    }
+    // Positional, Lambda-style: input = param 0, context = param 1; a run() declaring fewer
+    // params simply ignores the rest.
+    const value: unknown = await (runFn as (input: unknown, context: unknown) => unknown)(
+      input,
+      context,
+    );
+    // The SDK canonically encodes the value (Date → ISO, …) and the server captures it; read
+    // the captured wire form back so IPC carries exactly what any engine would persist.
+    await client.reportReturn(value);
+    send({ type: "done", output: server.reportedReturn() });
   } catch (err) {
     // Program errors can carry secret values the program legitimately read (secrets.get) —
     // this report persists in the run row and event stream, so it gets the same redaction
     // as everything model-bound. `redactor` may be unset if the failure preceded host setup;
     // nothing secret can have been revealed before that point.
     const scrub = (text: string): string => redactor?.redact(text) ?? text;
-    const shape = toErrorShape(err);
-    const hint = err instanceof EngineError ? err.hint : undefined;
-    // Output declared before the throw still counts (verdict-then-throw): the success path
-    // reports it, so the failure path must too, or the verdict is lost. Safe even when the
-    // failure preceded host setup — nothing was declared, so this is null/false.
-    const declared = takeDeclaredOutput();
+    const { code, message, hint } = curateFailure(err);
     send({
       type: "failed",
       error: {
-        ...shape,
-        message: scrub(shape.message),
+        code: scrub(code),
+        message: scrub(message),
         ...(hint !== undefined ? { hint: scrub(hint) } : {}),
       },
-      output: declared === null ? null : declared.value,
-      outputDeclared: declared !== null,
     });
   } finally {
     // Shut every language server down before exiting so no child outlives the run (close() is
     // best-effort + bounded: shutdown → exit → kill). The run's outcome was already reported above,
     // so a slow teardown only delays the process exit, it never changes the result.
     await lspService.close();
+    client?.close();
+    await server?.close();
     // Why disconnect-then-exit: process.send is async under the hood; disconnecting flushes
     // the channel so the final message is never lost to an immediate exit.
     process.disconnect();
@@ -158,28 +203,35 @@ async function runProgram(
   }
 }
 
-/** Per-key narrowing of the deploy-time config crossing IPC (no record-level cast). */
-function narrowConfig(config: Record<string, unknown>): Record<string, JsonValue> {
-  const out: Record<string, JsonValue> = {};
-  for (const [key, value] of Object.entries(config)) {
-    out[key] = asJsonValue(value, `config.${key}`);
-  }
-  return out;
-}
+/** A machine-readable error code shaped like one: SCREAMING_SNAKE, as an `EngineError.code`
+ *  (`VALIDATION`, `BUDGET_EXCEEDED`, …), a HostError code off the protocol, and a Node syscall
+ *  error (`ENOENT`) all are. */
+const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /**
- * The rescinded draft convention wrapped the program in `export default async function run()`.
- * Such a function is NEVER called (the module body is the program) — warn so an author who
- * wrapped their logic learns why nothing happened. Stderr lands in the run log.
+ * Curate a thrown value into the run's `{ code, message, hint }` failure shape. Duck-typed on
+ * purpose: the throw may be an `EngineError` (hint on `.hint`), a protocol `HostError` (the
+ * capability's hint rides `.data.hint` across the wire — see host_server's protocolErrorOf),
+ * or any author error. Message = what's wrong; hint = what to do.
  */
-function warnOnLegacyDefaultExport(programModule: unknown): void {
-  if (typeof programModule !== "object" || programModule === null) return;
-  const candidate: unknown = Reflect.get(programModule, "default");
-  if (typeof candidate === "function") {
-    console.error(
-      "warning: this workflow exports a default function, which Boardwalk does not call — " +
-        "the module body IS the program. Move the function's body to the top level " +
-        "(top-level await is supported).",
-    );
+function curateFailure(err: unknown): { code: string; message: string; hint?: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  const rawCode: unknown =
+    typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
+  const code =
+    typeof rawCode === "string" && ERROR_CODE_RE.test(rawCode) ? rawCode : "PROGRAM_ERROR";
+  const hint = errorHint(err);
+  return { code, message, ...(hint !== undefined ? { hint } : {}) };
+}
+
+function errorHint(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const hint: unknown = (err as { hint?: unknown }).hint;
+  if (typeof hint === "string" && hint !== "") return hint;
+  const data: unknown = (err as { data?: unknown }).data;
+  if (typeof data === "object" && data !== null) {
+    const dataHint: unknown = (data as { hint?: unknown }).hint;
+    if (typeof dataHint === "string" && dataHint !== "") return dataHint;
   }
+  return undefined;
 }

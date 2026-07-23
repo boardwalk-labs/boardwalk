@@ -24,57 +24,83 @@ const childEntryPath = join(repoRoot, "dist", "run", "child.js");
 // Fixtures + lifecycle
 // ----------------------------------------------------------------------------
 
-const ECHO_PROGRAM = `
-import { input, output } from "@boardwalk-labs/workflow";
-export const meta = {
-  slug: "echo",
-  description: "echoes its input",
-  triggers: [{ kind: "manual" }],
+// Each fixture workflow is a (descriptor, program) pair — the deploy shape of the function
+// model: workflow.jsonc as data, a built module default-exporting run().
+const ECHO_WORKFLOW = {
+  descriptor: JSON.stringify({
+    slug: "echo",
+    description: "echoes its input",
+    triggers: [{ kind: "manual" }],
+  }),
+  program: `
+export default async function run(input) {
+  console.log("echo-log-line");
+  return { echoed: input ?? null };
+}
+`,
 };
-console.log("echo-log-line");
-output({ echoed: input ?? null });
-`;
 
-const SLOW_PROGRAM = `
-import { output, sleep, phase } from "@boardwalk-labs/workflow";
-export const meta = { slug: "slow", triggers: [{ kind: "manual" }] };
-phase("working");
-await sleep(400);
-output("slow-done");
-`;
-
-const NAP_PROGRAM = `
-import { output, sleep } from "@boardwalk-labs/workflow";
-export const meta = { slug: "nap", triggers: [{ kind: "manual" }] };
-await sleep(5000);
-output("never-finished");
-`;
-
-const APPROVAL_PROGRAM = `
-import { humanInput, output } from "@boardwalk-labs/workflow";
-export const meta = { slug: "approval", triggers: [{ kind: "manual" }] };
-const decision = await humanInput({
-  key: "approve",
-  prompt: "Approve?",
-  input: { kind: "choice", options: ["Approve", "Reject"] },
-});
-output({ decision });
-`;
-
-const TOKEN_HOOK_PROGRAM = `
-import { input, output } from "@boardwalk-labs/workflow";
-export const meta = {
-  slug: "token-hook",
-  triggers: [{ kind: "webhook", auth: "token" }, { kind: "manual" }],
+const SLOW_WORKFLOW = {
+  descriptor: JSON.stringify({ slug: "slow", triggers: [{ kind: "manual" }] }),
+  program: `
+import { sleep, phase } from "@boardwalk-labs/workflow";
+export default async function run() {
+  phase("working");
+  await sleep(400);
+  return "slow-done";
+}
+`,
 };
-output(input ?? null);
-`;
 
-const SIGNED_HOOK_PROGRAM = `
-import { input, output } from "@boardwalk-labs/workflow";
-export const meta = { slug: "signed-hook", triggers: [{ kind: "webhook", auth: "signature" }] };
-output(input ?? null);
-`;
+const NAP_WORKFLOW = {
+  descriptor: JSON.stringify({ slug: "nap", triggers: [{ kind: "manual" }] }),
+  program: `
+import { sleep } from "@boardwalk-labs/workflow";
+export default async function run() {
+  await sleep(5000);
+  return "never-finished";
+}
+`,
+};
+
+const APPROVAL_WORKFLOW = {
+  descriptor: JSON.stringify({ slug: "approval", triggers: [{ kind: "manual" }] }),
+  program: `
+import { humanInput } from "@boardwalk-labs/workflow";
+export default async function run() {
+  const decision = await humanInput({
+    key: "approve",
+    prompt: "Approve?",
+    input: { kind: "choice", options: ["Approve", "Reject"] },
+  });
+  return { decision };
+}
+`,
+};
+
+const TOKEN_HOOK_WORKFLOW = {
+  descriptor: JSON.stringify({
+    slug: "token-hook",
+    triggers: [{ kind: "webhook", auth: "token" }, { kind: "manual" }],
+  }),
+  program: `
+export default async function run(input) {
+  return input ?? null;
+}
+`,
+};
+
+const SIGNED_HOOK_WORKFLOW = {
+  descriptor: JSON.stringify({
+    slug: "signed-hook",
+    triggers: [{ kind: "webhook", auth: "signature" }],
+  }),
+  program: `
+export default async function run(input) {
+  return input ?? null;
+}
+`,
+};
 
 const cleanups: (() => Promise<void> | void)[] = [];
 const envVarsSet: string[] = [];
@@ -256,8 +282,8 @@ async function readSse(
 describe("engine HTTP server", () => {
   it("GET /api/workflows lists deployed workflows with manifest-derived fields", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: ECHO_PROGRAM });
-    engine.deployWorkflow({ program: TOKEN_HOOK_PROGRAM });
+    engine.deployWorkflow(ECHO_WORKFLOW);
+    engine.deployWorkflow(TOKEN_HOOK_WORKFLOW);
     const { status, body } = await fetchJson(`${base}/api/workflows`, workflowsResponseSchema);
     expect(status).toBe(200);
     expect(body.workflows.map((w) => w.slug)).toEqual(["echo", "token-hook"]);
@@ -269,7 +295,7 @@ describe("engine HTTP server", () => {
 
   it("POST /api/workflows/:name/runs starts a manual run that completes", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: ECHO_PROGRAM });
+    engine.deployWorkflow(ECHO_WORKFLOW);
     const { status, body } = await fetchJson(`${base}/api/workflows/echo/runs`, runResponseSchema, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -299,7 +325,7 @@ describe("engine HTTP server", () => {
 
   it("GET /api/runs filters by workflow, status, limit, offset", async () => {
     const { engine, base } = await makeServer();
-    const row = await engine.runOnce({ program: ECHO_PROGRAM });
+    const row = await engine.runOnce(ECHO_WORKFLOW);
     expect(row.status).toBe("completed");
 
     const all = await fetchJson(`${base}/api/runs`, runsResponseSchema);
@@ -329,7 +355,7 @@ describe("engine HTTP server", () => {
 
   it("events endpoint: default channels, explicit channels, verbose, after-cursor", async () => {
     const { engine, base } = await makeServer();
-    const row = await engine.runOnce({ program: ECHO_PROGRAM });
+    const row = await engine.runOnce(ECHO_WORKFLOW);
 
     const defaults = await fetchJson(`${base}/api/runs/${row.id}/events`, eventsResponseSchema);
     expect(defaults.status).toBe(200);
@@ -376,7 +402,7 @@ describe("engine HTTP server", () => {
 
   it("SSE: replay-then-live tail with no duplicates and no gaps", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: SLOW_PROGRAM });
+    engine.deployWorkflow(SLOW_WORKFLOW);
     const started = await fetchJson(`${base}/api/workflows/slow/runs`, runResponseSchema, {
       method: "POST",
     });
@@ -404,7 +430,7 @@ describe("engine HTTP server", () => {
 
   it("SSE: Last-Event-ID wins over ?after= and the cursor resume is exact", async () => {
     const { engine, base } = await makeServer();
-    const row = await engine.runOnce({ program: ECHO_PROGRAM });
+    const row = await engine.runOnce(ECHO_WORKFLOW);
     const all = engine.store.listEvents(row.id);
     expect(all.length).toBeGreaterThan(3);
     const resumeAt = all[2];
@@ -420,7 +446,7 @@ describe("engine HTTP server", () => {
 
   it("SSE: channel filtering matches /events and keeps global cursors", async () => {
     const { engine, base } = await makeServer();
-    const row = await engine.runOnce({ program: ECHO_PROGRAM });
+    const row = await engine.runOnce(ECHO_WORKFLOW);
     const frames = await readSse(`${base}/api/runs/${row.id}/stream?channels=output`, {
       doneWhen: (got) => got.length >= 1,
     });
@@ -441,7 +467,7 @@ describe("engine HTTP server", () => {
 
   it("POST /api/runs/:id/cancel → 202 and the run lands cancelled", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: NAP_PROGRAM });
+    engine.deployWorkflow(NAP_WORKFLOW);
     const started = await fetchJson(`${base}/api/workflows/nap/runs`, runResponseSchema, {
       method: "POST",
     });
@@ -464,7 +490,7 @@ describe("engine HTTP server", () => {
 
   it("human-in-the-loop: lists the pending gate and resumes on POST /inputs/:key", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: APPROVAL_PROGRAM });
+    engine.deployWorkflow(APPROVAL_WORKFLOW);
     const started = await fetchJson(`${base}/api/workflows/approval/runs`, runResponseSchema, {
       method: "POST",
     });
@@ -515,7 +541,7 @@ describe("engine HTTP server", () => {
 
   it("webhook token auth: 503 unconfigured, 401 bad token, 201 success, 404 non-webhook", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: TOKEN_HOOK_PROGRAM });
+    engine.deployWorkflow(TOKEN_HOOK_WORKFLOW);
 
     // Fail closed before any credential exists.
     const unconfigured = await fetchJson(`${base}/hooks/token-hook/0`, errorResponseSchema, {
@@ -573,7 +599,7 @@ describe("engine HTTP server", () => {
 
   it("webhook signature auth: HMAC over the raw body, hyphenated names map to env vars", async () => {
     const { engine, base } = await makeServer();
-    engine.deployWorkflow({ program: SIGNED_HOOK_PROGRAM });
+    engine.deployWorkflow(SIGNED_HOOK_WORKFLOW);
     const payload = JSON.stringify({ n: 1 });
 
     const unconfigured = await fetchJson(`${base}/hooks/signed-hook/0`, errorResponseSchema, {

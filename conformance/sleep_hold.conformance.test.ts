@@ -9,7 +9,7 @@
 // program, same semantics, different economics.)
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createEngine, disposeEngines } from "./harness.js";
+import { createEngine, disposeEngines, descriptor } from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -17,12 +17,14 @@ describe("conformance: sleep holds in-process", () => {
   it("a sleep holds the process and the run continues with its locals intact", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "napper", triggers: [{ kind: "manual" }] }),
       program: `
-        import { sleep, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "napper", triggers: [{ kind: "manual" }] };
-        const before = Date.now();
-        await sleep(200);
-        output({ sleptMs: Date.now() - before });
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          const before = Date.now();
+          await sleep(200);
+          return ({ sleptMs: Date.now() - before });
+        }
       `,
     });
 
@@ -48,11 +50,13 @@ describe("conformance: sleep holds in-process", () => {
   it("an already-elapsed sleep({ until }) returns immediately", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "pastnap", triggers: [{ kind: "manual" }] }),
       program: `
-        import { sleep, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "pastnap", triggers: [{ kind: "manual" }] };
-        await sleep({ until: new Date(Date.now() - 60_000) });
-        output("done");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          await sleep({ until: new Date(Date.now() - 60_000) });
+          return ("done");
+        }
       `,
     });
 

@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
-import { validateMeta } from "@boardwalk-labs/workflow";
+import { workflowManifestSchema } from "@boardwalk-labs/workflow";
 import type { RunEvent, WorkflowManifest } from "@boardwalk-labs/workflow";
+import type { Actor } from "@boardwalk-labs/workflow/runtime";
 import { EngineError } from "../errors.js";
 import { isUlid } from "../ids.js";
 import { Store } from "./store.js";
@@ -49,15 +50,18 @@ function corruptColumn(path: string, sql: string): void {
 }
 
 function makeManifest(name: string): WorkflowManifest {
-  return validateMeta({ slug: name, triggers: [{ kind: "manual" }] });
+  return workflowManifestSchema.parse({ slug: name, triggers: [{ kind: "manual" }] });
 }
+
+/** The default creating-surface actor for tests: a manual start on a single-user engine. */
+const TEST_ACTOR: Actor = { type: "user", user_id: "local" };
 
 function seedWorkflow(store: Store, name = "merge-conflict-resolver"): { id: string } {
   return store.upsertWorkflow({ slug: name, manifest: makeManifest(name), program: "export {};" });
 }
 
 function seedRun(store: Store, workflowId: string): { id: string } {
-  return store.createRun({ workflowId, triggerKind: "manual" }).run;
+  return store.createRun({ workflowId, triggerKind: "manual", actor: TEST_ACTOR }).run;
 }
 
 function logEvent(runId: string, seq: number): RunEvent {
@@ -165,6 +169,7 @@ describe("Store: runs", () => {
     const { run, created } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "webhook",
+      actor: { type: "webhook", source: "hooks/0" },
       input,
     });
     expect(created).toBe(true);
@@ -179,6 +184,7 @@ describe("Store: runs", () => {
       error: null,
       parentRunId: null,
       idempotencyKey: null,
+      actor: { type: "webhook", source: "hooks/0" },
       restarts: 0,
       tokensIn: 0,
       tokensOut: 0,
@@ -201,12 +207,17 @@ describe("Store: runs", () => {
     const store = openStore();
     const workflow = seedWorkflow(store);
     expectEngineError(
-      () => store.createRun({ workflowId: "missing", triggerKind: "manual" }),
+      () => store.createRun({ workflowId: "missing", triggerKind: "manual", actor: TEST_ACTOR }),
       "NOT_FOUND",
     );
     expectEngineError(
       () =>
-        store.createRun({ workflowId: workflow.id, triggerKind: "manual", parentRunId: "missing" }),
+        store.createRun({
+          workflowId: workflow.id,
+          triggerKind: "manual",
+          actor: TEST_ACTOR,
+          parentRunId: "missing",
+        }),
       "NOT_FOUND",
     );
   });
@@ -218,6 +229,7 @@ describe("Store: runs", () => {
     const first = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: TEST_ACTOR,
       parentRunId: parent.id,
       idempotencyKey: "call-site-1",
     });
@@ -225,6 +237,7 @@ describe("Store: runs", () => {
     const reattached = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: TEST_ACTOR,
       parentRunId: parent.id,
       idempotencyKey: "call-site-1",
     });
@@ -233,6 +246,7 @@ describe("Store: runs", () => {
     const other = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: TEST_ACTOR,
       parentRunId: parent.id,
       idempotencyKey: "call-site-2",
     });
@@ -246,11 +260,13 @@ describe("Store: runs", () => {
     const first = store.createRun({
       workflowId: workflow.id,
       triggerKind: "webhook",
+      actor: { type: "webhook", source: "hooks/0" },
       idempotencyKey: "delivery-9",
     });
     const second = store.createRun({
       workflowId: workflow.id,
       triggerKind: "webhook",
+      actor: { type: "webhook", source: "hooks/0" },
       idempotencyKey: "delivery-9",
     });
     expect(second.created).toBe(false);

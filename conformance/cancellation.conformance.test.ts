@@ -8,7 +8,14 @@
 // spawned and no `cancelling` interlude.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createEngine, disposeEngines, pause, statusesOf, waitForStatus } from "./harness.js";
+import {
+  createEngine,
+  disposeEngines,
+  pause,
+  statusesOf,
+  waitForStatus,
+  descriptor,
+} from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -16,10 +23,12 @@ describe("conformance: cancellation", () => {
   it("cancels a running sleeper: cancelling → cancelled, endedAt set", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "long-sleeper", triggers: [{ kind: "manual" }] }),
       program: `
         import { sleep } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "long-sleeper", triggers: [{ kind: "manual" }] };
-        await sleep(5_000);
+        export default async function run(input, context) {
+          await sleep(5_000);
+        }
       `,
     });
 
@@ -46,15 +55,17 @@ describe("conformance: cancellation", () => {
     // A serial workflow keeps the second run parked in `queued` while the first one holds
     // the slot — the only way to cancel a genuinely undispatched run.
     engine.deployWorkflow({
+      descriptor: descriptor({
+        slug: "serial-sleeper",
+        triggers: [{ kind: "manual" }],
+        concurrency: { mode: "serial" },
+      }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = {
-          slug: "serial-sleeper",
-          triggers: [{ kind: "manual" }],
-          concurrency: { mode: "serial" },
-        };
-        await sleep(5_000);
-        output("done");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          await sleep(5_000);
+          return ("done");
+        }
       `,
     });
 

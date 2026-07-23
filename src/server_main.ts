@@ -10,7 +10,7 @@
 // beats a hand-rolled parser. Env vars are also what Docker/systemd operators reach for
 // first, so the deferral costs nothing in practice.
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseEnv } from "node:util";
 import { z } from "zod";
@@ -35,9 +35,11 @@ export interface ServerConfig {
   /** Explicit BOARDWALK_ENV_FILE path; undefined means "use <dataDir>/.env if it exists". */
   envFile: string | undefined;
   /**
-   * Directory of built workflow programs deployed on boot (the self-host deploy mechanism):
-   * each `.mjs`/`.js` file is one workflow (single-file, `@boardwalk-labs/workflow` external —
-   * what `boardwalk build` emits). Defaults to `<dataDir>/workflows`.
+   * Directory of built workflow PACKAGES deployed on boot (the self-host deploy mechanism):
+   * each subdirectory carrying a `workflow.jsonc` (or `workflow.json`) descriptor is one
+   * workflow — descriptor + built entry (`index.mjs`, `@boardwalk-labs/workflow` external —
+   * what `boardwalk build` emits) + optional skills/ and AGENTS.md. Defaults to
+   * `<dataDir>/workflows`.
    */
   workflowsDir: string;
 }
@@ -206,32 +208,49 @@ export function loadServerConfig(env: Record<string, string | undefined>): Serve
 }
 
 /**
- * Deploy every built workflow in `dir` on boot — the self-host deploy mechanism. Each `.mjs`/`.js`
- * file is one workflow's program (single-file, `@boardwalk-labs/workflow` external — what
- * `boardwalk build` emits). Idempotent by manifest slug (re-boot re-syncs the dir into the store);
- * a removed file leaves its last-deployed workflow in place (no un-deploy in v0). A missing dir is
- * fine (an operator may deploy by other means); a bad file is logged and skipped, never fatal.
+ * Deploy every built workflow PACKAGE in `dir` on boot — the self-host deploy mechanism. Each
+ * subdirectory carrying a `workflow.jsonc`/`workflow.json` descriptor is one workflow package
+ * (descriptor + built entry + optional skills/ + AGENTS.md). Idempotent by descriptor slug
+ * (re-boot re-syncs the dir into the store; an unchanged package does not bump the workflow's
+ * version); a removed package leaves its last-deployed workflow in place (no un-deploy in v0).
+ * A missing dir is fine (an operator may deploy by other means); a bad package — or a stray
+ * flat `.mjs` from the removed module-body format — is logged and skipped, never fatal.
  */
 function deployWorkflowsFromDir(engine: Engine, dir: string, log: (line: string) => void): void {
   if (!existsSync(dir)) return;
-  let files: string[];
+  let entries: string[];
   try {
-    files = readdirSync(dir)
-      .filter((name) => name.endsWith(".mjs") || name.endsWith(".js"))
-      .sort();
+    entries = readdirSync(dir).sort();
   } catch (err) {
     log(
       `workflows dir ${dir} could not be read: ${err instanceof Error ? err.message : String(err)}`,
     );
     return;
   }
-  for (const file of files) {
+  for (const name of entries) {
+    const path = join(dir, name);
+    let isDirectory: boolean;
     try {
-      const program = readFileSync(join(dir, file), "utf8");
-      const workflow = engine.deployWorkflow({ program });
-      log(`deployed "${workflow.slug}" from ${file}`);
+      isDirectory = statSync(path).isDirectory();
+    } catch {
+      continue; // vanished between readdir and stat — nothing to deploy
+    }
+    if (!isDirectory) {
+      // A flat built file is the REMOVED module-body deploy shape — name the fix, don't guess.
+      if (name.endsWith(".mjs") || name.endsWith(".js")) {
+        log(
+          `skipped ${name}: flat program files are no longer deployable — a workflow is a ` +
+            `package DIRECTORY with a workflow.jsonc descriptor next to the built entry ` +
+            `(mkdir ${name.replace(/\.(mjs|js)$/, "")}/, move the file in as index.mjs, add workflow.jsonc)`,
+        );
+      }
+      continue;
+    }
+    try {
+      const workflow = engine.deployWorkflowDir(path);
+      log(`deployed "${workflow.slug}" (v${String(workflow.version)}) from ${name}/`);
     } catch (err) {
-      log(`skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
+      log(`skipped ${name}/: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 }

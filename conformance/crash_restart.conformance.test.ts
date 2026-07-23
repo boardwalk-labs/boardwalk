@@ -7,7 +7,7 @@
 // the budget fails the run with CRASHED.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createEngine, disposeEngines, statusesOf } from "./harness.js";
+import { createEngine, disposeEngines, statusesOf, descriptor } from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -17,12 +17,13 @@ describe("conformance: crash-restart", () => {
     // First pass: no marker → write it, hard-crash. Second pass: the marker written by the
     // crashed pass is still there (workspace survived) → complete.
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "flaky", triggers: [{ kind: "manual" }] }),
       program: `
         import { existsSync, writeFileSync } from "node:fs";
-        import { output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "flaky", triggers: [{ kind: "manual" }] };
-        if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
-        output("recovered");
+        export default async function run(input, context) {
+          if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
+          return ("recovered");
+        }
       `,
     });
 
@@ -46,9 +47,11 @@ describe("conformance: crash-restart", () => {
   it("exhausting the restart budget fails the run with CRASHED", async () => {
     const { engine } = createEngine({ maxRestarts: 1 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "always-crashes", triggers: [{ kind: "manual" }] }),
       program: `
-        export const meta = { slug: "always-crashes", triggers: [{ kind: "manual" }] };
-        process.exit(3);
+        export default async function run(input, context) {
+          process.exit(3);
+        }
       `,
     });
 

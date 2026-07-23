@@ -214,6 +214,7 @@ function fixture(env: Record<string, string> = {}): {
     const { run: row } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: { type: "user", user_id: "local" },
       ...(input !== undefined ? { input } : {}),
     });
     supervisor.emitQueued(row.id);
@@ -276,6 +277,7 @@ function bedrockFixture(secretAccessKey: string): ReturnType<typeof fixture> {
     const { run: row } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: { type: "user", user_id: "local" },
       ...(input !== undefined ? { input } : {}),
     });
     supervisor.emitQueued(row.id);
@@ -291,8 +293,10 @@ describe("agent() through the full run path", () => {
     provider.respondWith("the agent answer", { in: 120, out: 30 });
     const runId = await f.run(
       "with-agent",
-      `import { agent, output } from "@boardwalk-labs/workflow";
-                output(await agent("summarize this", { model: "test-model" }));`,
+      `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("summarize this", { model: "test-model" });
+       }`,
     );
 
     const row = f.store.getRun(runId);
@@ -326,8 +330,10 @@ describe("agent() through the full run path", () => {
     provider.respondWith("named answer", { in: 1, out: 1 });
     const runId = await f.run(
       "named-agent",
-      `import { agent, output } from "@boardwalk-labs/workflow";
-       output(await agent("review", { model: "test-model", name: "reviewer" }));`,
+      `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("review", { model: "test-model", name: "reviewer" });
+       }`,
     );
 
     expect(f.store.getRun(runId)?.status).toBe("completed");
@@ -346,8 +352,10 @@ describe("agent() through the full run path", () => {
     provider.respondWith("default-model-reply", { in: 1, out: 1 });
     const runId = await f.run(
       "agent-default-model",
-      `import { agent, output } from "@boardwalk-labs/workflow";
-       output(await agent("hi"));`,
+      `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("hi");
+       }`,
     );
     expect(f.store.getRun(runId)?.status).toBe("completed");
     expect(provider.requests.at(-1)).toContain("default-test-model");
@@ -359,9 +367,11 @@ describe("agent() through the full run path", () => {
     provider.respondWith("ok", { in: 1, out: 1 });
     const runId = await f.run(
       "leaky",
-      `import { agent, output, secrets } from "@boardwalk-labs/workflow";
-                const token = await secrets.get("API_TOKEN");
-         output(await agent("please use token " + token + " to fetch the data"));`,
+      `import { agent, secrets } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         const token = await secrets.get("API_TOKEN");
+         return await agent("please use token " + token + " to fetch the data");
+       }`,
       { permissions: { secrets: [{ name: "API_TOKEN" }] } },
     );
 
@@ -381,8 +391,10 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "overspender",
       `import { agent, sleep } from "@boardwalk-labs/workflow";
-                await agent("burn tokens", { model: "test-model" });
-         await sleep(3_000); // the budget kill lands here, not at process exit`,
+       export default async function run() {
+         await agent("burn tokens", { model: "test-model" });
+         await sleep(3_000); // the budget kill lands here, not at process exit
+       }`,
       { budget: { max_usd: 0.01 } },
     );
 
@@ -398,8 +410,10 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "token-hog",
       `import { agent, sleep } from "@boardwalk-labs/workflow";
-                await agent("talk a lot", { model: "test-model" });
-         await sleep(3_000);`,
+       export default async function run() {
+         await agent("talk a lot", { model: "test-model" });
+         await sleep(3_000);
+       }`,
       { budget: { max_tokens: 1000 } },
     );
 
@@ -414,10 +428,12 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "wants-mcp",
       `import { agent } from "@boardwalk-labs/workflow";
-       await agent("search", {
-         model: "test-model",
-         mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
-       });`,
+       export default async function run() {
+         await agent("search", {
+           model: "test-model",
+           mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
+         });
+       }`,
     );
     const row = f.store.getRun(runId);
     expect(row?.status).toBe("failed");
@@ -430,15 +446,18 @@ describe("agent() through the full run path", () => {
     const runId = await f.run(
       "bad-mcp-ref",
       `import { agent } from "@boardwalk-labs/workflow";
-       await agent("search", {
-         model: "test-model",
-         mcp: [{ name: "gh", transport: "carrier-pigeon", coop: "roof" }],
-       });`,
+       export default async function run() {
+         await agent("search", {
+           model: "test-model",
+           mcp: [{ name: "gh", transport: "carrier-pigeon", coop: "roof" }],
+         });
+       }`,
     );
     const row = f.store.getRun(runId);
     expect(row?.status).toBe("failed");
-    expect(row?.error?.code).toBe("VALIDATION");
-    expect(row?.error?.message).toContain("MCP");
+    // The host protocol's wire schema rejects the malformed ref before anything connects.
+    expect(row?.error?.code).toBe("INVALID_PARAMS");
+    expect(row?.error?.message).toMatch(/mcp/i);
   }, 30_000);
 
   it("runs a program-defined tool loop through the real child process", async () => {
@@ -458,10 +477,10 @@ describe("agent() through the full run path", () => {
     provider.respondWith("the looked-up answer is 42", { in: 6, out: 4 });
     const runId = await f.run(
       "tool-user",
-      `import { agent, output } from "@boardwalk-labs/workflow";
+      `import { agent } from "@boardwalk-labs/workflow";
        const table = { answer: "42" };
-       output(
-         await agent("look up the answer", {
+       export default async function run() {
+         return await agent("look up the answer", {
            model: "test-model",
            tools: [
              {
@@ -471,8 +490,8 @@ describe("agent() through the full run path", () => {
                execute: async (input) => table[input.key] ?? "missing",
              },
            ],
-         }),
-       );`,
+         });
+       }`,
     );
 
     const row = f.store.getRun(runId);
@@ -487,8 +506,10 @@ describe("agent() through the full run path", () => {
 
   it("memory auto-persists across runs with NO declaration anywhere", async () => {
     const f = fixture();
-    const program = `import { agent, output } from "@boardwalk-labs/workflow";
-       output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));`;
+    const program = `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("take notes", { model: "test-model", memory: "mem/notes" });
+       }`;
 
     // Run 1: the model writes a memory file through the scoped tool.
     provider.queueResponses({
@@ -527,8 +548,10 @@ describe("agent() through the full run path", () => {
     const f = bedrockFixture("aws-secret-not-leaked-123");
     const runId = await f.run(
       "bedrock-agent",
-      `import { agent, output } from "@boardwalk-labs/workflow";
-       output(await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" }));`,
+      `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" });
+       }`,
     );
 
     const row = f.store.getRun(runId);
@@ -559,8 +582,10 @@ describe("agent() through the full run path", () => {
     const f = bedrockFixture(canary);
     const runId = await f.run(
       "bedrock-redact",
-      `import { agent, output } from "@boardwalk-labs/workflow";
-       output(await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" }));`,
+      `import { agent } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return await agent("summarize", { model: "anthropic.claude-sonnet-4-5-v1:0", provider: "bedrock" });
+       }`,
     );
 
     expect(f.store.getRun(runId)?.status).toBe("completed");

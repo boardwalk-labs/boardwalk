@@ -17,6 +17,7 @@ import {
   pause,
   statusesOf,
   waitForStatus,
+  descriptor,
 } from "./harness.js";
 
 afterEach(disposeEngines);
@@ -27,11 +28,13 @@ describe("conformance: engine restart while a run sleeps", () => {
 
     const first = createEngine({ dataDir });
     first.engine.deployWorkflow({
+      descriptor: descriptor({ slug: "long-sleeper", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "long-sleeper", triggers: [{ kind: "manual" }] };
-        await sleep(3_000);
-        output("slept");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          await sleep(3_000);
+          return ("slept");
+        }
       `,
     });
     const run = first.engine.startRun("long-sleeper");

@@ -181,12 +181,26 @@ DROP INDEX runs_wake_at;
 ALTER TABLE runs DROP COLUMN wake_at;
 `;
 
+// v5 — the workflow-format redesign (run(input, context) + workflow.jsonc). Two additions:
+//   - \`workflows.version\`: a sequential deploy counter (1, 2, 3, …) bumped only when a redeploy
+//     actually CHANGES the workflow (manifest/program/config) — the boot re-sync of an unchanged
+//     package must not churn it. Backs \`context.workflowVersion\`.
+//   - \`runs.actor\`: who/what created the run (the SDK's actor union as JSON), recorded by the
+//     creating surface — the scheduler knows the cron rule, the webhook route knows its source,
+//     workflows.call knows its parent — so \`context.actor\` is exact, not reconstructed. NULL on
+//     rows from older engines; the supervisor falls back to a derived actor for those.
+const V5_SQL = `
+ALTER TABLE workflows ADD COLUMN version INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE runs ADD COLUMN actor TEXT;
+`;
+
 /** Every migration the engine knows, ascending. Append-only — never edit a shipped entry. */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, sql: V1_SQL },
   { version: 2, sql: V2_SQL },
   { version: 3, sql: V3_SQL },
   { version: 4, sql: V4_SQL },
+  { version: 5, sql: V5_SQL },
 ];
 
 /**

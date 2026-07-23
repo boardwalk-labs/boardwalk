@@ -10,7 +10,7 @@
 //   - restart-on-crash: child death without a done/failed report restarts the run from the
 //     top, bounded by maxRestarts, then `failed` with code CRASHED
 //   - cancellation: cooperative SIGTERM, then SIGKILL after a grace window
-//   - budgets terminate: max_duration_seconds is a supervisor deadline spanning restarts
+//   - budgets terminate: max_compute_seconds is a supervisor deadline spanning restarts
 //   - crash-safe: every transition is persisted before/with its event; a recovery sweep on
 //     boot re-dispatches whatever a dead engine left behind
 //
@@ -30,6 +30,7 @@ import {
   type RunEvent,
   type WorkflowManifest,
 } from "@boardwalk-labs/workflow";
+import type { Actor, ContextData, UsageSnapshot } from "@boardwalk-labs/workflow/runtime";
 // Why from the store: the SDK defines RunStatus but doesn't re-export it from its root yet;
 // the store derives the identical union from RunEvent and re-exports it.
 import type { RunStatus } from "../store/store.js";
@@ -89,8 +90,8 @@ export interface SupervisorOptions {
 }
 
 type SpawnResult =
-  | { kind: "done"; output: unknown; outputDeclared: boolean }
-  | { kind: "failed"; error: IpcErrorShape; output: unknown; outputDeclared: boolean }
+  | { kind: "done"; output: unknown }
+  | { kind: "failed"; error: IpcErrorShape }
   | { kind: "crashed" }
   | { kind: "cancelled" }
   | { kind: "budget" };
@@ -116,6 +117,9 @@ interface ActiveRun {
   childWaits: number;
   /** Monotonic gate counter — the informational `seq` recorded on human_input_requests rows. */
   gateSeq: number;
+  /** When the CURRENT segment's process started (clock ms), for the live usage snapshot —
+   *  null between segments. */
+  segmentStartedAt: number | null;
   envelope: { turn: number; seq: number };
 }
 
@@ -204,6 +208,7 @@ export class RunSupervisor {
       inputWaiters: new Map(),
       childWaits: 0,
       gateSeq: 0,
+      segmentStartedAt: null,
       envelope: this.resumeEnvelope(runId),
     };
     entry.promise = this.execute(run, entry)
@@ -361,7 +366,7 @@ export class RunSupervisor {
     this.setStatus(run.id, entry, "pending");
 
     let firstStartedAt = run.startedAt;
-    // Cumulative ON-CPU time across segments (the max_duration_seconds basis). Seeded from the row so
+    // Cumulative ON-CPU time across segments (the max_compute_seconds basis). Seeded from the row so
     // a resume / engine-restart continues the tally instead of granting a fresh compute budget.
     let activeMs = run.activeMs;
     // Hydrate persistent dirs only into a NEVER-started workspace: a crash-restart (and an
@@ -381,31 +386,17 @@ export class RunSupervisor {
       this.stampAndStore(run.id, entry.envelope, { kind: "run_status", status: "running" });
       firstStartedAt = startedAt;
 
-      // Two budget caps: max_duration_seconds is ACTIVE COMPUTE (suspended idle
-      // never burns it) — applied as remaining-compute from this segment's start; deadline_seconds is
-      // WALL-CLOCK from the original start (idle counts). The binding deadline is the sooner of the
-      // two, and which one fires drives the failure message.
+      // One time-based cap: max_compute_seconds is ACTIVE COMPUTE (suspended idle never burns
+      // it) — applied as remaining-compute from this segment's start. There is deliberately no
+      // wall-clock deadline (`deadline_seconds` was deleted with the format redesign).
       const maxComputeMs =
-        manifest.budget?.max_duration_seconds !== undefined
-          ? manifest.budget.max_duration_seconds * 1000
-          : null;
-      const deadlineMs =
-        manifest.budget?.deadline_seconds !== undefined
-          ? manifest.budget.deadline_seconds * 1000
+        manifest.budget?.max_compute_seconds !== undefined
+          ? manifest.budget.max_compute_seconds * 1000
           : null;
       const segmentStart = this.clock.now();
-      let deadline: number | null = null;
-      let budgetMessage = durationBudgetMessage(manifest);
-      if (maxComputeMs !== null) {
-        deadline = segmentStart + Math.max(0, maxComputeMs - activeMs);
-      }
-      if (deadlineMs !== null) {
-        const wallDeadline = startedAt + deadlineMs;
-        if (deadline === null || wallDeadline < deadline) {
-          deadline = wallDeadline;
-          budgetMessage = deadlineBudgetMessage(manifest);
-        }
-      }
+      const deadline =
+        maxComputeMs !== null ? segmentStart + Math.max(0, maxComputeMs - activeMs) : null;
+      const budgetMessage = computeBudgetMessage(manifest);
 
       const result = await this.spawnOnce(run, entry, workflow, dirs, deadline, budgetMessage);
       // Accrue this segment's ON-CPU time (captured by spawnOnce at the settle-determining event,
@@ -439,26 +430,22 @@ export class RunSupervisor {
 
       switch (result.kind) {
         case "done": {
-          if (result.outputDeclared) {
+          // The return IS the output; a void return (null) is not an author-declared output,
+          // so it gets no `output` activity event — the row still records null.
+          if (result.output !== null) {
             this.stampAndStore(run.id, entry.envelope, { kind: "output", value: result.output });
           }
           // A completion racing a cancel request coerces to cancelled — `cancelling` must
           // never land on `completed` (the output event above is still preserved).
           if (entry.cancelRequested) return this.finishRun(run.id, entry, "cancelled", {});
-          return this.finishRun(run.id, entry, "completed", {
-            output: result.outputDeclared ? result.output : null,
-          });
+          return this.finishRun(run.id, entry, "completed", { output: result.output });
         }
         case "failed": {
-          // A verdict output() before the throw is emitted (before the failed status) and kept
-          // on the row — same as the completed path, so failed runs aren't silently output-less.
-          if (result.outputDeclared) {
-            this.stampAndStore(run.id, entry.envelope, { kind: "output", value: result.output });
-          }
-          return this.finishRun(run.id, entry, "failed", {
-            error: result.error,
-            ...(result.outputDeclared ? { output: result.output } : {}),
-          });
+          // A failure racing a cancel request coerces to cancelled: the cooperative-cancel
+          // path unwinds the program with a CANCELLED throw, and that throw must not record
+          // the run as "failed" — the person asked for a cancel and got one.
+          if (entry.cancelRequested) return this.finishRun(run.id, entry, "cancelled", {});
+          return this.finishRun(run.id, entry, "failed", { error: result.error });
         }
         case "cancelled":
           return this.finishRun(run.id, entry, "cancelled", {});
@@ -466,7 +453,7 @@ export class RunSupervisor {
           return this.finishRun(run.id, entry, "failed", {
             error: {
               code: "BUDGET_EXCEEDED",
-              message: entry.budgetReason ?? durationBudgetMessage(manifest),
+              message: entry.budgetReason ?? computeBudgetMessage(manifest),
             },
           });
         case "crashed": {
@@ -501,10 +488,12 @@ export class RunSupervisor {
       // Capture this segment's duration at the FIRST settle-determining event (idempotent), so a
       // test clock advanced after the settle can't inflate the tally.
       const segStart = this.clock.now();
+      entry.segmentStartedAt = segStart;
       let activeMarked = false;
       const markActive = (): void => {
         if (activeMarked) return;
         activeMarked = true;
+        entry.segmentStartedAt = null;
         entry.lastSegmentActiveMs = Math.max(0, this.clock.now() - segStart);
       };
       const settle = (result: SpawnResult): void => {
@@ -633,15 +622,10 @@ export class RunSupervisor {
             // race against the program's natural completion. The kill is an optimization to stop work
             // early; correctness lives here.
             if (entry.budgetReason !== null) settle({ kind: "budget" });
-            else settle({ kind: "done", output: msg.output, outputDeclared: msg.outputDeclared });
+            else settle({ kind: "done", output: msg.output });
             break;
           case "failed":
-            settle({
-              kind: "failed",
-              error: msg.error,
-              output: msg.output,
-              outputDeclared: msg.outputDeclared,
-            });
+            settle({ kind: "failed", error: msg.error });
             break;
         }
       });
@@ -664,8 +648,7 @@ export class RunSupervisor {
         programDir: this.packageDirFor(workflow.id),
         skillsDir: this.skillsDirFor(workflow.id),
         input: run.input,
-        config: workflow.config,
-        manifest: workflow.manifest,
+        context: this.buildContext(run.id, workflow, dirs),
       };
       if (child.connected) child.send(init);
     });
@@ -765,6 +748,8 @@ export class RunSupervisor {
         const a = mcpTokenArgsSchema.parse(args);
         return await this.resolveMcpToken(a.serverUrl, a.invalidateToken);
       }
+      case "usage":
+        return this.usageSnapshot(run.id, entry, workflow.manifest);
       case "write_artifact": {
         const a = writeArtifactArgsSchema.parse(args);
         if (a.name.includes("/") || a.name.includes("\\") || a.name.includes("..")) {
@@ -882,15 +867,107 @@ export class RunSupervisor {
     // the canonical default key requires a JSON tree anyway.
     const jsonInput = input === undefined ? null : asJsonValue(input, "workflows.call input");
     const key = idempotencyKey ?? defaultIdempotencyKey(parentRunId, slug, jsonInput);
+    const parent = this.store.getRun(parentRunId);
+    const parentWorkflowId = parent?.workflowId ?? "unknown";
     const { run, created } = this.store.createRun({
       workflowId: target.id,
+      // The two-axis rule: `manual` is the TRANSPORT (a direct invocation); the workflow
+      // actor is the INITIATOR. `user_id` carries the synthetic `workflow:<id>` principal.
       triggerKind: "manual",
+      actor: {
+        type: "workflow",
+        parent_run_id: parentRunId,
+        parent_workflow_id: parentWorkflowId,
+        user_id: `workflow:${parentWorkflowId}`,
+      },
       input: jsonInput,
       parentRunId,
       idempotencyKey: key,
     });
     if (created) this.emitQueued(run.id);
     return run;
+  }
+
+  // --------------------------------------------------------------------------
+  // Context + usage (the run's read-only metadata and live budget snapshot)
+  // --------------------------------------------------------------------------
+
+  /**
+   * The context DATA for `run(input, context)` — built fresh per spawned segment so `attempt`
+   * counts crash-restarts honestly. This engine has no orgs, versions beyond the deploy
+   * counter, or environments: `orgId` is the literal `"local"` and `environment` is null.
+   */
+  private buildContext(runId: string, workflow: WorkflowRow, dirs: RunDirs): ContextData {
+    const run = this.mustGetRun(runId);
+    const actor = run.actor ?? this.fallbackActor(run);
+    // `trigger.kind` is the transport; `source` names the trigger-specific origin where the
+    // actor carries one (the cron rule, the webhook path). `manual` has no source.
+    const source =
+      actor.type === "cron" ? actor.rule : actor.type === "webhook" ? actor.source : undefined;
+    return {
+      runId: run.id,
+      workflowId: workflow.id,
+      workflowVersion: workflow.version,
+      orgId: "local",
+      environment: null,
+      actor,
+      // 1-based crash-restart-from-top count (engine restarts don't consume the crash budget,
+      // so they don't bump this either — same restart-from-top semantics, same tally).
+      attempt: run.restarts + 1,
+      trigger: {
+        kind: run.triggerKind,
+        firedAt: run.createdAt,
+        ...(source !== undefined ? { source } : {}),
+      },
+      workspaceDir: dirs.workspaceDir,
+    };
+  }
+
+  /** Actor for a pre-v5 run row (no stored actor). Derived, and honest about its limits. */
+  private fallbackActor(run: RunRow): Actor {
+    if (run.triggerKind === "cron") return { type: "cron", rule: "cron" };
+    if (run.triggerKind === "webhook") return { type: "webhook", source: "webhook" };
+    if (run.parentRunId !== null) {
+      const parent = this.store.getRun(run.parentRunId);
+      const parentWorkflowId = parent?.workflowId ?? "unknown";
+      return {
+        type: "workflow",
+        parent_run_id: run.parentRunId,
+        parent_workflow_id: parentWorkflowId,
+        user_id: `workflow:${parentWorkflowId}`,
+      };
+    }
+    return { type: "user", user_id: "local" };
+  }
+
+  /**
+   * The live budget snapshot behind `usage.get()`: spent so far per dimension, with the
+   * manifest's caps (`null` = uncapped). Compute spent includes the CURRENT segment's
+   * in-flight time — a self-governing loop polls this mid-run.
+   */
+  private usageSnapshot(
+    runId: string,
+    entry: ActiveRun,
+    manifest: WorkflowManifest,
+  ): UsageSnapshot {
+    const run = this.mustGetRun(runId);
+    const totals = this.store.getRunUsage(runId);
+    const budget = manifest.budget;
+    const liveSegmentMs =
+      entry.segmentStartedAt !== null ? Math.max(0, this.clock.now() - entry.segmentStartedAt) : 0;
+    const dimension = (spent: number, cap: number | undefined) => ({
+      spent,
+      cap: cap ?? null,
+      remaining: cap !== undefined ? cap - spent : null,
+    });
+    return {
+      usd: dimension(totals.usdMicros / 1_000_000, budget?.max_usd),
+      tokens: dimension(totals.tokensIn + totals.tokensOut, budget?.max_tokens),
+      compute_seconds: dimension(
+        (run.activeMs + liveSegmentMs) / 1000,
+        budget?.max_compute_seconds,
+      ),
+    };
   }
 
   /**
@@ -1082,12 +1159,7 @@ export class RunSupervisor {
   }
 }
 
-function durationBudgetMessage(manifest: WorkflowManifest): string {
-  const seconds = manifest.budget?.max_duration_seconds;
-  return `Run exceeded budget.max_duration_seconds (${String(seconds)}s of active compute) and was terminated.`;
-}
-
-function deadlineBudgetMessage(manifest: WorkflowManifest): string {
-  const seconds = manifest.budget?.deadline_seconds;
-  return `Run exceeded budget.deadline_seconds (${String(seconds)}s wall-clock) and was terminated.`;
+function computeBudgetMessage(manifest: WorkflowManifest): string {
+  const seconds = manifest.budget?.max_compute_seconds;
+  return `Run exceeded budget.max_compute_seconds (${String(seconds)}s of active compute) and was terminated.`;
 }

@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// The WorkflowHost installed in the run process.
+// The engine's local capability implementations — the `HostCapabilities` seam the run
+// process's protocol server (host_server.ts) dispatches onto.
 //
 // Split of responsibilities (SPEC §2.3): anything that only needs the local process happens
-// here (sleep — hold-and-pay is literally just holding this process; phase markers); anything
-// that touches engine state (secrets, durable child runs, artifacts) is brokered to the
-// supervisor over IPC. agent() runs its loop in THIS process too — program-defined tools and
-// MCP connections must execute where the program lives (the trusted layer).
+// here (sleep — hold-and-pay is literally just holding this process; shell — the trusted
+// program layer runs commands where it lives; phase markers); anything that touches engine
+// state (secrets, durable child runs, artifacts, usage totals) is brokered to the supervisor
+// over IPC. agent() runs its loop in THIS process too — program-defined tools and MCP
+// connections must execute where the program lives.
+//
+// Capabilities this single-node engine genuinely cannot provide FAIL CLOSED with a clear
+// message naming the gap (`workflows.schedule`, `computer.*`, `auth.*`, human-input
+// timeouts) — never a silent stub.
 
 import { z } from "zod";
 import type {
@@ -14,10 +20,11 @@ import type {
   HumanInputOptions,
   HumanInputResult,
   PhaseOptions,
+  ShellOptions,
   SleepArg,
   TokenUsage,
 } from "@boardwalk-labs/workflow";
-import type { WorkflowHost } from "@boardwalk-labs/workflow/runtime";
+import { usageSnapshotSchema, type ShellResult } from "@boardwalk-labs/workflow/runtime";
 import type { ArtifactBody, ArtifactRef, CallOptions } from "@boardwalk-labs/workflow";
 import type { ChatMessage } from "../agent/conversation.js";
 import {
@@ -41,6 +48,7 @@ import type {
   WebSearchResult,
 } from "../agent/tools.js";
 import { EngineError, isEngineErrorCode } from "../errors.js";
+import type { CapabilityCallResult, HostCapabilities } from "./host_server.js";
 import {
   callWorkflowReplySchema,
   humanInputReplySchema,
@@ -52,6 +60,7 @@ import {
   type HostMethod,
   type RunEventBody,
 } from "./ipc.js";
+import { shellExec } from "./shell_exec.js";
 
 /** Cap on a webfetch response body (the local backend's default); the model can ask for less. */
 const DEFAULT_FETCH_MAX_BYTES = 256 * 1024;
@@ -76,12 +85,22 @@ export function errorFromIpc(shape: IpcErrorShape): Error {
 }
 
 export interface ChildHost {
-  host: WorkflowHost;
+  capabilities: HostCapabilities;
   /** The run process's one redactor — the child entry scrubs failure reports with it too. */
   redactor: Redactor;
 }
 
-export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): ChildHost {
+export interface ChildHostOptions {
+  /** Aborts when the run is being cancelled: local holds (sleep) unwind with CANCELLED so a
+   *  cooperative program exits inside the grace window instead of waiting for SIGKILL. */
+  cancelSignal?: AbortSignal | undefined;
+}
+
+export function createChildHost(
+  io: ChildHostIo,
+  toolContext: ToolSetContext,
+  opts: ChildHostOptions = {},
+): ChildHost {
   let phaseCount = 0;
   // One counter per run → a stable, run-unique id for each agent() call. The author's optional
   // name rides alongside as the display label; concurrent agents stay distinguishable either way.
@@ -195,7 +214,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
   // broker to the supervisor (artifacts integrate with the store; search uses the engine's
   // configured provider, fail-closed if none). The `diagnostics` built-in is NOT here: LSP is
   // engine-native (the per-run LspService spawns a language server in the workspace), carried on
-  // `capabilities.lspService`, not this host seam.
+  // `toolContext.lspService`, not this host seam.
   const toolHost: ToolHost = {
     fetchUrl: (url, fetchOpts): Promise<FetchResult> => localFetch(url, fetchOpts?.maxBytes),
     httpRequest: (req, httpOpts): Promise<FetchResult> => localHttpRequest(req, httpOpts?.maxBytes),
@@ -225,7 +244,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       return readArtifactResultSchema.parse(await io.request("read_artifact", { name })).content;
     },
   };
-  const capabilitiesWithHost: ToolSetContext = { ...capabilities, host: toolHost };
+  const toolContextWithHost: ToolSetContext = { ...toolContext, host: toolHost };
 
   // One LeafIo per agent() leaf, reusable for sub-agents: forkLeaf mints a fresh run-unique
   // identity over the SAME sinks (this process's one redactor + the supervisor's cursor authority),
@@ -249,7 +268,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
         }),
       ),
     redactor,
-    capabilities: capabilitiesWithHost,
+    capabilities: toolContextWithHost,
     forkLeaf: ({ name }) => {
       agentCount += 1;
       const childIdentity: AgentIdentity = {
@@ -260,17 +279,17 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
     },
   });
 
-  const host: WorkflowHost = {
-    setPhase(name: string, opts: PhaseOptions | undefined): void {
+  const capabilities: HostCapabilities = {
+    phase(name: string, opts2: PhaseOptions | undefined): void {
       phaseCount += 1;
-      io.emit({ kind: "phase", name, id: opts?.id ?? `phase-${String(phaseCount)}` });
+      io.emit({ kind: "phase", name, id: opts2?.id ?? `phase-${String(phaseCount)}` });
     },
 
-    async agent(prompt: string, opts: AgentOptions | undefined): Promise<unknown> {
+    async agent(prompt: string, agentOpts: AgentOptions | undefined): Promise<unknown> {
       agentCount += 1;
       const identity: AgentIdentity = {
         agentId: `agent-${String(agentCount)}`,
-        ...(opts?.name !== undefined ? { agentName: opts.name } : {}),
+        ...(agentOpts?.name !== undefined ? { agentName: agentOpts.name } : {}),
       };
       // A tool-level human_input gate parks the leaf (LeafParked carries the transcript
       // checkpoint). The transcript lives in THIS process's memory, so the hold is local: wait
@@ -282,7 +301,7 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       let resume: LeafResume | undefined;
       for (;;) {
         try {
-          return await runAgentLeaf(prompt, opts, makeLeafIo(identity), resume);
+          return await runAgentLeaf(prompt, agentOpts, makeLeafIo(identity), resume);
         } catch (err) {
           if (!(err instanceof LeafParked) || err.checkpoint === undefined) throw err;
           answers[err.request.toolCallId] = await requestHumanInput({
@@ -295,54 +314,95 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       }
     },
 
-    async humanInput(opts: HumanInputOptions): Promise<HumanInputResult> {
+    async humanInput(gateOpts: HumanInputOptions): Promise<HumanInputResult> {
+      if (gateOpts.timeout !== undefined || gateOpts.onTimeout !== undefined) {
+        // Timed gates need an engine-side expiry sweep this engine doesn't run. Failing closed
+        // beats a gate that silently never expires.
+        throw new EngineError(
+          "UNSUPPORTED",
+          "humanInput timeouts are not supported on this engine.",
+          "Drop `timeout`/`onTimeout`, or run this workflow on the hosted platform.",
+        );
+      }
       inputCount += 1;
-      const key = opts.key ?? `input-${String(inputCount)}`;
+      const key = gateOpts.key ?? `input-${String(inputCount)}`;
       // Holds until a person answers; the supervisor validated the response against the gate's
       // input spec before resolving, so the cast is the IPC boundary's contract, not a guess.
       const answer = await requestHumanInput({
         key,
-        prompt: opts.prompt,
-        inputSpec: opts.input,
-        ...(opts.assignees !== undefined ? { assignees: opts.assignees } : {}),
+        prompt: gateOpts.prompt,
+        inputSpec: gateOpts.input,
+        ...(gateOpts.assignees !== undefined ? { assignees: gateOpts.assignees } : {}),
       });
       return answer as HumanInputResult;
     },
 
-    async callWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
+    async callWorkflow(
+      slug: string,
+      input: unknown,
+      callOpts: CallOptions | undefined,
+    ): Promise<CapabilityCallResult> {
       // Durable child-wait: the call HOLDS until the child run is terminal. The child's run row
       // is the durable memo — a crash-restarted parent re-attaches via the idempotency key and,
-      // if the child already completed, gets its recorded output straight back.
+      // if the child already completed, gets its recorded output straight back. `outputSchema`
+      // is honestly null: this engine derives no I/O schemas, so the SDK passes JSON through.
       const reply = callWorkflowReplySchema.parse(
         await io.request("call_workflow", {
           slug,
           input,
-          ...(opts?.idempotencyKey !== undefined ? { idempotencyKey: opts.idempotencyKey } : {}),
+          ...(callOpts?.idempotencyKey !== undefined
+            ? { idempotencyKey: callOpts.idempotencyKey }
+            : {}),
         }),
       );
-      return reply.output;
+      return { output: reply.output, outputSchema: null };
     },
 
-    async runWorkflow(slug: string, input: unknown, opts: CallOptions | undefined) {
+    async runWorkflow(slug: string, input: unknown, callOpts: CallOptions | undefined) {
       const value = await io.request("run_workflow", {
         slug,
         input,
-        ...(opts?.idempotencyKey !== undefined ? { idempotencyKey: opts.idempotencyKey } : {}),
+        ...(callOpts?.idempotencyKey !== undefined
+          ? { idempotencyKey: callOpts.idempotencyKey }
+          : {}),
       });
       return runIdSchema.parse(value);
+    },
+
+    scheduleWorkflow(): Promise<string> {
+      // The engine's cron triggers are manifest-declared; there is no dynamic schedule store
+      // for a run to provision into. Fail closed rather than pretend a schedule exists.
+      return Promise.reject(
+        new EngineError(
+          "UNSUPPORTED",
+          "workflows.schedule is not supported on this engine (no dynamic schedule store).",
+          "Declare a cron trigger in the target workflow's workflow.jsonc, or run on the hosted platform.",
+        ),
+      );
     },
 
     async sleep(arg: SleepArg): Promise<void> {
       // Hold-in-process: this engine has no snapshot substrate, so a wait of any length holds
       // the process (locals survive trivially — nothing ever leaves memory). Chunked so a
-      // multi-week sleep({ until }) doesn't overflow setTimeout's ~24.8-day cap.
+      // multi-week sleep({ until }) doesn't overflow setTimeout's ~24.8-day cap. A cancel
+      // unwinds the hold immediately (CANCELLED) so the cooperative window is real.
       const durationMs = sleepMs(arg);
       if (durationMs <= 0) return;
+      const cancel = opts.cancelSignal;
       let remaining = durationMs;
       while (remaining > 0) {
+        if (cancel?.aborted === true) throw cancelledError();
         const slice = Math.min(remaining, MAX_TIMEOUT_MS);
-        await new Promise<void>((resolve) => {
-          setTimeout(resolve, slice);
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => {
+            cancel?.removeEventListener("abort", onAbort);
+            resolve();
+          }, slice);
+          const onAbort = (): void => {
+            clearTimeout(timer);
+            reject(cancelledError());
+          };
+          cancel?.addEventListener("abort", onAbort, { once: true });
         });
         remaining -= slice;
       }
@@ -369,12 +429,47 @@ export function createChildHost(io: ChildHostIo, capabilities: ToolSetContext): 
       });
       return artifactRefSchema.parse(value);
     },
+
+    shell(cmd: string, shellOpts: ShellOptions | undefined): Promise<ShellResult> {
+      // Local exec in the trusted program layer, workspace-rooted. Its output is the
+      // program's data — NOT redacted (the program legitimately holds secrets).
+      return shellExec(cmd, shellOpts, { workspaceDir: toolContext.workspaceDir });
+    },
+
+    idToken(): Promise<string> {
+      return Promise.reject(
+        new EngineError(
+          "UNSUPPORTED",
+          "auth.idToken is not supported on this engine (no OIDC issuer to assert a run identity).",
+          "Use a secret credential via secrets.get, or run on the hosted platform.",
+        ),
+      );
+    },
+
+    apiToken(): Promise<string> {
+      return Promise.reject(
+        new EngineError(
+          "UNSUPPORTED",
+          "auth.apiToken is not supported on this engine (no control-plane API to mint a bearer for).",
+          "Call this engine's local HTTP API directly, or run on the hosted platform.",
+        ),
+      );
+    },
+
+    async usage() {
+      // The supervisor is the budget authority; ask it for the live snapshot.
+      return usageSnapshotSchema.parse(await io.request("usage", {}));
+    },
   };
-  return { host, redactor };
+  return { capabilities, redactor };
 }
 
 /** setTimeout's max delay (2^31-1 ms ≈ 24.8 days); longer sleeps are chunked. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
+
+function cancelledError(): EngineError {
+  return new EngineError("CANCELLED", "the run was cancelled");
+}
 
 // Supervisor responses are validated like any other boundary input — the channel being ours
 // doesn't exempt it.

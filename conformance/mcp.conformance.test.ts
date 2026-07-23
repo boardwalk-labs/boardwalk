@@ -18,6 +18,7 @@ import {
   toolCallResponse,
   type FakeMcpServer,
   type FakeProvider,
+  descriptor,
 } from "./harness.js";
 
 let provider: FakeProvider;
@@ -46,19 +47,21 @@ async function mcpWithTool(
 
 function deployMcpUser(engine: ReturnType<typeof createEngine>["engine"], url: string): void {
   engine.deployWorkflow({
+    descriptor: descriptor({
+      slug: "mcp-user",
+      triggers: [{ kind: "manual" }],
+      permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
+    }),
     program: `
-      import { agent, output, secrets } from "@boardwalk-labs/workflow";
-      export const meta = {
-        slug: "mcp-user",
-        triggers: [{ kind: "manual" }],
-        permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
-      };
-      // Reading the secret teaches the run's redactor its value — the canary path.
-      await secrets.get("CANARY_TOKEN");
-      output(await agent("look it up", {
-        model: "test-model",
-        mcp: [{ name: "kb", transport: "http", url: ${JSON.stringify(url)} }],
-      }));
+      import { agent, secrets } from "@boardwalk-labs/workflow";
+      export default async function run(input, context) {
+        // Reading the secret teaches the run's redactor its value — the canary path.
+        await secrets.get("CANARY_TOKEN");
+        return (await agent("look it up", {
+          model: "test-model",
+          mcp: [{ name: "kb", transport: "http", url: ${JSON.stringify(url)} }],
+        }));
+      }
     `,
   });
 }

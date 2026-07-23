@@ -19,6 +19,7 @@ import {
   startFakeProvider,
   toolCallResponse,
   type FakeProvider,
+  descriptor,
 } from "./harness.js";
 
 let provider: FakeProvider;
@@ -41,21 +42,23 @@ describe("conformance: agent() capabilities", () => {
     );
     provider.respondWith("the looked-up answer", { in: 6, out: 4 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "tool-user", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "tool-user", triggers: [{ kind: "manual" }] };
-        const table = { answer: "tool-answer-9b1c" };
-        output(await agent("look it up", {
-          model: "test-model",
-          tools: [
-            {
-              name: "lookup",
-              description: "Look up a value by key",
-              inputSchema: { type: "object", properties: { key: { type: "string" } } },
-              execute: async (input) => table[input.key] ?? "missing",
-            },
-          ],
-        }));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          const table = { answer: "tool-answer-9b1c" };
+          return (await agent("look it up", {
+            model: "test-model",
+            tools: [
+              {
+                name: "lookup",
+                description: "Look up a value by key",
+                inputSchema: { type: "object", properties: { key: { type: "string" } } },
+                execute: async (input) => table[input.key] ?? "missing",
+              },
+            ],
+          }));
+        }
       `,
     });
 
@@ -88,10 +91,12 @@ describe("conformance: agent() capabilities", () => {
     provider.respondWith("child did the work", { in: 4, out: 3 }); // the child leaf's model call
     provider.respondWith("final: child did the work", { in: 2, out: 2 }); // the parent's follow-up
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "delegator", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "delegator", triggers: [{ kind: "manual" }] };
-        output(await agent("delegate the task", { model: "test-model" }));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          return (await agent("delegate the task", { model: "test-model" }));
+        }
       `,
     });
 
@@ -119,10 +124,12 @@ describe("conformance: agent() capabilities", () => {
   it("memory written by run 1 is in run 2's turn-start index — auto-persisted, no declarations", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "memory-keeper", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "memory-keeper", triggers: [{ kind: "manual" }] };
-        output(await agent("take notes", { model: "test-model", memory: "mem/notes" }));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          return (await agent("take notes", { model: "test-model", memory: "mem/notes" }));
+        }
       `,
     });
 
@@ -159,13 +166,15 @@ describe("conformance: agent() capabilities", () => {
       "utf8",
     );
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "skilled", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "skilled", triggers: [{ kind: "manual" }] };
-        output(await agent("inspect the boat", {
-          model: "test-model",
-          skills: ["review-checklist"],
-        }));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          return (await agent("inspect the boat", {
+            model: "test-model",
+            skills: ["review-checklist"],
+          }));
+        }
       `,
       skillsSourceDir: join(pkg, "skills"),
     });
@@ -195,13 +204,15 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     provider.respondWith("read the rules", { in: 1, out: 1 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "agents-md-auto", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         import { writeFileSync } from "node:fs";
-        export const meta = { slug: "agents-md-auto", triggers: [{ kind: "manual" }] };
-        // Plant AGENTS.md in the workspace (the run's cwd); a plain agent() must pick it up.
-        writeFileSync("AGENTS.md", "PROJECT-CONVENTION-83fa: prefer tabs over spaces.");
-        output(await agent("do the task"));
+        export default async function run(input, context) {
+          // Plant AGENTS.md in the workspace (the run's cwd); a plain agent() must pick it up.
+          writeFileSync("AGENTS.md", "PROJECT-CONVENTION-83fa: prefer tabs over spaces.");
+          return (await agent("do the task"));
+        }
       `,
     });
 
@@ -223,11 +234,13 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     provider.respondWith("read the bundled rules", { in: 1, out: 1 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "bundled-agents-md", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "bundled-agents-md", triggers: [{ kind: "manual" }] };
-        // A plain agent() with an EMPTY workspace must still pick up the bundled AGENTS.md.
-        output(await agent("do the task"));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          // A plain agent() with an EMPTY workspace must still pick up the bundled AGENTS.md.
+          return (await agent("do the task"));
+        }
       `,
       agentsMd: "BUNDLED-CONVENTION-1f7a: always run the linter before committing.",
     });
@@ -250,13 +263,15 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     provider.respondWith("read both", { in: 1, out: 1 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "both-agents-md", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         import { writeFileSync } from "node:fs";
-        export const meta = { slug: "both-agents-md", triggers: [{ kind: "manual" }] };
-        // The run writes a WORKSPACE AGENTS.md (e.g. simulating a freshly-cloned codebase).
-        writeFileSync("AGENTS.md", "WORKSPACE-RULE-c4d2: this repo uses 4-space indent.");
-        output(await agent("do the task"));
+        export default async function run(input, context) {
+          // The run writes a WORKSPACE AGENTS.md (e.g. simulating a freshly-cloned codebase).
+          writeFileSync("AGENTS.md", "WORKSPACE-RULE-c4d2: this repo uses 4-space indent.");
+          return (await agent("do the task"));
+        }
       `,
       agentsMd: "BUNDLED-RULE-9e0b: standing instruction for every run.",
     });
@@ -281,10 +296,12 @@ describe("conformance: agent() capabilities", () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     provider.respondWith("ok", { in: 1, out: 1 });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "no-agents-md", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "no-agents-md", triggers: [{ kind: "manual" }] };
-        output(await agent("do the task"));
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          return (await agent("do the task"));
+        }
       `,
     });
 
@@ -297,10 +314,12 @@ describe("conformance: agent() capabilities", () => {
   it("a malformed memory path fails the run loudly", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "memory-escape", triggers: [{ kind: "manual" }] }),
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "memory-escape", triggers: [{ kind: "manual" }] };
-        await agent("hi", { model: "test-model", memory: "../outside" });
+        export default async function run(input, context) {
+          await agent("hi", { model: "test-model", memory: "../outside" });
+        }
       `,
     });
     const done = await engine.waitForRun(engine.startRun("memory-escape").id);
@@ -312,10 +331,12 @@ describe("conformance: agent() capabilities", () => {
   it("an explicit unknown built-in name fails the run loudly", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "wants-builtin", triggers: [{ kind: "manual" }] }),
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "wants-builtin", triggers: [{ kind: "manual" }] };
-        await agent("search", { model: "test-model", builtins: ["definitely_not_a_tool"] });
+        export default async function run(input, context) {
+          await agent("search", { model: "test-model", builtins: ["definitely_not_a_tool"] });
+        }
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-builtin").id);
@@ -327,13 +348,15 @@ describe("conformance: agent() capabilities", () => {
   it("the default toolset is on: an agent with NO tools/builtins reads + runs in its workspace", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "default-tools", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         import { writeFileSync } from "node:fs";
-        export const meta = { slug: "default-tools", triggers: [{ kind: "manual" }] };
-        // Plant a file in the workspace (the run's cwd) the model will read via the built-in tool.
-        writeFileSync("note.txt", "workspace-content-7c2e");
-        output(await agent("read note.txt and tell me what it says"));
+        export default async function run(input, context) {
+          // Plant a file in the workspace (the run's cwd) the model will read via the built-in tool.
+          writeFileSync("note.txt", "workspace-content-7c2e");
+          return (await agent("read note.txt and tell me what it says"));
+        }
       `,
     });
     // Turn 1: the model uses the default-on \`read\` built-in; turn 2: it answers.
@@ -359,14 +382,16 @@ describe("conformance: agent() capabilities", () => {
     // parity promise intact: behavior never depends on a real language server being installed.
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "lsp-best-effort", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         import { readFileSync } from "node:fs";
-        export const meta = { slug: "lsp-best-effort", triggers: [{ kind: "manual" }] };
-        // The model writes a .ts file via the default-on \`write\` built-in, then the program
-        // confirms the file is on disk (the write must not fail or hang on absent diagnostics).
-        await agent("create the module");
-        output(readFileSync("mod.ts", "utf8"));
+        export default async function run(input, context) {
+          // The model writes a .ts file via the default-on \`write\` built-in, then the program
+          // confirms the file is on disk (the write must not fail or hang on absent diagnostics).
+          await agent("create the module");
+          return (readFileSync("mod.ts", "utf8"));
+        }
       `,
     });
     provider.queueResponses(
@@ -390,12 +415,14 @@ describe("conformance: agent() capabilities", () => {
   it('builtins: "read-only" allows read but the model cannot call write (it is not advertised)', async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "read-only-tools", triggers: [{ kind: "manual" }] }),
       program: `
-        import { agent, output } from "@boardwalk-labs/workflow";
+        import { agent } from "@boardwalk-labs/workflow";
         import { writeFileSync } from "node:fs";
-        export const meta = { slug: "read-only-tools", triggers: [{ kind: "manual" }] };
-        writeFileSync("data.txt", "read-only-payload-44a");
-        output(await agent("read data.txt", { builtins: "read-only" }));
+        export default async function run(input, context) {
+          writeFileSync("data.txt", "read-only-payload-44a");
+          return (await agent("read data.txt", { builtins: "read-only" }));
+        }
       `,
     });
     provider.queueResponses(
@@ -416,10 +443,12 @@ describe("conformance: agent() capabilities", () => {
   it("a skill that was never deployed fails the run loudly", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "wants-skill", triggers: [{ kind: "manual" }] }),
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "wants-skill", triggers: [{ kind: "manual" }] };
-        await agent("go", { model: "test-model", skills: ["nonexistent"] });
+        export default async function run(input, context) {
+          await agent("go", { model: "test-model", skills: ["nonexistent"] });
+        }
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-skill").id);
@@ -431,14 +460,16 @@ describe("conformance: agent() capabilities", () => {
   it("an MCP server that cannot resolve fails the run loudly (capability-presence rule)", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "wants-mcp", triggers: [{ kind: "manual" }] }),
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "wants-mcp", triggers: [{ kind: "manual" }] };
-        await agent("search", {
-          model: "test-model",
-          // Nothing listens here — the named server must resolve, never silently degrade.
-          mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
-        });
+        export default async function run(input, context) {
+          await agent("search", {
+            model: "test-model",
+            // Nothing listens here — the named server must resolve, never silently degrade.
+            mcp: [{ name: "gh", transport: "http", url: "http://127.0.0.1:9/mcp" }],
+          });
+        }
       `,
     });
     const done = await engine.waitForRun(engine.startRun("wants-mcp").id);
@@ -449,13 +480,15 @@ describe("conformance: agent() capabilities", () => {
   it("a malformed MCP server ref fails the run loudly before anything connects", async () => {
     const { engine } = createEngine({ inference: localInference(provider) });
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "bad-mcp", triggers: [{ kind: "manual" }] }),
       program: `
         import { agent } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "bad-mcp", triggers: [{ kind: "manual" }] };
-        await agent("search", {
-          model: "test-model",
-          mcp: [{ name: "gh", transport: "http", url: "not a url" }],
-        });
+        export default async function run(input, context) {
+          await agent("search", {
+            model: "test-model",
+            mcp: [{ name: "gh", transport: "http", url: "not a url" }],
+          });
+        }
       `,
     });
     const done = await engine.waitForRun(engine.startRun("bad-mcp").id);

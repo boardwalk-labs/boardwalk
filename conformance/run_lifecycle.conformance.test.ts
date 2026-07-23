@@ -10,6 +10,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import {
   createEngine,
+  descriptor,
   disposeEngines,
   expectMonotonicCursors,
   kindsOf,
@@ -18,16 +19,19 @@ import {
 
 afterEach(disposeEngines);
 
-const ECHO_PROGRAM = `
-import { input, output } from "@boardwalk-labs/workflow";
-export const meta = { slug: "echo", triggers: [{ kind: "manual" }] };
-output({ echoed: input });
-`;
+const ECHO = {
+  descriptor: descriptor({ slug: "echo", triggers: [{ kind: "manual" }] }),
+  program: `
+export default async function run(input) {
+  return { echoed: input };
+}
+`,
+};
 
 describe("conformance: run lifecycle", () => {
   it("a completed run emits queued→pending→running→output→completed with monotonic cursors", async () => {
     const { engine } = createEngine();
-    engine.deployWorkflow({ program: ECHO_PROGRAM });
+    engine.deployWorkflow(ECHO);
 
     const queued = engine.startRun("echo", { input: { n: 7 } });
     const done = await engine.waitForRun(queued.id);
@@ -48,7 +52,7 @@ describe("conformance: run lifecycle", () => {
 
   it("the declared output round-trips exactly (nested objects, arrays, null)", async () => {
     const { engine } = createEngine();
-    engine.deployWorkflow({ program: ECHO_PROGRAM });
+    engine.deployWorkflow(ECHO);
     const input = { n: 7, tags: ["a", "b"], nested: { ok: true, none: null } };
 
     const run = engine.startRun("echo", { input });
@@ -60,9 +64,11 @@ describe("conformance: run lifecycle", () => {
   it("a failing program lands on failed with the error in the terminal run_status event", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "boom", triggers: [{ kind: "manual" }] }),
       program: `
-        export const meta = { slug: "boom", triggers: [{ kind: "manual" }] };
-        throw new Error("conformance kaboom: the dataset is empty");
+        export default async function run() {
+          throw new Error("conformance kaboom: the dataset is empty");
+        }
       `,
     });
 
@@ -82,31 +88,28 @@ describe("conformance: run lifecycle", () => {
     }
   }, 20_000);
 
-  it("a verdict output() before a throw is preserved on the failed run (verdict-then-throw)", async () => {
+  it("a void run() completes with a null output and NO output event", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "void", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "verdict", triggers: [{ kind: "manual" }] };
-        output({ healthy: false, reason: "deadline passed" });
-        throw new Error("target was not healthy in time");
+        export default async function run() {
+          // side effects only; nothing returned
+        }
       `,
     });
 
-    const run = engine.startRun("verdict");
+    const run = engine.startRun("void");
     const done = await engine.waitForRun(run.id);
 
-    expect(done.status).toBe("failed");
-    expect(done.output).toEqual({ healthy: false, reason: "deadline passed" });
-    expect(done.error?.message).toContain("not healthy");
-
-    // The output event lands BEFORE the failed status (the verdict reads before the failure).
+    expect(done.status).toBe("completed");
+    expect(done.output).toBeNull();
+    // A void return is not an author-declared output — no output event on the stream.
     expect(kindsOf(engine, done.id)).toEqual([
       "run_status", // queued
       "run_status", // pending
       "run_status", // running
-      "output",
-      "run_status", // failed
+      "run_status", // completed
     ]);
   }, 20_000);
 });

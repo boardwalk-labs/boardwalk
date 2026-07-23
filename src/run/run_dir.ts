@@ -8,11 +8,12 @@
 //     workspace/                                 — the run's cwd (isolated per run)
 //     artifacts/                                 — artifacts.write targets
 //
-// Why the symlink: the SDK's host state is a module-level singleton, so the program and the
-// child entry (engine code) must load the SAME module instance for installHost() to be visible
-// to the program's hooks. The program bundle imports `@boardwalk-labs/workflow` bare; this symlink
-// makes that specifier resolve — and Node's default symlink realpathing collapses it onto the
-// engine's own copy, giving one shared instance with no bundler in the engine at all.
+// Why the symlink: the SDK's active-host state is a module-level singleton, so the program and
+// the child entry (engine code) must load the SAME module instance for the loader's connected
+// protocol client to be the one the program's capability imports use. The program bundle imports
+// `@boardwalk-labs/workflow` bare; this symlink makes that specifier resolve — and Node's default
+// symlink realpathing collapses it onto the engine's own copy, giving one shared instance with no
+// bundler in the engine at all.
 
 import {
   cpSync,

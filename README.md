@@ -1,9 +1,10 @@
 # boardwalk
 
-**The control plane for agent workflows, open source.** A Boardwalk workflow is a plain
-TypeScript program: schedule it, call LLM agents from it, sleep durably, compose workflows out of
-workflows. Any trigger, any model, on infrastructure you own. Audit everything, self-host it,
-leave anytime.
+**The control plane for agent workflows, open source.** A Boardwalk workflow is a typed
+TypeScript function — `export default async function run(input, context)` — plus a small
+`workflow.jsonc` descriptor: schedule it, call LLM agents from it, sleep durably, compose
+workflows out of workflows. Any trigger, any model, on infrastructure you own. Audit everything,
+self-host it, leave anytime.
 
 This repo is the **engine** that runs those workflows: the open-source, single-node core with
 cron scheduling, durable run semantics, SQLite run history, and a local run log, on hardware you
@@ -49,19 +50,29 @@ Then open `http://localhost:8080` for the run log, or hit the JSON API
 
 ### Deploying a workflow
 
-Build your workflow to a single file and drop it in the engine's **workflows directory** — it's
-deployed on boot (re-synced every boot; idempotent by manifest slug):
+A workflow deploys as a **package directory** in the engine's **workflows directory** — deployed
+on boot (re-synced every boot; idempotent by slug, and an unchanged package doesn't bump the
+workflow's version):
+
+```
+data/workflows/my-routine/
+  workflow.jsonc     # the descriptor: slug, triggers, permissions, budget
+  index.mjs          # the built entry, default-exporting run() (what `boardwalk build` emits)
+  skills/            # optional — per-agent skills, deployed wholesale
+  AGENTS.md          # optional — standing instructions every agent() reads
+```
 
 ```sh
-npx @boardwalk-labs/cli build index.ts --out ./data/workflows/my-routine.mjs
+npx @boardwalk-labs/cli build --out ./data/workflows/my-routine/
 docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 ```
 
 The default workflows directory is `<data-dir>/workflows` (`/data/workflows` in Docker); override
-it with `BOARDWALK_WORKFLOWS_DIR`. Each `.mjs`/`.js` file is one workflow — single-file, with
-`@boardwalk-labs/workflow` left external (exactly what `boardwalk build` emits). From there the
-manifest's triggers take over: cron fires on schedule, `POST /api/workflows/<slug>/runs` triggers
-a manual run, and webhooks land on `/hooks/<workflow>/<trigger-index>`.
+it with `BOARDWALK_WORKFLOWS_DIR`. The entry is single-file built JavaScript with
+`@boardwalk-labs/workflow` left external; the descriptor names another entry file via `entry` if
+you don't use `index.mjs`. From there the descriptor's triggers take over: cron fires on schedule,
+`POST /api/workflows/<slug>/runs` triggers a manual run, and webhooks land on
+`/hooks/<workflow>/<trigger-index>`.
 
 ### Configuration
 
@@ -89,10 +100,17 @@ The same engine as a library — construct, run, close, all in your own process:
 import { Engine } from "@boardwalk-labs/engine";
 
 const engine = new Engine({ dataDir: "./boardwalk-data" });
-const run = await engine.runOnce({ program: bundledProgramSource });
+const run = await engine.runOnce({
+  descriptor: `{ "slug": "hello", "triggers": [{ "kind": "manual" }] }`,
+  program: `export default async function run(input) { return { got: input }; }`,
+  input: { n: 7 },
+});
 console.log(run.status, run.output);
 engine.close();
 ```
+
+`engine.deployWorkflowDir(dir)` deploys an on-disk package directory (the same shape the
+workflows directory holds).
 
 For OAuth-protected MCP servers an `agent()` call connects to, `engine.authorizeMcpServer(url, { onAuthorizationUrl })` performs the one-time interactive grant; after that, runs use (and silently refresh) the stored token headlessly — see [SPEC.md §2.3](./SPEC.md).
 

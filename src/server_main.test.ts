@@ -4,7 +4,7 @@
 // loadServerConfig (the trust boundary for operator input), the .env resolution rules, and
 // one boot-and-shutdown smoke of startServer on an ephemeral port + throwaway data dir.
 
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -327,17 +327,30 @@ describe("startServer", () => {
     await expect(fetch(`http://127.0.0.1:${running.port}/api/workflows`)).rejects.toThrow();
   });
 
-  it("deploys built workflows from the workflows dir on boot (self-host deploy)", async () => {
+  it("deploys built workflow PACKAGES from the workflows dir on boot (self-host deploy)", async () => {
     const dataDir = makeTempDir("bw-server-dir-");
     const workflowsDir = makeTempDir("bw-flows-");
+    // A package = a directory with a workflow.jsonc descriptor next to the built entry.
+    mkdirSync(join(workflowsDir, "from-dir"));
     writeFileSync(
-      join(workflowsDir, "from-dir.mjs"),
-      `import { output } from "@boardwalk-labs/workflow";
-       export const meta = { slug: "from-dir", triggers: [{ kind: "manual" }] };
-       output({ deployed: true });`,
+      join(workflowsDir, "from-dir", "workflow.jsonc"),
+      `{
+        // JSONC is fine in a descriptor
+        "slug": "from-dir",
+        "triggers": [{ "kind": "manual" }],
+      }`,
+    );
+    writeFileSync(
+      join(workflowsDir, "from-dir", "index.mjs"),
+      `export default async function run() { return { deployed: true }; }`,
     );
     // A non-workflow file in the dir must be skipped, not crash the boot.
     writeFileSync(join(workflowsDir, "notes.txt"), "ignore me");
+    // A flat built program is the REMOVED module-body deploy shape — skipped with a pointer.
+    writeFileSync(join(workflowsDir, "legacy-flat.mjs"), `export default async function run() {}`);
+    // A directory without a descriptor is skipped with the error named, never fatal.
+    mkdirSync(join(workflowsDir, "no-descriptor"));
+    writeFileSync(join(workflowsDir, "no-descriptor", "index.mjs"), "export {};");
 
     const lines: string[] = [];
     const running = await startServer(
@@ -355,6 +368,12 @@ describe("startServer", () => {
 
     expect(lines.some((l) => l.includes('deployed "from-dir"'))).toBe(true);
     expect(lines.some((l) => l.includes("workflows deployed: 1"))).toBe(true);
+    expect(lines.some((l) => l.includes("legacy-flat.mjs") && l.includes("workflow.jsonc"))).toBe(
+      true,
+    );
+    expect(lines.some((l) => l.includes("no-descriptor/") && l.includes("workflow.jsonc"))).toBe(
+      true,
+    );
 
     const res = await fetch(`http://127.0.0.1:${running.port}/api/workflows`);
     const body: unknown = await res.json();

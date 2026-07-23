@@ -19,6 +19,7 @@ import {
   startFakeProvider,
   toolCallResponse,
   type FakeProvider,
+  descriptor,
 } from "./harness.js";
 
 let provider: FakeProvider;
@@ -57,25 +58,27 @@ async function runRichWorkflow(engine: Engine): Promise<{ runId: string; events:
   provider.queueResponses(toolCallResponse([{ id: "p1", name: "probe", argsJson: "{}" }]));
   provider.respondWith("final answer", { in: 2, out: 2 });
   engine.deployWorkflow({
+    descriptor: descriptor({ slug: "rich", triggers: [{ kind: "manual" }] }),
     program: `
-      import { phase, agent, output } from "@boardwalk-labs/workflow";
-      export const meta = { slug: "rich", triggers: [{ kind: "manual" }] };
-      phase("gather");
-      console.log("stdout line");
-      console.error("stderr line");
-      const reply = await agent("do the thing", {
-        model: "test-model",
-        tools: [
-          {
-            name: "probe",
-            description: "Probe something",
-            inputSchema: { type: "object", properties: {} },
-            execute: async () => "probe-result",
-          },
-        ],
-      });
-      phase("publish");
-      output({ reply });
+      import { phase, agent } from "@boardwalk-labs/workflow";
+      export default async function run(input, context) {
+        phase("gather");
+        console.log("stdout line");
+        console.error("stderr line");
+        const reply = await agent("do the thing", {
+          model: "test-model",
+          tools: [
+            {
+              name: "probe",
+              description: "Probe something",
+              inputSchema: { type: "object", properties: {} },
+              execute: async () => "probe-result",
+            },
+          ],
+        });
+        phase("publish");
+        return ({ reply });
+      }
     `,
   });
   const done = await engine.waitForRun(engine.startRun("rich").id);

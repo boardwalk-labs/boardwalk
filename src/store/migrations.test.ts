@@ -143,7 +143,10 @@ describe("migrate", () => {
         .run(),
     ).toThrow(/FOREIGN KEY/);
     // Partial unique index: same (parent, key) twice is rejected.
-    db.prepare("INSERT INTO workflows VALUES ('w', 'wf', '{}', '', '{}', 0, 0)").run();
+    db.prepare(
+      `INSERT INTO workflows (id, slug, manifest, program, config, created_at, updated_at)
+       VALUES ('w', 'wf', '{}', '', '{}', 0, 0)`,
+    ).run();
     const insertRun = db.prepare(
       `INSERT INTO runs (id, workflow_id, status, trigger_kind, parent_run_id, idempotency_key, created_at)
        VALUES (?, 'w', 'queued', 'manual', ?, ?, 0)`,

@@ -144,14 +144,16 @@ async function completeAuthorization(url: string): Promise<void> {
 
 function deployProgram(engine: Engine): void {
   engine.deployWorkflow({
+    descriptor: JSON.stringify({ slug: "mcp-user", triggers: [{ kind: "manual" }] }),
     program: `
-      import { agent, output } from "@boardwalk-labs/workflow";
-      export const meta = { slug: "mcp-user", triggers: [{ kind: "manual" }] };
-      output(await agent("greet the world", {
-        model: "test-model",
-        provider: "local",
-        mcp: [{ name: "locked", transport: "http", url: ${JSON.stringify(mcp.url)} }],
-      }));
+      import { agent } from "@boardwalk-labs/workflow";
+      export default async function run() {
+        return await agent("greet the world", {
+          model: "test-model",
+          provider: "local",
+          mcp: [{ name: "locked", transport: "http", url: ${JSON.stringify(mcp.url)} }],
+        });
+      }
     `,
   });
 }

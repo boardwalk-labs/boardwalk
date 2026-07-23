@@ -9,25 +9,36 @@
 // re-reaching the same key gets the stored answer instead of re-asking.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createEngine, disposeEngines, pause, statusesOf, waitForStatus } from "./harness.js";
+import {
+  createEngine,
+  disposeEngines,
+  pause,
+  statusesOf,
+  waitForStatus,
+  descriptor,
+} from "./harness.js";
 
 afterEach(disposeEngines);
 
-const APPROVAL_PROGRAM = `
-  import { humanInput, output } from "@boardwalk-labs/workflow";
-  export const meta = { slug: "approval", triggers: [{ kind: "manual" }] };
-  const decision = await humanInput({
-    key: "approve",
-    prompt: "Approve sending?",
-    input: { kind: "choice", options: ["Approve", "Reject"] },
-  });
-  output({ decision });
-`;
+const APPROVAL = {
+  descriptor: descriptor({ slug: "approval", triggers: [{ kind: "manual" }] }),
+  program: `
+  import { humanInput } from "@boardwalk-labs/workflow";
+  export default async function run() {
+    const decision = await humanInput({
+      key: "approve",
+      prompt: "Approve sending?",
+      input: { kind: "choice", options: ["Approve", "Reject"] },
+    });
+    return { decision };
+  }
+`,
+};
 
 describe("conformance: human-in-the-loop", () => {
   it("holds on humanInput() until answered, then continues with the validated response", async () => {
     const { engine } = createEngine();
-    engine.deployWorkflow({ program: APPROVAL_PROGRAM });
+    engine.deployWorkflow(APPROVAL);
 
     const run = engine.startRun("approval");
     await waitForStatus(engine, run.id, "awaiting_input");
@@ -57,7 +68,7 @@ describe("conformance: human-in-the-loop", () => {
 
   it("validates the response against the input spec and rejects an out-of-options answer", async () => {
     const { engine } = createEngine();
-    engine.deployWorkflow({ program: APPROVAL_PROGRAM });
+    engine.deployWorkflow(APPROVAL);
     const run = engine.startRun("approval");
     await waitForStatus(engine, run.id, "awaiting_input");
 
@@ -77,7 +88,7 @@ describe("conformance: human-in-the-loop", () => {
 
   it("a second response loses: the first answer wins, the duplicate is a conflict", async () => {
     const { engine } = createEngine();
-    engine.deployWorkflow({ program: APPROVAL_PROGRAM });
+    engine.deployWorkflow(APPROVAL);
     const run = engine.startRun("approval");
     await waitForStatus(engine, run.id, "awaiting_input");
 
@@ -92,13 +103,15 @@ describe("conformance: human-in-the-loop", () => {
   it("console output around a gate appears exactly once — the process never re-runs", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "logged", triggers: [{ kind: "manual" }] }),
       program: `
-        import { humanInput, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "logged", triggers: [{ kind: "manual" }] };
-        console.log("BEFORE-GATE");
-        const note = await humanInput({ key: "note", prompt: "Note", input: { kind: "text" } });
-        console.log("AFTER-GATE");
-        output(note);
+        import { humanInput } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          console.log("BEFORE-GATE");
+          const note = await humanInput({ key: "note", prompt: "Note", input: { kind: "text" } });
+          console.log("AFTER-GATE");
+          return (note);
+        }
       `,
     });
 
@@ -121,11 +134,13 @@ describe("conformance: human-in-the-loop", () => {
   it("free text via a text gate round-trips", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "note", triggers: [{ kind: "manual" }] }),
       program: `
-        import { humanInput, output } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "note", triggers: [{ kind: "manual" }] };
-        const note = await humanInput({ key: "note", prompt: "Add a note", input: { kind: "text" } });
-        output(note);
+        import { humanInput } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          const note = await humanInput({ key: "note", prompt: "Add a note", input: { kind: "text" } });
+          return (note);
+        }
       `,
     });
     const run = engine.startRun("note");

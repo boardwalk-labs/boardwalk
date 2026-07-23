@@ -106,6 +106,11 @@ export function createEngine(opts: CreateEngineOpts = {}): EngineHandle {
   return { engine, dataDir };
 }
 
+/** A `workflow.jsonc` descriptor for a conformance workflow — plain JSON is valid JSONC. */
+export function descriptor(meta: Record<string, unknown>): string {
+  return JSON.stringify(meta);
+}
+
 // ----------------------------------------------------------------------------
 // The fake OpenAI-compatible inference provider
 // ----------------------------------------------------------------------------

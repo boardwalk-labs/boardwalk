@@ -4,6 +4,9 @@
 // (dist/run/child.js) and execute real program bundles, because the semantics under test —
 // restart-from-the-top, idempotent re-attach, hold-and-pay sleep, cancellation, budgets —
 // live in the parent⇄child interaction, not in any unit.
+//
+// Programs are the FUNCTION MODEL: a built module default-exporting `run(input, context)`;
+// the return value is the run's output.
 
 import { existsSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -66,6 +69,7 @@ function fixture(opts?: { env?: Record<string, string>; maxRestarts?: number }):
     const { run } = store.createRun({
       workflowId: workflow.id,
       triggerKind: "manual",
+      actor: { type: "user", user_id: "local" },
       ...(input !== undefined ? { input } : {}),
     });
     supervisor.emitQueued(run.id);
@@ -83,8 +87,9 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "echo",
-      `import { input, output } from "@boardwalk-labs/workflow";
-       output({ got: input });`,
+      `export default async function run(input) {
+         return { got: input };
+       }`,
     );
     const runId = f.startRun("echo", { n: 42 });
     const row = await f.supervisor.supervise(runId);
@@ -112,8 +117,10 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "talkative",
-      `         console.log("hello from the program");
-         console.error("warning line");`,
+      `export default async function run() {
+         console.log("hello from the program");
+         console.error("warning line");
+       }`,
     );
     const runId = f.startRun("talkative");
     await f.supervisor.supervise(runId);
@@ -128,32 +135,27 @@ describe("RunSupervisor", () => {
     expect(logs.some((e) => e.stream === "stderr" && e.text.includes("warning line"))).toBe(true);
   }, 20_000);
 
-  it("never calls a legacy default export — warns and runs only the module body", async () => {
+  it("a module-body program (no run default export) fails with the actionable error", async () => {
     const f = fixture();
     f.deploy(
-      "legacy-wrapper",
-      `import { output } from "@boardwalk-labs/workflow";
-       output("from the module body");
-       export default async function run() { output("from the wrapper"); }`,
+      "legacy-module-body",
+      `console.log("the removed module-body shape");
+       export const meta = { slug: "legacy-module-body", triggers: [{ kind: "manual" }] };`,
     );
-    const row = await f.supervisor.supervise(f.startRun("legacy-wrapper"));
-    expect(row.status).toBe("completed");
-    expect(row.output).toBe("from the module body"); // the wrapper never executed
-    const warned = f.store
-      .listEvents(row.id)
-      .map((e) => e.event)
-      .some(
-        (e) =>
-          e.kind === "program_output" &&
-          e.stream === "stderr" &&
-          e.text.includes("the module body IS the program"),
-      );
-    expect(warned).toBe(true);
+    const row = await f.supervisor.supervise(f.startRun("legacy-module-body"));
+    expect(row.status).toBe("failed");
+    expect(row.error?.code).toBe("VALIDATION");
+    expect(row.error?.message).toContain("no `run` function default export");
   }, 20_000);
 
   it("fails the run with the program's error", async () => {
     const f = fixture();
-    f.deploy("boom", `throw new Error("kaput: the dataset is empty");`);
+    f.deploy(
+      "boom",
+      `export default async function run() {
+         throw new Error("kaput: the dataset is empty");
+       }`,
+    );
     const runId = f.startRun("boom");
     const row = await f.supervisor.supervise(runId);
 
@@ -175,9 +177,10 @@ describe("RunSupervisor", () => {
     f.deploy(
       "flaky",
       `import { existsSync, writeFileSync } from "node:fs";
-       import { output } from "@boardwalk-labs/workflow";
-                if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
-         output("recovered");`,
+       export default async function run() {
+         if (!existsSync("marker")) { writeFileSync("marker", "1"); process.exit(7); }
+         return "recovered";
+       }`,
     );
     const runId = f.startRun("flaky");
     const row = await f.supervisor.supervise(runId);
@@ -194,9 +197,24 @@ describe("RunSupervisor", () => {
     expect(statuses).toEqual(["queued", "pending", "running", "pending", "running", "completed"]);
   }, 20_000);
 
+  it("context.attempt counts crash-restarts (1-based)", async () => {
+    const f = fixture();
+    f.deploy(
+      "attempt-probe",
+      `import { existsSync, writeFileSync } from "node:fs";
+       export default async function run(input, context) {
+         if (!existsSync("crashed")) { writeFileSync("crashed", "1"); process.exit(7); }
+         return { attempt: context.attempt };
+       }`,
+    );
+    const row = await f.supervisor.supervise(f.startRun("attempt-probe"));
+    expect(row.status).toBe("completed");
+    expect(row.output).toEqual({ attempt: 2 });
+  }, 20_000);
+
   it("exhausts the restart budget and fails with CRASHED", async () => {
     const f = fixture({ maxRestarts: 1 });
-    f.deploy("always-crashes", `process.exit(3);`);
+    f.deploy("always-crashes", `export default async function run() { process.exit(3); }`);
     const runId = f.startRun("always-crashes");
     const row = await f.supervisor.supervise(runId);
 
@@ -209,8 +227,10 @@ describe("RunSupervisor", () => {
     const f = fixture({ env: { GH_TOKEN: "tok-123" } });
     f.deploy(
       "uses-secret",
-      `import { secrets, output } from "@boardwalk-labs/workflow";
-       output((await secrets.get("GH_TOKEN")).length);`,
+      `import { secrets } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return (await secrets.get("GH_TOKEN")).length;
+       }`,
       { permissions: { secrets: [{ name: "GH_TOKEN" }] } },
     );
     const ok = await f.supervisor.supervise(f.startRun("uses-secret"));
@@ -220,7 +240,9 @@ describe("RunSupervisor", () => {
     f.deploy(
       "undeclared-secret",
       `import { secrets } from "@boardwalk-labs/workflow";
-       await secrets.get("GH_TOKEN");`,
+       export default async function run() {
+         await secrets.get("GH_TOKEN");
+       }`,
     );
     const undeclared = await f.supervisor.supervise(f.startRun("undeclared-secret"));
     expect(undeclared.status).toBe("failed");
@@ -229,7 +251,9 @@ describe("RunSupervisor", () => {
     f.deploy(
       "missing-secret",
       `import { secrets } from "@boardwalk-labs/workflow";
-       await secrets.get("ABSENT");`,
+       export default async function run() {
+         await secrets.get("ABSENT");
+       }`,
       { permissions: { secrets: [{ name: "ABSENT" }] } },
     );
     const missing = await f.supervisor.supervise(f.startRun("missing-secret"));
@@ -242,8 +266,10 @@ describe("RunSupervisor", () => {
     f.deploy(
       "leaky-error",
       `import { secrets } from "@boardwalk-labs/workflow";
-       const token = await secrets.get("API_TOKEN");
-       throw new Error("request to upstream failed with token=" + token);`,
+       export default async function run() {
+         const token = await secrets.get("API_TOKEN");
+         throw new Error("request to upstream failed with token=" + token);
+       }`,
       { permissions: { secrets: [{ name: "API_TOKEN" }] } },
     );
     const row = await f.supervisor.supervise(f.startRun("leaky-error"));
@@ -258,20 +284,23 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "child-counter",
-      `import { input, output } from "@boardwalk-labs/workflow";
-       import { appendFileSync } from "node:fs";
-                appendFileSync(input.countFile, "x");
-         output("child-result");`,
+      `import { appendFileSync } from "node:fs";
+       export default async function run(input) {
+         appendFileSync(input.countFile, "x");
+         return "child-result";
+       }`,
     );
     // Parent: call the child, then crash once AFTER the call returned; the restarted pass
     // must re-attach (created=false) instead of executing the child a second time.
     f.deploy(
       "parent",
-      `import { input, output, workflows } from "@boardwalk-labs/workflow";
+      `import { workflows } from "@boardwalk-labs/workflow";
        import { existsSync, writeFileSync } from "node:fs";
-                const result = await workflows.call("child-counter", { countFile: input.countFile });
+       export default async function run(input) {
+         const result = await workflows.call("child-counter", { countFile: input.countFile });
          if (!existsSync("crashed-once")) { writeFileSync("crashed-once", "1"); process.exit(9); }
-         output({ childSaid: result });`,
+         return { childSaid: result };
+       }`,
     );
     const countFile = join(f.dataDir, "count.txt");
     const runId = f.startRun("parent", { countFile });
@@ -283,17 +312,21 @@ describe("RunSupervisor", () => {
     const childRuns = f.store.listRuns().filter((r) => r.parentRunId === runId);
     expect(childRuns).toHaveLength(1);
     expect(childRuns[0]?.status).toBe("completed");
+    // The child's actor is the synthetic workflow principal, never a human.
+    expect(childRuns[0]?.actor?.type).toBe("workflow");
   }, 30_000);
 
   it("sleep holds the process (hold-and-pay), locals survive", async () => {
     const f = fixture();
     f.deploy(
       "sleeper",
-      `import { output, sleep } from "@boardwalk-labs/workflow";
-                const local = "kept-" + Math.floor(1000 * Math.random());
+      `import { sleep } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         const local = "kept-" + Math.floor(1000 * Math.random());
          const before = Date.now();
          await sleep(400);
-         output({ heldMs: Date.now() - before, local: local.startsWith("kept-") });`,
+         return { heldMs: Date.now() - before, local: local.startsWith("kept-") };
+       }`,
     );
     const row = await f.supervisor.supervise(f.startRun("sleeper"));
     expect(row.status).toBe("completed");
@@ -308,7 +341,9 @@ describe("RunSupervisor", () => {
     f.deploy(
       "long-sleeper",
       `import { sleep } from "@boardwalk-labs/workflow";
-       await sleep(5_000);`,
+       export default async function run() {
+         await sleep(60_000);
+       }`,
     );
     const runId = f.startRun("long-sleeper");
     const done = f.supervisor.supervise(runId);
@@ -327,29 +362,116 @@ describe("RunSupervisor", () => {
     expect(statuses).toEqual(["queued", "pending", "running", "cancelling", "cancelled"]);
   }, 20_000);
 
-  it("terminates on budget.max_duration_seconds with BUDGET_EXCEEDED", async () => {
+  it("terminates on budget.max_compute_seconds with BUDGET_EXCEEDED", async () => {
     const f = fixture();
     f.deploy(
       "overruns",
       `import { sleep } from "@boardwalk-labs/workflow";
-       await sleep(5_000);`,
-      { budget: { max_duration_seconds: 1 } },
+       export default async function run() {
+         await sleep(60_000);
+       }`,
+      { budget: { max_compute_seconds: 1 } },
     );
     const row = await f.supervisor.supervise(f.startRun("overruns"));
     expect(row.status).toBe("failed");
     expect(row.error?.code).toBe("BUDGET_EXCEEDED");
-    expect(row.error?.message).toContain("max_duration_seconds");
+    expect(row.error?.message).toContain("max_compute_seconds");
   }, 20_000);
+
+  it("usage.get() reports live spend and the manifest caps", async () => {
+    const f = fixture();
+    f.deploy(
+      "self-governing",
+      `import { usage } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         const snapshot = await usage.get();
+         return {
+           usdCap: snapshot.usd.cap,
+           tokensCap: snapshot.tokens.cap,
+           computeCap: snapshot.compute_seconds.cap,
+           computeSpentIsLive: snapshot.compute_seconds.spent >= 0,
+         };
+       }`,
+      { budget: { max_usd: 5, max_tokens: 100_000 } },
+    );
+    const row = await f.supervisor.supervise(f.startRun("self-governing"));
+    expect(row.status).toBe("completed");
+    expect(row.output).toEqual({
+      usdCap: 5,
+      tokensCap: 100_000,
+      computeCap: null,
+      computeSpentIsLive: true,
+    });
+  }, 20_000);
+
+  it("shell() resolves the completed command — exit code included, never thrown", async () => {
+    const f = fixture();
+    f.deploy(
+      "sheller",
+      `import { shell } from "@boardwalk-labs/workflow";
+       import { writeFileSync } from "node:fs";
+       export default async function run() {
+         writeFileSync("hello.txt", "written by the program");
+         const ok = await shell("cat hello.txt");
+         const bad = await shell("exit 3");
+         return { out: ok.stdout, okCode: ok.exitCode, badCode: bad.exitCode };
+       }`,
+    );
+    const row = await f.supervisor.supervise(f.startRun("sheller"));
+    expect(row.status).toBe("completed");
+    expect(row.output).toEqual({ out: "written by the program", okCode: 0, badCode: 3 });
+  }, 20_000);
+
+  it("unsupported capabilities fail CLOSED with actionable messages", async () => {
+    const f = fixture();
+    f.deploy(
+      "wants-idtoken",
+      `import { auth } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         await auth.idToken("sts.amazonaws.com");
+       }`,
+    );
+    const idToken = await f.supervisor.supervise(f.startRun("wants-idtoken"));
+    expect(idToken.status).toBe("failed");
+    expect(idToken.error?.code).toBe("UNSUPPORTED");
+    expect(idToken.error?.message).toContain("auth.idToken");
+
+    f.deploy(
+      "wants-browser",
+      `import { computer } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         await computer.openBrowser();
+       }`,
+    );
+    const browser = await f.supervisor.supervise(f.startRun("wants-browser"));
+    expect(browser.status).toBe("failed");
+    expect(browser.error?.code).toBe("UNSUPPORTED");
+    expect(browser.error?.message).toContain("no browser backend");
+
+    f.deploy(
+      "wants-schedule",
+      `import { workflows } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         await workflows.schedule("wants-schedule", {}, { cron: "0 9 * * *" });
+       }`,
+    );
+    const schedule = await f.supervisor.supervise(f.startRun("wants-schedule"));
+    expect(schedule.status).toBe("failed");
+    expect(schedule.error?.code).toBe("UNSUPPORTED");
+    expect(schedule.error?.message).toContain("workflows.schedule");
+  }, 30_000);
 
   it("emits phase markers and writes artifacts through the host bridge", async () => {
     const f = fixture();
     f.deploy(
       "artifacty",
-      `import { phase, artifacts, output } from "@boardwalk-labs/workflow";
-                phase("collect");
+      `import { phase, artifacts } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         phase("collect");
          const ref = await artifacts.write("report.txt", "text/plain", "line one");
          phase("publish", { id: "publish-phase" });
-         output({ url: ref.url, name: ref.name });`,
+         return { url: ref.url, name: ref.name };
+       }`,
     );
     const runId = f.startRun("artifacty");
     const row = await f.supervisor.supervise(runId);
@@ -374,11 +496,7 @@ describe("RunSupervisor", () => {
 
   it("recovers engine-orphaned runs on boot: active runs restart, cancelling finalizes", async () => {
     const f = fixture();
-    f.deploy(
-      "echo",
-      `import { output } from "@boardwalk-labs/workflow";
-       output("ran");`,
-    );
+    f.deploy("echo", `export default async function run() { return "ran"; }`);
     // Simulate a dead engine: rows left behind in non-terminal states, no processes anywhere.
     const orphanRunning = f.startRun("echo");
     const orphanCancelling = f.startRun("echo");
@@ -399,14 +517,18 @@ describe("RunSupervisor", () => {
     const f = fixture();
     f.deploy(
       "slow-kid",
-      `import { sleep, output } from "@boardwalk-labs/workflow";
-       await sleep(150);
-       output("kid-done");`,
+      `import { sleep } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         await sleep(150);
+         return "kid-done";
+       }`,
     );
     f.deploy(
       "waiter",
-      `import { output, workflows } from "@boardwalk-labs/workflow";
-       output({ said: await workflows.call("slow-kid", {}) });`,
+      `import { workflows } from "@boardwalk-labs/workflow";
+       export default async function run() {
+         return { said: await workflows.call("slow-kid", {}) };
+       }`,
     );
 
     // Simulate an engine that died mid-hold: the row says waiting_for_child, but no process
@@ -428,8 +550,9 @@ describe("RunSupervisor", () => {
     const f = fixture({ env: { API_KEY: "secret-value-42" } });
     f.deploy(
       "env-user",
-      `import { output } from "@boardwalk-labs/workflow";
-       output(process.env.MY_KEY ?? "unset");`,
+      `export default async function run() {
+         return process.env.MY_KEY ?? "unset";
+       }`,
       {
         permissions: { secrets: [{ name: "API_KEY" }] },
         env: { MY_KEY: "${{ secrets.API_KEY }}", PLAIN: "plain-value" },
@@ -453,16 +576,19 @@ describe("RunSupervisor", () => {
     const workspaceOf = (dataDir: string, runId: string): string =>
       realpathSync(join(dataDir, "runs", runId, "workspace"));
 
-    it("runs author code with cwd === the run's workspace dir", async () => {
+    it("runs author code with cwd === the run's workspace dir (and context.workspaceDir)", async () => {
       const f = fixture();
       f.deploy(
         "cwd-probe",
-        `import { output } from "@boardwalk-labs/workflow";
-         output({ cwd: process.cwd() });`,
+        `export default async function run(input, context) {
+           return { cwd: process.cwd(), fromContext: context.workspaceDir };
+         }`,
       );
       const runId = f.startRun("cwd-probe", {});
       const row = await f.supervisor.supervise(runId);
-      expect((row.output as { cwd: string }).cwd).toBe(workspaceOf(f.dataDir, runId));
+      const out = z.object({ cwd: z.string(), fromContext: z.string() }).parse(row.output);
+      expect(out.cwd).toBe(workspaceOf(f.dataDir, runId));
+      expect(realpathSync(out.fromContext)).toBe(workspaceOf(f.dataDir, runId));
     }, 30_000);
 
     it("lands a program's RELATIVE write in the workspace, not wherever the engine was started", async () => {
@@ -470,7 +596,9 @@ describe("RunSupervisor", () => {
       f.deploy(
         "rel-write",
         `import { writeFileSync } from "node:fs";
-         writeFileSync("landed-here.txt", "x");`,
+         export default async function run() {
+           writeFileSync("landed-here.txt", "x");
+         }`,
       );
       const runId = f.startRun("rel-write", {});
       await f.supervisor.supervise(runId);
@@ -479,7 +607,11 @@ describe("RunSupervisor", () => {
 
     it("keeps the program bundle OUT of the workspace (I2)", async () => {
       const f = fixture();
-      f.deploy("iso", `import { writeFileSync } from "node:fs"; writeFileSync("only.txt", "x");`);
+      f.deploy(
+        "iso",
+        `import { writeFileSync } from "node:fs";
+         export default async function run() { writeFileSync("only.txt", "x"); }`,
+      );
       const runId = f.startRun("iso", {});
       await f.supervisor.supervise(runId);
       // The engine lays the program down as a SIBLING of the workspace (runs/<id>/program), so a
@@ -489,14 +621,15 @@ describe("RunSupervisor", () => {
   });
 
   describe("workspace.persist", () => {
-    // Reads state/value.txt if present, writes input.write to it, outputs what it read.
+    // Reads state/value.txt if present, writes input.write to it, returns what it read.
     const COUNTER_PROGRAM = `
       import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-      import { input, output } from "@boardwalk-labs/workflow";
-      const previous = existsSync("state/value.txt") ? readFileSync("state/value.txt", "utf8") : null;
-      mkdirSync("state", { recursive: true });
-      writeFileSync("state/value.txt", input.write);
-      output({ read: previous });
+      export default async function run(input) {
+        const previous = existsSync("state/value.txt") ? readFileSync("state/value.txt", "utf8") : null;
+        mkdirSync("state", { recursive: true });
+        writeFileSync("state/value.txt", input.write);
+        return { read: previous };
+      }
     `;
 
     it("declared dirs round-trip across runs (hydrate at start, persist at success)", async () => {
@@ -529,9 +662,11 @@ describe("RunSupervisor", () => {
       f.deploy(
         "stateful",
         `import { mkdirSync, writeFileSync } from "node:fs";
-         mkdirSync("state", { recursive: true });
-         writeFileSync("state/value.txt", "written-before-throwing");
-         throw new Error("dies after writing");`,
+         export default async function run() {
+           mkdirSync("state", { recursive: true });
+           writeFileSync("state/value.txt", "written-before-throwing");
+           throw new Error("dies after writing");
+         }`,
         { workspace: { persist: ["state"] } },
       );
       const failed = await f.supervisor.supervise(f.startRun("stateful", {}));
@@ -552,10 +687,11 @@ describe("RunSupervisor", () => {
       f.deploy(
         "whole-workspace",
         `import { existsSync, readFileSync, writeFileSync } from "node:fs";
-         import { output } from "@boardwalk-labs/workflow";
-         const seen = existsSync("anywhere.txt") ? readFileSync("anywhere.txt", "utf8") : null;
-         writeFileSync("anywhere.txt", "wrote-once");
-         output({ seen });`,
+         export default async function run() {
+           const seen = existsSync("anywhere.txt") ? readFileSync("anywhere.txt", "utf8") : null;
+           writeFileSync("anywhere.txt", "wrote-once");
+           return { seen };
+         }`,
         { workspace: { persist: true } },
       );
       const first = await f.supervisor.supervise(f.startRun("whole-workspace"));
@@ -575,14 +711,15 @@ describe("RunSupervisor", () => {
       f.deploy(
         "resumer",
         `import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-         import { output } from "@boardwalk-labs/workflow";
-         if (!existsSync("crashed-once")) {
-           mkdirSync("state", { recursive: true });
-           writeFileSync("state/value.txt", "B");
-           writeFileSync("crashed-once", "1");
-           process.exit(5);
-         }
-         output({ resumedWith: readFileSync("state/value.txt", "utf8") });`,
+         export default async function run() {
+           if (!existsSync("crashed-once")) {
+             mkdirSync("state", { recursive: true });
+             writeFileSync("state/value.txt", "B");
+             writeFileSync("crashed-once", "1");
+             process.exit(5);
+           }
+           return { resumedWith: readFileSync("state/value.txt", "utf8") };
+         }`,
         { workspace: { persist: ["state"] } },
       );
       const row = await f.supervisor.supervise(f.startRun("resumer", {}));

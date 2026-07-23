@@ -194,9 +194,9 @@ describe("Scheduler dispatch + concurrency", () => {
     expect(f.dispatched).toHaveLength(2); // released after terminal
   });
 
-  it("serial_by_key gates like serial within the workflow (static key)", () => {
+  it("serial with a key gates like serial within the workflow (creation-time key resolution is hosted-only)", () => {
     const f = fixture();
-    f.deploy("keyed", { concurrency: { mode: "serial_by_key", key: "tenant-a" } });
+    f.deploy("keyed", { concurrency: { mode: "serial", key: "tenant-${input.tenantId}" } });
     f.scheduler.tick();
     f.clock.advance(2 * MINUTE);
     f.scheduler.tick();

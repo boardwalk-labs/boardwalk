@@ -3,6 +3,49 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+### Changed (BREAKING — the workflow-format redesign: `run(input, context)` + `workflow.jsonc`)
+
+The engine's local-execution surface moves to the function model, in lockstep with
+`@boardwalk-labs/workflow@0.3.0-alpha.5` (dist-tag `next`). No back-compat — the module-body
+format is gone wholesale (there are no real users; the redesign is a clean break):
+
+- **A workflow is a typed function plus a descriptor.** The entry default-exports
+  `run(input, context)`; the return value is the run's output (`void` ⇒ null). The manifest is a
+  hand-written `workflow.jsonc` (JSONC; `workflow.json` accepted, both present is an error) —
+  validated with the SDK's `parseWorkflowDescriptor`. The old model (`export const meta` extracted
+  from the program, ambient `input`, `output()`) is deleted; a module-body program now fails with
+  an actionable VALIDATION error.
+- **The run process serves the SDK's program↔host protocol** (JSON-RPC 2.0 over a Unix socket,
+  `BOARDWALK_HOST_SOCK`) over the engine's local capability implementations, and drives the
+  loader flow (`bootstrap` → import entry → `run(input, context)` → `report_return`) — the exact
+  wire every other Boardwalk engine speaks. Inline `agent()` tools round-trip `tool_invoke`;
+  cancellation pushes the `cancel` notification so `context.signal` aborts (and a cancel-induced
+  program failure lands `cancelled`, never `failed`).
+- **Deploy surfaces**: `deployWorkflow({ program, descriptor })`, the new
+  `deployWorkflowDir(dir)`, and a workflows DIRECTORY layout — each package is a subdirectory
+  carrying `workflow.jsonc` + the built entry (`index.mjs`, or the descriptor's `entry`) +
+  optional `skills/` and `AGENTS.md`. Flat `.mjs` files in the workflows dir are skipped with a
+  pointer at the new layout.
+- **New capabilities**: `shell()` (local exec in the run's workspace; non-zero exits resolve;
+  kill-by-timeout ⇒ `128 + signum`) and `usage.get()` (live `{spent, cap, remaining}` per budget
+  dimension from the supervisor, the budget authority). Capabilities this engine cannot provide
+  fail CLOSED with `UNSUPPORTED` and an actionable message: `workflows.schedule`, `computer.*`,
+  `auth.idToken`/`auth.apiToken`, and `humanInput` timeouts.
+- **Context**: `run`'s second parameter carries `runId`, `workflowId`, `workflowVersion` (a new
+  per-slug deploy counter, bumped only when a redeploy actually changes the workflow), `orgId:
+"local"`, `environment: null`, `actor` (recorded at run creation — the scheduler stamps the cron
+  rule, the webhook route its source, `workflows.call` the synthetic `workflow:<id>` principal),
+  `attempt` (crash-restarts + 1), `trigger`, `workspaceDir`, and `signal`.
+- **Budget**: `max_duration_seconds` → `max_compute_seconds`; the wall-clock `deadline_seconds`
+  cap is deleted. `serial_by_key` is replaced by `serial` with a runtime-interpolated `key`, which
+  this engine serializes globally (fail-safe; creation-time key resolution is hosted-only). A cron
+  trigger's static `input` now reaches the scheduled run.
+- **Schema v5**: `workflows.version` + `runs.actor` columns.
+
+The `agent()` leaf, adapters, and the whole `@boardwalk-labs/engine/core` surface are unchanged.
+
 ## 0.2.12
 
 ### Added (the agent's reasoning/thinking now surfaces as a live trace)

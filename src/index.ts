@@ -24,3 +24,6 @@ export type {
 export { EngineError, type EngineErrorCode } from "./errors.js";
 export { isTerminal } from "./run/supervisor.js";
 export { createEngineServer } from "./server/server.js";
+// The built-package loader behind Engine.deployWorkflowDir, for embedders that keep workflow
+// packages on disk and want the parsed pieces without deploying.
+export { loadWorkflowPackage, type LoadedWorkflowPackage } from "./workflow_package.js";

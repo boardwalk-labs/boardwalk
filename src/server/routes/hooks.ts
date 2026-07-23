@@ -49,7 +49,12 @@ export async function handleWebhook(
 
   const input =
     rawBody.length === 0 ? null : parseJsonBody(rawBody, jsonValueSchema, "webhook payload");
-  const run = ctx.engine.startRun(slug, { input, triggerKind: "webhook" });
+  const run = ctx.engine.startRun(slug, {
+    input,
+    triggerKind: "webhook",
+    // The route knows the delivery's exact origin — record it for `context.actor`.
+    actor: { type: "webhook", source: `${slug}/${triggerIndexRaw}` },
+  });
   sendJson(ctx.res, 201, { run: { id: run.id, status: run.status } });
 }
 

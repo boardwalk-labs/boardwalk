@@ -15,6 +15,7 @@ import type { SQLInputValue, SQLOutputValue, StatementSync } from "node:sqlite";
 import { z } from "zod";
 import { runEventSchema, workflowManifestSchema } from "@boardwalk-labs/workflow";
 import type { JsonValue, RunEvent, RunStatus, WorkflowManifest } from "@boardwalk-labs/workflow";
+import { actorSchema, type Actor } from "@boardwalk-labs/workflow/runtime";
 import { EngineError } from "../errors.js";
 import { ulid } from "../ids.js";
 import { migrate } from "./migrations.js";
@@ -26,13 +27,16 @@ import { migrate } from "./migrations.js";
 // Re-exported for engine modules that already type against the store's surface.
 export type { RunStatus };
 
-/** A deployed workflow: validated manifest + bundled program source + per-deploy config. */
+/** A deployed workflow: validated manifest (from workflow.jsonc) + built program + config. */
 export interface WorkflowRow {
   id: string;
   slug: string;
   manifest: WorkflowManifest;
   program: string;
   config: Record<string, JsonValue>;
+  /** Sequential deploy counter (1, 2, 3, …) — bumps only when a redeploy actually changes the
+   *  workflow. Backs `context.workflowVersion`. */
+  version: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -56,6 +60,9 @@ export interface RunRow {
   error: RunErrorShape | null;
   parentRunId: string | null;
   idempotencyKey: string | null;
+  /** Who/what created the run (the SDK actor union), recorded by the creating surface. Null
+   *  only on rows written by pre-v5 engines — the supervisor derives a fallback for those. */
+  actor: Actor | null;
   restarts: number;
   tokensIn: number;
   tokensOut: number;
@@ -63,7 +70,7 @@ export interface RunRow {
   createdAt: number;
   startedAt: number | null;
   endedAt: number | null;
-  /** Cumulative execution time (ms) across all segments — what `max_duration_seconds` is
+  /** Cumulative execution time (ms) across all segments — what `budget.max_compute_seconds` is
    *  checked against. A held wait (sleep / gate / child) accrues here: this engine has no
    *  snapshot substrate, so waiting occupies the process. */
   activeMs: number;
@@ -256,6 +263,7 @@ function mapWorkflow(row: SqlRow): WorkflowRow {
     manifest: readJson(row, "workflows", "manifest", workflowManifestSchema),
     program: readText(row, "workflows", "program"),
     config: readJson(row, "workflows", "config", configSchema),
+    version: readInteger(row, "workflows", "version"),
     createdAt: readInteger(row, "workflows", "created_at"),
     updatedAt: readInteger(row, "workflows", "updated_at"),
   };
@@ -272,6 +280,7 @@ function mapRun(row: SqlRow): RunRow {
     error: readJsonOrNull(row, "runs", "error", runErrorSchema),
     parentRunId: readTextOrNull(row, "runs", "parent_run_id"),
     idempotencyKey: readTextOrNull(row, "runs", "idempotency_key"),
+    actor: readJsonOrNull(row, "runs", "actor", actorSchema),
     restarts: readInteger(row, "runs", "restarts"),
     tokensIn: readInteger(row, "runs", "tokens_in"),
     tokensOut: readInteger(row, "runs", "tokens_out"),
@@ -463,16 +472,26 @@ export class Store {
     const configJson = JSON.stringify(args.config ?? {});
     return this.transaction(() => {
       const t = this.now();
-      const existing = this.prepare("SELECT id FROM workflows WHERE slug = ?").get(args.slug);
+      const existing = this.prepare(
+        "SELECT manifest, program, config FROM workflows WHERE slug = ?",
+      ).get(args.slug);
       if (existing === undefined) {
         this.prepare(
-          `INSERT INTO workflows (id, slug, manifest, program, config, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO workflows (id, slug, manifest, program, config, version, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, 1, ?, ?)`,
         ).run(ulid(t), args.slug, manifestJson, args.program, configJson, t, t);
       } else {
+        // The version bumps only when the deploy actually CHANGES something: the server-mode
+        // boot re-syncs the workflows dir on every start, and an unchanged package re-deploying
+        // must not churn the version runs pin their context to.
+        const changed =
+          readText(existing, "workflows", "manifest") !== manifestJson ||
+          readText(existing, "workflows", "program") !== args.program ||
+          readText(existing, "workflows", "config") !== configJson;
         this.prepare(
-          "UPDATE workflows SET manifest = ?, program = ?, config = ?, updated_at = ? WHERE slug = ?",
-        ).run(manifestJson, args.program, configJson, t, args.slug);
+          `UPDATE workflows SET manifest = ?, program = ?, config = ?, updated_at = ?,
+             version = version + ? WHERE slug = ?`,
+        ).run(manifestJson, args.program, configJson, t, changed ? 1 : 0, args.slug);
       }
       const row = this.getWorkflow(args.slug);
       if (row === null) {
@@ -509,11 +528,16 @@ export class Store {
   createRun(args: {
     workflowId: string;
     triggerKind: TriggerKind;
+    /** Who/what created the run. The creating surface knows this exactly (the scheduler its
+     *  cron rule, the webhook route its source, workflows.call its parent) — record it here so
+     *  `context.actor` never has to be reconstructed. */
+    actor: Actor;
     input?: unknown;
     parentRunId?: string;
     idempotencyKey?: string;
   }): { run: RunRow; created: boolean } {
     const inputJson = serializeJson(args.input, "run input");
+    const actorJson = JSON.stringify(actorSchema.parse(args.actor));
     return this.transaction(() => {
       const parentRunId = args.parentRunId ?? null;
       if (args.idempotencyKey !== undefined) {
@@ -541,8 +565,8 @@ export class Store {
       const t = this.now();
       const id = ulid(t);
       this.prepare(
-        `INSERT INTO runs (id, workflow_id, status, trigger_kind, input, parent_run_id, idempotency_key, created_at)
-         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?)`,
+        `INSERT INTO runs (id, workflow_id, status, trigger_kind, input, parent_run_id, idempotency_key, actor, created_at)
+         VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?)`,
       ).run(
         id,
         args.workflowId,
@@ -550,6 +574,7 @@ export class Store {
         inputJson,
         parentRunId,
         args.idempotencyKey ?? null,
+        actorJson,
         t,
       );
       return { run: this.getRunOrThrow(id), created: true };
@@ -646,7 +671,7 @@ export class Store {
     return readInteger(row, "runs", "restarts");
   }
 
-  /** Persist the run's cumulative ON-CPU time (the `max_duration_seconds` budget basis), so it
+  /** Persist the run's cumulative ON-CPU time (the `budget.max_compute_seconds` budget basis), so it
    *  survives across segments (suspend/resume) + engine restarts. Set, not add — the supervisor
    *  holds the running total and writes the absolute value after each segment. */
   recordActiveMs(id: string, activeMs: number): void {

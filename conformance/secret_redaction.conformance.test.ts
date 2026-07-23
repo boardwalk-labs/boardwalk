@@ -16,6 +16,7 @@ import {
   startFakeProvider,
   toolCallResponse,
   type FakeProvider,
+  descriptor,
 } from "./harness.js";
 
 let provider: FakeProvider;
@@ -41,25 +42,27 @@ describe("conformance: secret redaction canary", () => {
     provider.respondWith("done", { in: 1, out: 1 });
 
     engine.deployWorkflow({
+      descriptor: descriptor({
+        slug: "leaky",
+        triggers: [{ kind: "manual" }],
+        permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
+      }),
       program: `
-        import { agent, output, secrets } from "@boardwalk-labs/workflow";
-        export const meta = {
-          slug: "leaky",
-          triggers: [{ kind: "manual" }],
-          permissions: { secrets: [{ name: "CANARY_TOKEN" }] },
-        };
-        const token = await secrets.get("CANARY_TOKEN");
-        output(await agent("use the token " + token + " to fetch the data", {
-          model: "test-model",
-          tools: [
-            {
-              name: "fetch_credential",
-              description: "Returns the credential",
-              inputSchema: { type: "object", properties: {} },
-              execute: async () => "the credential is " + token,
-            },
-          ],
-        }));
+        import { agent, secrets } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          const token = await secrets.get("CANARY_TOKEN");
+          return (await agent("use the token " + token + " to fetch the data", {
+            model: "test-model",
+            tools: [
+              {
+                name: "fetch_credential",
+                description: "Returns the credential",
+                inputSchema: { type: "object", properties: {} },
+                execute: async () => "the credential is " + token,
+              },
+            ],
+          }));
+        }
       `,
     });
 

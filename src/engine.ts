@@ -6,14 +6,15 @@
 //   - EMBEDDED mode: construct, `runOnce()`, `close()` — what embedding hosts do. No
 //     scheduler loop, no recovery thread; one run, in-process supervision, exit.
 //
-// Layering: this file only wires store + supervisor + scheduler together and translates
-// program source → manifest at the deploy boundary. No business logic lives here.
+// Layering: this file only wires store + supervisor + scheduler together and validates the
+// workflow.jsonc descriptor → manifest at the deploy boundary. No business logic lives here.
 
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { JsonValue, WorkflowManifest } from "@boardwalk-labs/workflow";
-import { extractManifest } from "@boardwalk-labs/workflow/extract";
+import { DescriptorValidationError, parseWorkflowDescriptor } from "@boardwalk-labs/workflow";
+import type { Actor } from "@boardwalk-labs/workflow/runtime";
 import type { InferenceConfig } from "./agent/resolve.js";
 import type { Clock } from "./clock.js";
 import { EngineError } from "./errors.js";
@@ -32,6 +33,7 @@ import {
 import { isTerminal, RunSupervisor } from "./run/supervisor.js";
 import { validateHumanInputResponse } from "./run/human_input.js";
 import { writePackage } from "./run/run_dir.js";
+import { loadWorkflowPackage } from "./workflow_package.js";
 
 export interface EngineOptions {
   /** Everything lives under here: `engine.db`, `runs/<id>/`. Created if missing. */
@@ -66,8 +68,16 @@ export interface AuthorizeMcpServerOptions {
 }
 
 export interface DeployArgs {
-  /** The bundled workflow program (ESM, `@boardwalk-labs/workflow` external, pure-literal meta). */
+  /** The BUILT workflow program (single-file ESM, `@boardwalk-labs/workflow` external),
+   *  default-exporting `run(input, context)` — what `boardwalk build` emits. */
   program: string;
+  /**
+   * The workflow's `workflow.jsonc` descriptor as text (JSONC — comments and trailing commas
+   * are stripped on parse and never stored; strict JSON is also fine). Parsed + validated via
+   * the SDK's `parseWorkflowDescriptor`; the result is the stored manifest. This engine
+   * derives no I/O schemas (untyped floor), so the manifest is exactly the descriptor.
+   */
+  descriptor: string;
   /** Engine-side deploy config (e.g. catch_up). Replaced wholesale on redeploy. */
   config?: Record<string, JsonValue>;
   /**
@@ -147,13 +157,22 @@ export class Engine {
   }
 
   /**
-   * Deploy (or redeploy, by manifest slug) a workflow from its bundled program source. The
-   * manifest is DERIVED from the program's pure-literal `meta` — the program file is the
-   * author's source of truth, manifest drift is impossible by construction.
+   * Deploy (or redeploy, by descriptor slug) a workflow from its built program + descriptor.
+   * The descriptor (`workflow.jsonc`) is the control-plane contract: the fields machinery
+   * must know without executing the program. The program's `run` signature is its own I/O
+   * contract; this engine derives no schemas from it (the untyped floor).
    */
   deployWorkflow(args: DeployArgs): WorkflowRow {
     this.assertOpen();
-    const manifest: WorkflowManifest = extractManifest(args.program, { fileName: "index.mjs" });
+    let manifest: WorkflowManifest;
+    try {
+      manifest = parseWorkflowDescriptor(args.descriptor);
+    } catch (err) {
+      if (err instanceof DescriptorValidationError) {
+        throw new EngineError("VALIDATION", err.message);
+      }
+      throw err;
+    }
     const workflow = this.store.upsertWorkflow({
       slug: manifest.slug,
       manifest,
@@ -172,18 +191,50 @@ export class Engine {
   }
 
   /**
+   * Deploy a BUILT workflow package from a directory: `workflow.jsonc` (the descriptor) +
+   * the built entry (`index.mjs`, or the descriptor's `entry`) + optional `skills/` and
+   * `AGENTS.md`. This is the workflows-dir discovery unit the server deploys on boot, exposed
+   * for embedders that keep packages on disk.
+   */
+  deployWorkflowDir(dir: string, opts: { config?: Record<string, JsonValue> } = {}): WorkflowRow {
+    this.assertOpen();
+    const pkg = loadWorkflowPackage(dir);
+    return this.deployWorkflow({
+      program: pkg.program,
+      descriptor: pkg.descriptorText,
+      ...(opts.config !== undefined ? { config: opts.config } : {}),
+      ...(pkg.skillsSourceDir !== undefined ? { skillsSourceDir: pkg.skillsSourceDir } : {}),
+      ...(pkg.agentsMd !== undefined ? { agentsMd: pkg.agentsMd } : {}),
+    });
+  }
+
+  /**
    * Queue a run and dispatch it through the concurrency gate. Returns the queued row
    * immediately; `waitForRun` for the terminal row.
    */
-  startRun(slug: string, opts: { input?: JsonValue; triggerKind?: TriggerKind } = {}): RunRow {
+  startRun(
+    slug: string,
+    opts: { input?: JsonValue; triggerKind?: TriggerKind; actor?: Actor } = {},
+  ): RunRow {
     this.assertOpen();
     const workflow = this.store.getWorkflow(slug);
     if (workflow === null) {
       throw new EngineError("NOT_FOUND", `Workflow "${slug}" is not deployed on this engine.`);
     }
+    const triggerKind = opts.triggerKind ?? "manual";
+    // The creating surface knows the actor best (the webhook route its source); this default
+    // covers the direct surfaces — a manual start on a single-user engine is the local user.
+    const actor: Actor =
+      opts.actor ??
+      (triggerKind === "webhook"
+        ? { type: "webhook", source: slug }
+        : triggerKind === "cron"
+          ? { type: "cron", rule: "cron" }
+          : { type: "user", user_id: "local" });
     const { run } = this.store.createRun({
       workflowId: workflow.id,
-      triggerKind: opts.triggerKind ?? "manual",
+      triggerKind,
+      actor,
       ...(opts.input !== undefined ? { input: opts.input } : {}),
     });
     this.supervisor.emitQueued(run.id);

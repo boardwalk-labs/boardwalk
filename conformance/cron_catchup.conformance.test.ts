@@ -8,7 +8,14 @@
 // engine.tick() — the suite reopens an engine "hours later" without waiting hours.
 
 import { afterEach, describe, expect, it } from "vitest";
-import { createEngine, disposeEngines, makeDataDir, manualClock, statusesOf } from "./harness.js";
+import {
+  createEngine,
+  descriptor,
+  disposeEngines,
+  makeDataDir,
+  manualClock,
+  statusesOf,
+} from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -16,11 +23,17 @@ afterEach(disposeEngines);
 const T0 = Date.UTC(2026, 0, 6, 12, 0, 0, 0);
 const HOURS = 3_600_000;
 
-const CRON_PROGRAM = `
-import { output } from "@boardwalk-labs/workflow";
-export const meta = { slug: "tick-tock", triggers: [{ kind: "cron", expr: "* * * * *" }] };
-output("fired");
-`;
+const CRON_WORKFLOW = {
+  descriptor: descriptor({
+    slug: "tick-tock",
+    triggers: [{ kind: "cron", expr: "* * * * *" }],
+  }),
+  program: `
+export default async function run() {
+  return "fired";
+}
+`,
+};
 
 /** Phase 1 of both cases: fire the cron exactly once, then leave the engine "dead". */
 async function fireOnceAndClose(
@@ -29,7 +42,7 @@ async function fireOnceAndClose(
 ): Promise<string> {
   const clock = manualClock(T0);
   const { engine } = createEngine({ dataDir, clock: clock.clock });
-  engine.deployWorkflow({ program: CRON_PROGRAM, ...(config !== undefined ? { config } : {}) });
+  engine.deployWorkflow({ ...CRON_WORKFLOW, ...(config !== undefined ? { config } : {}) });
 
   engine.tick(); // first sight: anchors at now, no retroactive fires
   expect(engine.store.listRuns()).toHaveLength(0);

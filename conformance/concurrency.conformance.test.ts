@@ -8,7 +8,7 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import type { RunRow } from "../src/index.js";
-import { createEngine, disposeEngines, waitFor } from "./harness.js";
+import { createEngine, disposeEngines, waitFor, descriptor } from "./harness.js";
 
 afterEach(disposeEngines);
 
@@ -16,15 +16,17 @@ describe("conformance: concurrency", () => {
   it("serial: the second run stays queued until the first is terminal", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({
+        slug: "one-by-one",
+        triggers: [{ kind: "manual" }],
+        concurrency: { mode: "serial" },
+      }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = {
-          slug: "one-by-one",
-          triggers: [{ kind: "manual" }],
-          concurrency: { mode: "serial" },
-        };
-        await sleep(500);
-        output("done");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          await sleep(500);
+          return ("done");
+        }
       `,
     });
 
@@ -56,11 +58,13 @@ describe("conformance: concurrency", () => {
   it("unlimited (the default): runs of the same workflow execute in parallel", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
+      descriptor: descriptor({ slug: "parallel-ok", triggers: [{ kind: "manual" }] }),
       program: `
-        import { output, sleep } from "@boardwalk-labs/workflow";
-        export const meta = { slug: "parallel-ok", triggers: [{ kind: "manual" }] };
-        await sleep(800);
-        output("done");
+        import { sleep } from "@boardwalk-labs/workflow";
+        export default async function run(input, context) {
+          await sleep(800);
+          return ("done");
+        }
       `,
     });
 
