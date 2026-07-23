@@ -958,7 +958,7 @@ export class RunSupervisor {
     const dimension = (spent: number, cap: number | undefined) => ({
       spent,
       cap: cap ?? null,
-      remaining: cap !== undefined ? cap - spent : null,
+      remaining: cap !== undefined ? Math.max(0, cap - spent) : null,
     });
     return {
       usd: dimension(totals.usdMicros / 1_000_000, budget?.max_usd),
