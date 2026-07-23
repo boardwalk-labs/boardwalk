@@ -24,6 +24,13 @@
 //     nothing to validate against and no Ajv dependency to carry.
 //   - There is no browser backend, so `computer.openBrowser` fails closed through the
 //     capability seam and every `computer.browser.*` call reports the missing session.
+//   - No abort-signal wiring, no tool-invoke timeout, no structured logger — the run process
+//     pushes `cancel` itself and awaits inline tools unbounded.
+//
+// Everything else — `HostConnection` framing, frame routing/`settleInvoke`, `invokeTool`
+// multiplexing, `pruneUndefined`/`asJsonValue`/`protocolErrorOf` — is kept structurally in
+// LOCKSTEP with the runner's server (the two repos deliberately share no code): a fix in one
+// of those fragments almost certainly belongs in the other.
 
 import * as net from "node:net";
 import { randomBytes } from "node:crypto";

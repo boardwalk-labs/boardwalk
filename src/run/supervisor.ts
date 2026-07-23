@@ -867,19 +867,12 @@ export class RunSupervisor {
     // the canonical default key requires a JSON tree anyway.
     const jsonInput = input === undefined ? null : asJsonValue(input, "workflows.call input");
     const key = idempotencyKey ?? defaultIdempotencyKey(parentRunId, slug, jsonInput);
-    const parent = this.store.getRun(parentRunId);
-    const parentWorkflowId = parent?.workflowId ?? "unknown";
     const { run, created } = this.store.createRun({
       workflowId: target.id,
       // The two-axis rule: `manual` is the TRANSPORT (a direct invocation); the workflow
-      // actor is the INITIATOR. `user_id` carries the synthetic `workflow:<id>` principal.
+      // actor is the INITIATOR.
       triggerKind: "manual",
-      actor: {
-        type: "workflow",
-        parent_run_id: parentRunId,
-        parent_workflow_id: parentWorkflowId,
-        user_id: `workflow:${parentWorkflowId}`,
-      },
+      actor: this.workflowActorFor(parentRunId),
       input: jsonInput,
       parentRunId,
       idempotencyKey: key,
@@ -927,17 +920,21 @@ export class RunSupervisor {
   private fallbackActor(run: RunRow): Actor {
     if (run.triggerKind === "cron") return { type: "cron", rule: "cron" };
     if (run.triggerKind === "webhook") return { type: "webhook", source: "webhook" };
-    if (run.parentRunId !== null) {
-      const parent = this.store.getRun(run.parentRunId);
-      const parentWorkflowId = parent?.workflowId ?? "unknown";
-      return {
-        type: "workflow",
-        parent_run_id: run.parentRunId,
-        parent_workflow_id: parentWorkflowId,
-        user_id: `workflow:${parentWorkflowId}`,
-      };
-    }
+    if (run.parentRunId !== null) return this.workflowActorFor(run.parentRunId);
     return { type: "user", user_id: "local" };
+  }
+
+  /** The `workflow` actor for a run spawned by `parentRunId` — the INITIATOR half of the
+   *  two-axis rule. `user_id` carries the synthetic `workflow:<id>` principal (a workflow is
+   *  not a person, but the field must name who acted). */
+  private workflowActorFor(parentRunId: string): Actor {
+    const parentWorkflowId = this.store.getRun(parentRunId)?.workflowId ?? "unknown";
+    return {
+      type: "workflow",
+      parent_run_id: parentRunId,
+      parent_workflow_id: parentWorkflowId,
+      user_id: `workflow:${parentWorkflowId}`,
+    };
   }
 
   /**

@@ -510,55 +510,58 @@ function redactMessages(
 }
 
 /**
- * The local webfetch backend: a plain `fetch` of an http(s) URL, body capped. Runs in the run
- * process — Node honors NODE_USE_ENV_PROXY for fetch, so a configured egress proxy is respected
- * without any code here. A non-http(s) URL is refused (no file:// or data:); the model's URL is
- * untrusted input.
+ * The local webfetch backend: a plain `fetch` of an http(s) URL, body capped. Unlike `http`
+ * below it carries no request options — the model only names a URL.
  */
-async function localFetch(url: string, maxBytes: number | undefined): Promise<FetchResult> {
-  if (!/^https?:\/\//i.test(url)) {
-    throw new EngineError("VALIDATION", `webfetch only supports http(s) URLs (got "${url}").`);
-  }
-  const cap = maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
-  const response = await fetch(url, { redirect: "follow" });
-  const full = Buffer.from(await response.arrayBuffer());
-  const truncated = full.length > cap;
-  const body = (truncated ? full.subarray(0, cap) : full).toString("utf8");
-  return {
-    status: response.status,
-    contentType: response.headers.get("content-type") ?? undefined,
-    body,
-    truncated,
-  };
+function localFetch(url: string, maxBytes: number | undefined): Promise<FetchResult> {
+  return fetchWithCap("webfetch", url, { redirect: "follow" }, maxBytes);
 }
 
 /**
- * The local `http` backend: a plain `fetch` with the model's method/headers/body, RAW response body
- * capped. Like localFetch it runs in the run process, so Node's NODE_USE_ENV_PROXY routes it through
- * any configured egress proxy with no code here. http(s)-only (the URL is untrusted input); unlike
- * webfetch it does NOT extract text from HTML — `http` returns the response verbatim (for APIs).
+ * The local `http` backend: a plain `fetch` with the model's method/headers/body. Unlike
+ * webfetch it does NOT extract text from HTML — `http` returns the RAW response verbatim
+ * (for APIs), still capped.
  */
-async function localHttpRequest(
+function localHttpRequest(
   req: HttpRequestInput,
   maxBytes: number | undefined,
 ): Promise<FetchResult> {
-  if (!/^https?:\/\//i.test(req.url)) {
-    throw new EngineError("VALIDATION", `http only supports http(s) URLs (got "${req.url}").`);
+  return fetchWithCap(
+    "http",
+    req.url,
+    {
+      method: req.method ?? "GET",
+      redirect: "follow",
+      ...(req.headers !== undefined ? { headers: req.headers } : {}),
+      ...(req.body !== undefined ? { body: req.body } : {}),
+    },
+    maxBytes,
+  );
+}
+
+/**
+ * The shared core of the two local HTTP tool backends: refuse non-http(s) URLs (no file:// or
+ * data: — the model's URL is untrusted input), fetch, cap the UTF-8 body. Runs in the run
+ * process — Node honors NODE_USE_ENV_PROXY for fetch, so a configured egress proxy is
+ * respected without any code here.
+ */
+async function fetchWithCap(
+  tool: string,
+  url: string,
+  init: RequestInit,
+  maxBytes: number | undefined,
+): Promise<FetchResult> {
+  if (!/^https?:\/\//i.test(url)) {
+    throw new EngineError("VALIDATION", `${tool} only supports http(s) URLs (got "${url}").`);
   }
   const cap = maxBytes ?? DEFAULT_FETCH_MAX_BYTES;
-  const response = await fetch(req.url, {
-    method: req.method ?? "GET",
-    redirect: "follow",
-    ...(req.headers !== undefined ? { headers: req.headers } : {}),
-    ...(req.body !== undefined ? { body: req.body } : {}),
-  });
+  const response = await fetch(url, init);
   const full = Buffer.from(await response.arrayBuffer());
   const truncated = full.length > cap;
-  const body = (truncated ? full.subarray(0, cap) : full).toString("utf8");
   return {
     status: response.status,
     contentType: response.headers.get("content-type") ?? undefined,
-    body,
+    body: (truncated ? full.subarray(0, cap) : full).toString("utf8"),
     truncated,
   };
 }

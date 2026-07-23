@@ -41,7 +41,14 @@ interface PendingCall {
   reject: (err: Error) => void;
 }
 
-function send(message: ChildToParent | { type: string; [k: string]: unknown }): void {
+/**
+ * Everything this process sends the supervisor. `emit` is re-declared with the precise
+ * {@link RunEventBody} the callers hold — the schema's inferred body type is the loose shape
+ * the VALIDATING side accepts, not what the producing side should be allowed to send.
+ */
+type OutboundMessage = ChildToParent | { type: "emit"; body: RunEventBody; turnId?: string };
+
+function send(message: OutboundMessage): void {
   // Why the guard: process.send disappears if the IPC channel closed (supervisor died);
   // at that point the orphan exits via the disconnect handler below — nothing to report to.
   process.send?.(message);
@@ -213,15 +220,23 @@ const ERROR_CODE_RE = /^[A-Z][A-Z0-9_]{0,63}$/;
  * purpose: the throw may be an `EngineError` (hint on `.hint`), a protocol `HostError` (the
  * capability's hint rides `.data.hint` across the wire — see host_server's protocolErrorOf),
  * or any author error. Message = what's wrong; hint = what to do.
+ *
+ * `errorCode`/`errorHint` are kept structurally in lockstep with the hosted runner's failure
+ * curation (its program_runner) — a fix in one almost certainly belongs in the other.
  */
 function curateFailure(err: unknown): { code: string; message: string; hint?: string } {
   const message = err instanceof Error ? err.message : String(err);
-  const rawCode: unknown =
-    typeof err === "object" && err !== null ? (err as { code?: unknown }).code : undefined;
-  const code =
-    typeof rawCode === "string" && ERROR_CODE_RE.test(rawCode) ? rawCode : "PROGRAM_ERROR";
+  const code = errorCode(err) ?? "PROGRAM_ERROR";
   const hint = errorHint(err);
   return { code, message, ...(hint !== undefined ? { hint } : {}) };
+}
+
+/** The SEMANTIC code of a thrown error, preferred over its class name. The SCREAMING_SNAKE
+ *  shape keeps prose out of a field the UI renders as a code. */
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const code: unknown = (err as { code?: unknown }).code;
+  return typeof code === "string" && ERROR_CODE_RE.test(code) ? code : undefined;
 }
 
 function errorHint(err: unknown): string | undefined {
