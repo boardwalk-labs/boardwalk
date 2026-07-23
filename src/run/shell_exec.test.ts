@@ -63,14 +63,14 @@ describe("shellExec", () => {
     expect(result.exitCode).toBe(143);
   }, 10_000);
 
-  it("caps captured output at maxBuffer and kills the command, keeping the prefix", async () => {
-    const result = await shellExec(
-      // Emit far more than the cap, then try to keep going.
-      `yes 0123456789 | head -c 100000; sleep 30`,
-      { maxBuffer: 1000 },
-      { workspaceDir: makeWorkspace() },
-    );
-    expect(result.stdout.length).toBe(1000);
-    expect(result.exitCode).toBe(143); // killed by the cap's SIGTERM
-  }, 10_000);
+  it("rejects when the output exceeds maxBuffer, killing the command (the ratified contract)", async () => {
+    await expect(
+      shellExec(
+        // Emit far more than the cap, then try to keep going.
+        `yes 0123456789 | head -c 100000; sleep 30`,
+        { maxBuffer: 1000 },
+        { workspaceDir: makeWorkspace() },
+      ),
+    ).rejects.toThrow(/maxBuffer/i);
+  }, 15_000);
 });

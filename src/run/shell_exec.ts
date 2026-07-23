@@ -51,6 +51,7 @@ export function shellExec(
 
     let stdout = "";
     let stderr = "";
+    let capExceeded = false;
     let killTimer: NodeJS.Timeout | null = null;
     let graceTimer: NodeJS.Timeout | null = null;
 
@@ -81,7 +82,8 @@ export function shellExec(
       if (current.length >= maxBuffer) return current;
       const next = current + chunk.toString("utf8");
       if (next.length > maxBuffer) {
-        kill(); // output cap exceeded — stop the command, keep the captured prefix
+        capExceeded = true;
+        kill(); // output cap exceeded — stop the command; `close` rejects below
         return next.slice(0, maxBuffer);
       }
       return next;
@@ -102,6 +104,12 @@ export function shellExec(
     child.on("close", (code, signal) => {
       if (killTimer !== null) clearTimeout(killTimer);
       if (graceTimer !== null) clearTimeout(graceTimer);
+      if (capExceeded) {
+        // The ratified contract (lockstep with the hosted runner): an exceeded output cap
+        // REJECTS — never a silently truncated success.
+        rejectPromise(new Error(`shell output exceeded maxBuffer (${String(maxBuffer)} bytes)`));
+        return;
+      }
       resolvePromise({ exitCode: exitCodeOf(code, signal), stdout, stderr });
     });
   });
