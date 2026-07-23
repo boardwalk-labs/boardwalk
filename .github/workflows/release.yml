@@ -57,4 +57,12 @@ jobs:
       # to the 11.x line: npm 12 ships a broken provenance path (`Cannot find module 'sigstore'`), so
       # `npm@latest` (now 12.x) fails to publish. Stay on 11.x until 12's sigstore break is fixed.
       - run: npm install -g npm@^11.5.1
-      - run: npm publish --provenance --access public
+      # A prerelease version (anything with a `-`) publishes under the `next` dist-tag so
+      # `latest` keeps pointing at the current stable line for plain installs.
+      - name: Publish (prereleases under --tag next)
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          case "$PKG_VERSION" in
+            *-*) npm publish --provenance --access public --tag next ;;
+            *)   npm publish --provenance --access public ;;
+          esac
