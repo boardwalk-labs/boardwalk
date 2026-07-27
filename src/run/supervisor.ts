@@ -42,7 +42,7 @@ import { EngineError, toErrorShape } from "../errors.js";
 import { asJsonValue } from "../json_value.js";
 import { refreshAccessToken } from "../mcp/oauth.js";
 import { McpTokenStore, MCP_TOKENS_FILENAME } from "../mcp/token_store.js";
-import type { EventRow, RunRow, Store, WorkflowRow } from "../store/store.js";
+import type { EventRow, RunErrorShape, RunRow, Store, WorkflowRow } from "../store/store.js";
 import { defaultIdempotencyKey } from "./idempotency.js";
 import {
   callWorkflowArgsSchema,
@@ -570,16 +570,11 @@ export class RunSupervisor {
                 }
               })
               .catch((err: unknown) => {
-                const shape = toErrorShape(err);
-                const hint = err instanceof EngineError ? err.hint : undefined;
                 if (child.connected) {
                   child.send({
                     type: "host_result",
                     callId: msg.callId,
-                    result: {
-                      ok: false,
-                      error: { ...shape, ...(hint !== undefined ? { hint } : {}) },
-                    },
+                    result: { ok: false, error: toErrorShape(err) },
                   });
                 }
               });
@@ -1064,21 +1059,21 @@ export class RunSupervisor {
     status: "completed" | "failed" | "cancelled",
     opts: { output?: unknown; error?: IpcErrorShape },
   ): RunRow {
+    // The failure shape is forwarded WHOLE (hint included). Rebuilding it field-by-field here is
+    // how the hint used to die one hop from the surface that shows it: every layer below —
+    // resolve/host_server/child curation, the IPC schema — carries it deliberately.
+    const error = opts.error === undefined ? undefined : curateRunError(opts.error);
     this.store.updateRunStatus(runId, status, {
       endedAt: this.clock.now(),
       ...(opts.output !== undefined
         ? { output: asJsonValue(opts.output, "The run's declared output") }
         : {}),
-      ...(opts.error !== undefined
-        ? { error: { code: opts.error.code, message: opts.error.message } }
-        : {}),
+      ...(error !== undefined ? { error } : {}),
     });
     this.stampAndStore(runId, entry.envelope, {
       kind: "run_status",
       status,
-      ...(opts.error !== undefined
-        ? { error: { code: opts.error.code, message: opts.error.message } }
-        : {}),
+      ...(error !== undefined ? { error } : {}),
     });
     // A failed/cancelled run can leave gates pending (the held process died with them open) —
     // close them so the inbox never shows a question no run is waiting on. A completed run has
@@ -1154,6 +1149,17 @@ export class RunSupervisor {
     const dir = skillsDirOf(packageRoot(this.dataDir, workflowId));
     return existsSync(dir) ? dir : null;
   }
+}
+
+/** Project an IPC failure onto the persisted/emitted failure shape. Field-by-field on purpose —
+ *  the IPC shape is the child's, and only these three belong on a run row and its event — but
+ *  `hint` is one of the three: it is the actionable half of every engine error. */
+function curateRunError(error: IpcErrorShape): RunErrorShape {
+  return {
+    code: error.code,
+    message: error.message,
+    ...(error.hint !== undefined ? { hint: error.hint } : {}),
+  };
 }
 
 function computeBudgetMessage(manifest: WorkflowManifest): string {

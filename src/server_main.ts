@@ -243,6 +243,15 @@ function deployWorkflowsFromDir(engine: Engine, dir: string, log: (line: string)
             `package DIRECTORY with a workflow.jsonc descriptor next to the built entry ` +
             `(mkdir ${name.replace(/\.(mjs|js)$/, "")}/, move the file in as index.mjs, add workflow.jsonc)`,
         );
+      } else if (!name.startsWith(".")) {
+        // Anything else here is almost always the .tgz `boardwalk build` emits, dropped in whole.
+        // Staying silent about it is how "workflows deployed: 0" became unexplainable. Dotfiles
+        // (.DS_Store and friends) stay silent — nobody put those there on purpose.
+        log(
+          `skipped ${name}: not a workflow package directory — the workflows dir holds UNPACKED ` +
+            `packages (a workflow.jsonc next to the built entry). If this is a build artifact: ` +
+            `mkdir ${name.replace(/\.(tgz|tar\.gz)$/, "")}/ && tar xzf ${name} -C that directory`,
+        );
       }
       continue;
     }

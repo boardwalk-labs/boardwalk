@@ -346,6 +346,10 @@ describe("startServer", () => {
     );
     // A non-workflow file in the dir must be skipped, not crash the boot.
     writeFileSync(join(workflowsDir, "notes.txt"), "ignore me");
+    // A dropped-in build artifact is the likeliest mistake — it must say so, not vanish.
+    writeFileSync(join(workflowsDir, "my-routine.tgz"), "not really a tarball");
+    // A dotfile nobody put there on purpose stays silent.
+    writeFileSync(join(workflowsDir, ".DS_Store"), "");
     // A flat built program is the REMOVED module-body deploy shape — skipped with a pointer.
     writeFileSync(join(workflowsDir, "legacy-flat.mjs"), `export default async function run() {}`);
     // A directory without a descriptor is skipped with the error named, never fatal.
@@ -374,6 +378,9 @@ describe("startServer", () => {
     expect(lines.some((l) => l.includes("no-descriptor/") && l.includes("workflow.jsonc"))).toBe(
       true,
     );
+    // The dropped-in artifact names the unpack fix; the dotfile produces nothing at all.
+    expect(lines.some((l) => l.includes("my-routine.tgz") && l.includes("tar xzf"))).toBe(true);
+    expect(lines.some((l) => l.includes(".DS_Store"))).toBe(false);
 
     const res = await fetch(`http://127.0.0.1:${running.port}/api/workflows`);
     const body: unknown = await res.json();

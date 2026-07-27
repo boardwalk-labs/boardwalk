@@ -3,6 +3,50 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.3.1
+
+Everything here came out of one end-to-end pass over the self-hosting path, and each item is
+something a first-time self-hoster hit before they got a workflow to run.
+
+### Fixed — the image is multi-arch, so the quickstart works on Apple Silicon
+
+`ghcr.io/boardwalk-labs/boardwalk` published an amd64-only manifest, so the README's own
+`docker run ghcr.io/boardwalk-labs/boardwalk` failed outright on an arm64 Mac with
+`no matching manifest for linux/arm64/v8`. The image now publishes `linux/amd64,linux/arm64`.
+The boot smoke test runs on an amd64 runner and structurally cannot catch this, so the publish
+also asserts the pushed manifest carries both arches.
+
+### Fixed — a failed run keeps its `hint`
+
+Engine errors are written as two halves: `message` says what is wrong, `hint` says what to do.
+Every layer carried the hint deliberately — model resolution, the host-call boundary, the child's
+failure curation, the IPC schema — and then the terminal write rebuilt the failure as
+`{ code, message }` and dropped it, for both the run row and the terminal `run_status` event.
+
+The visible cost was worst exactly where it hurt most. A fresh install with no inference
+configured failed with `No inference is set up for this run…` and silently withheld the fix:
+`Set BOARDWALK_API_KEY … or name a provider explicitly`. Same for missing/undeclared secrets and
+unsupported capabilities. `RunErrorShape` now carries `hint` (additive — old rows read fine), and
+a conformance case pins it to both the row and the event.
+
+### Fixed — a build artifact dropped into the workflows dir says so
+
+The workflows dir holds UNPACKED packages, but `boardwalk build` emits a `.tgz`, so dropping the
+artifact straight in is the obvious mistake — and the loader skipped it in total silence, leaving
+`workflows deployed: 0` with nothing to explain it. It now names the unpack fix. Dotfiles
+(`.DS_Store` and friends) stay silent; nobody put those there on purpose.
+
+### Docs
+
+- The deploy recipe in the README was not runnable: it omitted `build`'s required directory
+  argument, and `--out` writes a `.tgz` rather than the package directory the server loads. It is
+  now build → `mkdir` → `tar xzf` → run, verified verbatim.
+- `BOARDWALK_API_KEY` and `BOARDWALK_INFERENCE_URL` (managed inference) were documented in
+  `SPEC.md` but missing from the README's configuration table.
+- The per-workflow webhook credential variables (`BOARDWALK_WEBHOOK_TOKEN__<NAME>` /
+  `BOARDWALK_WEBHOOK_SECRET__<NAME>`) were likewise SPEC-only, though the README points people at
+  `/hooks/…`.
+
 ## 0.3.0
 
 ### Changed (BREAKING — the workflow-format redesign: `run(input, context)` + `workflow.jsonc`)

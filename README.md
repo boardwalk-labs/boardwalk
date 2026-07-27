@@ -62,8 +62,13 @@ data/workflows/my-routine/
   AGENTS.md          # optional — standing instructions every agent() reads
 ```
 
+`boardwalk build` emits that package as a `.tgz`, so deploying is build-then-unpack into a
+directory named for the workflow:
+
 ```sh
-npx @boardwalk-labs/cli build --out ./data/workflows/my-routine/
+npx @boardwalk-labs/cli build ./my-routine --out my-routine.tgz
+mkdir -p data/workflows/my-routine
+tar xzf my-routine.tgz -C data/workflows/my-routine
 docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 ```
 
@@ -82,15 +87,27 @@ All configuration is environment variables (a `boardwalk.toml` file is deferred 
 | Variable                  | Default                                    | What it does                                                                                 |
 | ------------------------- | ------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | `BOARDWALK_DATA_DIR`      | `/data` in Docker, else `./boardwalk-data` | Where everything lives: SQLite DB, run dirs, artifacts                                       |
-| `BOARDWALK_WORKFLOWS_DIR` | `<data-dir>/workflows`                     | Directory of built workflows (`.mjs`/`.js`) deployed on boot                                 |
+| `BOARDWALK_WORKFLOWS_DIR` | `<data-dir>/workflows`                     | Directory of unpacked workflow packages deployed on boot                                     |
 | `BOARDWALK_HOST`          | `127.0.0.1` (`0.0.0.0` in Docker)          | Bind address — this surface has no auth beyond webhook auth, so binding wider logs a warning |
 | `BOARDWALK_PORT`          | `8080`                                     | Listen port (`0` picks a free port)                                                          |
 | `BOARDWALK_DEFAULT_MODEL` | —                                          | Model used when `agent()` omits one, e.g. `anthropic/claude-sonnet-4-5`                      |
 | `BOARDWALK_PROVIDERS`     | —                                          | JSON provider table, e.g. `{"ollama":{"base_url":"http://localhost:11434/v1"}}`              |
 | `BOARDWALK_ENV_FILE`      | `<data-dir>/.env`, if it exists            | `.env` file backing `secrets.get` and provider API keys                                      |
+| `BOARDWALK_API_KEY`       | —                                          | Boardwalk org key; makes the default `boardwalk` managed-inference lane work                 |
+| `BOARDWALK_INFERENCE_URL` | `api.boardwalk.sh`                         | Override the managed-inference gateway                                                       |
 
 Provider API keys come from the environment (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
 `GEMINI_API_KEY` for the built-ins; `api_key_env` names the variable for custom providers).
+With none of them set, `agent()` fails with `MODEL_UNRESOLVED` — set `BOARDWALK_API_KEY` for
+managed inference, or name a provider explicitly.
+
+Webhook triggers authenticate against a **per-workflow** server variable (`<NAME>` = the slug
+upper-cased, `-` → `_`); an unset one fails closed with a 503 naming the exact variable:
+
+| Trigger `auth` | Variable                           | Checked against                                         |
+| -------------- | ---------------------------------- | ------------------------------------------------------- |
+| `"token"`      | `BOARDWALK_WEBHOOK_TOKEN__<NAME>`  | `Authorization: Bearer <token>` (constant-time)         |
+| `"signature"`  | `BOARDWALK_WEBHOOK_SECRET__<NAME>` | `X-Boardwalk-Signature: sha256=<hex>` over the raw body |
 
 ### Embedded mode
 

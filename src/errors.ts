@@ -57,9 +57,17 @@ export function describeValue(value: unknown): string {
   return `${/^[aeiou]/.test(type) ? "an" : "a"} ${type}`; // "an object", not "a object"
 }
 
-/** Narrow an unknown thrown value to a safe { code, message } for events/API responses. */
-export function toErrorShape(err: unknown): { code: string; message: string } {
-  if (err instanceof EngineError) return { code: err.code, message: err.message };
+/** Narrow an unknown thrown value to a safe { code, message, hint? } for events/API responses.
+ *  The hint travels with the shape: message = what's wrong, hint = what to do, and a consumer
+ *  that only ever sees the message is left without the actionable half. */
+export function toErrorShape(err: unknown): { code: string; message: string; hint?: string } {
+  if (err instanceof EngineError) {
+    return {
+      code: err.code,
+      message: err.message,
+      ...(err.hint !== undefined ? { hint: err.hint } : {}),
+    };
+  }
   if (err instanceof Error) return { code: "PROGRAM_ERROR", message: err.message };
   return { code: "PROGRAM_ERROR", message: String(err) };
 }

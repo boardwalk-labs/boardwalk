@@ -43,10 +43,13 @@ export interface WorkflowRow {
 
 export type TriggerKind = "cron" | "manual" | "webhook";
 
-/** The persisted form of a run failure — mirrors `toErrorShape` in errors.ts. */
+/** The persisted form of a run failure — mirrors `toErrorShape` in errors.ts. `hint` is the
+ *  one-line "what to do" and is optional: not every failure has one, but when it does the run
+ *  row must keep it or the API and run log can only ever show half the story. */
 export interface RunErrorShape {
   code: string;
   message: string;
+  hint?: string | undefined;
 }
 
 /** One run of a workflow, including its budget tallies and the call-tree linkage. */
@@ -155,6 +158,7 @@ const triggerKindSchema = enumFromKeys<TriggerKind>({ cron: true, manual: true, 
 const runErrorSchema: z.ZodType<RunErrorShape> = z.object({
   code: z.string(),
   message: z.string(),
+  hint: z.string().optional(),
 });
 
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>

@@ -88,6 +88,35 @@ describe("conformance: run lifecycle", () => {
     }
   }, 20_000);
 
+  it("a failure's hint survives to the run row AND the terminal event", async () => {
+    // MODEL_UNRESOLVED is the canonical case: it is the first error a fresh self-hosted install
+    // hits, and its message names the problem while only the hint names the fix. The hint crosses
+    // host_call → IPC → child curation → the terminal write, so this asserts the whole chain.
+    const { engine } = createEngine({ env: { BOARDWALK_API_KEY: "" } });
+    engine.deployWorkflow({
+      descriptor: descriptor({ slug: "no-inference", triggers: [{ kind: "manual" }] }),
+      program: `
+        import { agent } from "@boardwalk-labs/workflow";
+        export default async function run() {
+          return await agent("anything");
+        }
+      `,
+    });
+
+    const run = engine.startRun("no-inference");
+    const done = await engine.waitForRun(run.id);
+
+    expect(done.status).toBe("failed");
+    expect(done.error?.code).toBe("MODEL_UNRESOLVED");
+    expect(done.error?.hint).toContain("BOARDWALK_API_KEY");
+
+    const last = engine.store.listEvents(run.id).at(-1)?.event;
+    expect(last?.kind).toBe("run_status");
+    if (last?.kind === "run_status") {
+      expect(last.error?.hint).toBe(done.error?.hint);
+    }
+  }, 20_000);
+
   it("a void run() completes with a null output and NO output event", async () => {
     const { engine } = createEngine();
     engine.deployWorkflow({
