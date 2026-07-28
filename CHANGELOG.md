@@ -3,6 +3,52 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.3.2
+
+The engine drove language servers for one language and asked them one question. Both limits are
+lifted: Python gets code intelligence, and every language gets navigation, not just diagnostics.
+
+### Added — Python via pyright
+
+`.py` / `.pyi` now route to `pyright-langserver`, so an agent writing Python sees its type errors
+the moment it finishes an edit, the same way TypeScript already did. Install `pyright` (it is an
+npm package, so it needs only the Node already under the engine) and it lights up; without it,
+Python files degrade to the usual "no language server available" note.
+
+Getting the interpreter right is the whole job here. pyright resolves imports against a configured
+Python, and aimed at the wrong one it reports `reportMissingImports` for every `import pandas` —
+which is worse than having no server, because diagnostics ride along on every `write`/`edit` result
+and the loop would burn tokens being told correct code is broken. The engine resolves `python3` on
+PATH and hands pyright the answer over all three channels servers actually read:
+`initializationOptions`, a `workspace/didChangeConfiguration` push, and a real answer to
+`workspace/configuration` — which the client previously refused with "method not found".
+
+Language servers can now declare workspace settings (`LanguageServer.settings()`), so adding a
+language that needs configuring is still one registry entry.
+
+### Added — the `navigate` built-in
+
+A read-only built-in exposing definition, references, implementations, hover, document symbols,
+workspace symbol search, and the incoming/outgoing call hierarchy. Where `diagnostics` answers "is
+what I just wrote correct?", `navigate` answers "what is this, and what touches it?" — the question
+`grep` only approximates, since grep matches text where a language server resolves meaning (the
+right `parse` of five, not every line containing the word).
+
+It is in the default built-in set and in `"read-only"`, and like `diagnostics` it is engine-native
+and best-effort: no installed server for the file yields a short note, never an error.
+
+Two details matter more than the operation list:
+
+- **Positions can be addressed by symbol name.** An agent arrives from `grep` holding an identifier
+  and at best a line, never a column — and an LSP query aimed a few characters off an identifier
+  returns nothing at all. `symbol` is resolved against the file's real text (whole-identifier match,
+  so `parse` does not hit `parseConfig`), `line` disambiguates a repeated name, and an unresolvable
+  address fails loudly with what to pass instead. Exact `line` + `character` still work.
+- **A query that never got an answer says so.** The first navigation call of a run lands while the
+  server is still indexing the workspace. Reporting that as "no results" would tell the loop a
+  symbol is unreferenced, and the loop would act on it. Navigation carries its own 15s deadline, and
+  a timeout renders as "still indexing — retry the same query", distinct from a genuine empty result.
+
 ## 0.3.1
 
 Everything here came out of one end-to-end pass over the self-hosting path, and each item is
