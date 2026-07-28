@@ -1,14 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// POST /hooks/:workflow/:triggerIndex — the webhook trigger endpoint, and this engine's v0
-// answer to the open webhook-auth question (documented in SPEC §2.4):
-// per-workflow credentials live in *server* environment variables —
-//   token auth:     BOARDWALK_WEBHOOK_TOKEN__<NAME>   vs  `Authorization: Bearer <token>`
-//   signature auth: BOARDWALK_WEBHOOK_SECRET__<NAME>  vs  `X-Boardwalk-Signature: sha256=<hex>`
-//                   (HMAC-SHA256 over the raw request body)
-// where <NAME> is the workflow slug upper-cased with `-` → `_`. Missing variable = 503 (fail
-// closed, hint names the variable); bad credential = 401. These are server config, not
-// workflow secrets, so they resolve from process.env — never from the engine's env map.
+// POST /hooks/:name — a webhook endpoint. Every deployed workflow carrying
+// `{ kind: "webhook", name }` runs on every delivery, so one endpoint can drive several workflows.
+//
+// Credentials are *server* environment variables (not workflow secrets, so they resolve from
+// process.env), and which one is set picks the scheme — the descriptor no longer declares it:
+//   BOARDWALK_WEBHOOK_TOKEN__<NAME>   vs  `Authorization: Bearer <token>`
+//   BOARDWALK_WEBHOOK_SECRET__<NAME>  vs  `X-Boardwalk-Signature: sha256=<hex>` (HMAC over raw body)
+// <NAME> is the webhook name upper-cased with `-` → `_`. Neither set, or both, is 503 (fail closed).
 
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage } from "node:http";
@@ -22,64 +21,81 @@ import {
 } from "../http.js";
 import type { RouteContext } from "./router.js";
 
-export async function handleWebhook(
-  ctx: RouteContext,
-  slug: string,
-  triggerIndexRaw: string,
-): Promise<void> {
-  // The raw body is read up front: signature auth signs the exact bytes on the wire, before
-  // any JSON parsing can normalize them away.
+export async function handleWebhook(ctx: RouteContext, name: string): Promise<void> {
+  // Read the raw body up front: signature auth signs the exact bytes on the wire, before any JSON
+  // parsing can normalize them away.
   const rawBody = await readBody(ctx.req, MAX_BODY_BYTES);
 
-  // One identical 404 for "no workflow", "no such trigger index", and "not a webhook
-  // trigger" — an unauthenticated caller learns nothing about what is deployed here.
-  const notFound = new HttpError(
-    404,
-    "NOT_FOUND",
-    `No webhook trigger at /hooks/${slug}/${triggerIndexRaw}.`,
-  );
-  const workflow = ctx.engine.store.getWorkflow(slug);
-  if (workflow === null) throw notFound;
-  if (!/^\d+$/.test(triggerIndexRaw)) throw notFound;
-  const trigger = workflow.manifest.triggers[Number(triggerIndexRaw)];
-  if (trigger === undefined || trigger.kind !== "webhook") throw notFound;
+  // Authorize BEFORE looking anything up, so an unauthenticated caller learns nothing about what is
+  // deployed here — including whether this webhook name has any workflows attached.
+  authorize(ctx.req, name, rawBody);
 
-  if (trigger.auth === "token") authorizeToken(ctx.req, slug);
-  else authorizeSignature(ctx.req, slug, rawBody);
+  const attached = ctx.engine.store
+    .listWorkflows()
+    .filter((row) => row.manifest.triggers.some(isAttachedTo(name)));
 
   const input =
     rawBody.length === 0 ? null : parseJsonBody(rawBody, jsonValueSchema, "webhook payload");
-  const run = ctx.engine.startRun(slug, {
-    input,
-    triggerKind: "webhook",
-    // The route knows the delivery's exact origin — record it for `context.actor`.
-    actor: { type: "webhook", source: `${slug}/${triggerIndexRaw}` },
+
+  const runs = attached.map((row) => {
+    const run = ctx.engine.startRun(row.slug, {
+      input,
+      triggerKind: "webhook",
+      actor: { type: "webhook", source: name },
+    });
+    return { id: run.id, status: run.status, workflow: row.slug };
   });
-  sendJson(ctx.res, 201, { run: { id: run.id, status: run.status } });
+
+  // 202 with however many runs started — zero is a legitimate outcome (nothing attached yet), not a
+  // sender error, and answering 4xx would make senders retry a state only the operator can change.
+  sendJson(ctx.res, 202, { runs });
 }
 
-/** `BOARDWALK_WEBHOOK_<kind>__<NAME>`: the workflow slug upper-cased, hyphens → underscores. */
-function webhookEnvVarName(kind: "TOKEN" | "SECRET", slug: string): string {
-  return `BOARDWALK_WEBHOOK_${kind}__${slug.toUpperCase().replaceAll("-", "_")}`;
+function isAttachedTo(name: string) {
+  return (trigger: { kind: string; name?: string }): boolean =>
+    trigger.kind === "webhook" && trigger.name === name;
+}
+
+/** `BOARDWALK_WEBHOOK_<kind>__<NAME>`: the webhook name upper-cased, hyphens → underscores. */
+function webhookEnvVarName(kind: "TOKEN" | "SECRET", name: string): string {
+  return `BOARDWALK_WEBHOOK_${kind}__${name.toUpperCase().replaceAll("-", "_")}`;
 }
 
 /**
- * Read the trigger's credential from the server environment, failing CLOSED when unset: a
- * webhook that nobody configured must never become an open trigger. Read lazily per request
- * so an operator can fix the environment without redeploying workflows.
+ * Pick the scheme from whichever credential the operator configured, failing CLOSED when that is
+ * ambiguous: unset means an unconfigured webhook must never become an open trigger, and both set
+ * means the intended scheme is unknowable — guessing one would silently accept the weaker.
  */
-function requiredCredential(kind: "TOKEN" | "SECRET", slug: string): string {
-  const name = webhookEnvVarName(kind, slug);
-  const value = process.env[name];
-  if (value === undefined || value === "") {
+function authorize(req: IncomingMessage, name: string, rawBody: Buffer): void {
+  const tokenVar = webhookEnvVarName("TOKEN", name);
+  const secretVar = webhookEnvVarName("SECRET", name);
+  const token = process.env[tokenVar];
+  const secret = process.env[secretVar];
+  const hasToken = token !== undefined && token !== "";
+  const hasSecret = secret !== undefined && secret !== "";
+
+  if (hasToken && hasSecret) {
     throw new HttpError(
       503,
-      "WEBHOOK_UNCONFIGURED",
-      `Webhook auth for workflow "${slug}" is not configured on this server.`,
-      `Set the environment variable ${name} and restart the server.`,
+      "WEBHOOK_AMBIGUOUS",
+      `Webhook "${name}" has both a token and a signing secret configured.`,
+      `Unset either ${tokenVar} or ${secretVar} and restart the server.`,
     );
   }
-  return value;
+  if (hasToken) {
+    authorizeToken(req, token);
+    return;
+  }
+  if (hasSecret) {
+    authorizeSignature(req, secret, rawBody);
+    return;
+  }
+  throw new HttpError(
+    503,
+    "WEBHOOK_UNCONFIGURED",
+    `Webhook "${name}" is not configured on this server.`,
+    `Set ${tokenVar} (bearer token) or ${secretVar} (HMAC secret) and restart the server.`,
+  );
 }
 
 /** One generic 401 for every credential failure — no oracle for which part was wrong. */
@@ -87,15 +103,13 @@ function unauthorized(): HttpError {
   return new HttpError(401, "UNAUTHORIZED", "Invalid webhook credentials.");
 }
 
-function authorizeToken(req: IncomingMessage, slug: string): void {
-  const expected = requiredCredential("TOKEN", slug);
+function authorizeToken(req: IncomingMessage, expected: string): void {
   const header = req.headers.authorization;
   if (header === undefined || !header.startsWith("Bearer ")) throw unauthorized();
   if (!constantTimeEquals(header.slice("Bearer ".length), expected)) throw unauthorized();
 }
 
-function authorizeSignature(req: IncomingMessage, slug: string, rawBody: Buffer): void {
-  const secret = requiredCredential("SECRET", slug);
+function authorizeSignature(req: IncomingMessage, secret: string, rawBody: Buffer): void {
   const header = req.headers["x-boardwalk-signature"];
   if (typeof header !== "string") throw unauthorized();
   const match = /^sha256=([0-9a-f]{64})$/i.exec(header);
@@ -103,17 +117,17 @@ function authorizeSignature(req: IncomingMessage, slug: string, rawBody: Buffer)
   if (presentedHex === undefined) throw unauthorized();
   const presented = Buffer.from(presentedHex, "hex");
   const computed = createHmac("sha256", secret).update(rawBody).digest();
-  // The regex pins 64 hex chars = 32 bytes = SHA-256 output, so the lengths already match;
-  // the explicit check keeps timingSafeEqual's equal-length precondition locally provable.
+  // The regex pins 64 hex chars = 32 bytes = SHA-256 output, so the lengths already match; the
+  // explicit check keeps timingSafeEqual's equal-length precondition locally provable.
   if (presented.length !== computed.length || !timingSafeEqual(presented, computed)) {
     throw unauthorized();
   }
 }
 
 /**
- * Constant-time string equality. Why hash-then-compare: timingSafeEqual demands equal-length
- * inputs, and comparing fixed-size digests both satisfies that and avoids leaking the
- * expected token's length through an early length check.
+ * Constant-time string equality. Why hash-then-compare: timingSafeEqual demands equal-length inputs,
+ * and comparing fixed-size digests both satisfies that and avoids leaking the expected token's
+ * length through an early length check.
  */
 function constantTimeEquals(a: string, b: string): boolean {
   return timingSafeEqual(

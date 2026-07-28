@@ -81,7 +81,7 @@ export default async function run() {
 const TOKEN_HOOK_WORKFLOW = {
   descriptor: JSON.stringify({
     slug: "token-hook",
-    triggers: [{ kind: "webhook", auth: "token" }, { kind: "manual" }],
+    triggers: [{ kind: "webhook", name: "token-hook" }, { kind: "manual" }],
   }),
   program: `
 export default async function run(input) {
@@ -93,7 +93,7 @@ export default async function run(input) {
 const SIGNED_HOOK_WORKFLOW = {
   descriptor: JSON.stringify({
     slug: "signed-hook",
-    triggers: [{ kind: "webhook", auth: "signature" }],
+    triggers: [{ kind: "webhook", name: "signed-hook" }],
   }),
   program: `
 export default async function run(input) {
@@ -174,7 +174,7 @@ const errorResponseSchema = z.object({
   error: z.object({ code: z.string(), message: z.string(), hint: z.string().optional() }),
 });
 const webhookAcceptedSchema = z.object({
-  run: z.object({ id: z.string(), status: z.string() }),
+  runs: z.array(z.object({ id: z.string(), status: z.string(), workflow: z.string() })),
 });
 const emptyObjectSchema = z.strictObject({});
 const inputRequestSchema = z.looseObject({
@@ -539,70 +539,108 @@ describe("engine HTTP server", () => {
     expect(second.status).toBe(404);
   }, 20_000);
 
-  it("webhook token auth: 503 unconfigured, 401 bad token, 201 success, 404 non-webhook", async () => {
+  it("webhook token auth: 503 unconfigured, 401 bad token, 202 success", async () => {
     const { engine, base } = await makeServer();
     engine.deployWorkflow(TOKEN_HOOK_WORKFLOW);
 
     // Fail closed before any credential exists.
-    const unconfigured = await fetchJson(`${base}/hooks/token-hook/0`, errorResponseSchema, {
+    const unconfigured = await fetchJson(`${base}/hooks/token-hook`, errorResponseSchema, {
       method: "POST",
     });
     expect(unconfigured.status).toBe(503);
     expect(unconfigured.body.error.hint).toContain("BOARDWALK_WEBHOOK_TOKEN__TOKEN_HOOK");
 
-    // 404s do not leak whether the workflow, the index, or the trigger kind was wrong.
-    for (const path of [
-      "/hooks/token-hook/1", // exists, but kind manual
-      "/hooks/token-hook/9", // no such index
-      "/hooks/token-hook/x", // not an index
-      "/hooks/ghost/0", // no such workflow
-    ]) {
-      const { status, body } = await fetchJson(`${base}${path}`, errorResponseSchema, {
-        method: "POST",
-      });
-      expect(status).toBe(404);
-      expect(body.error.code).toBe("NOT_FOUND");
-    }
+    // An unknown name is indistinguishable from a known-but-unconfigured one: authorization runs
+    // before any lookup, so a caller learns nothing about what is deployed here.
+    const ghost = await fetchJson(`${base}/hooks/ghost`, errorResponseSchema, { method: "POST" });
+    expect(ghost.status).toBe(503);
+    expect(ghost.body.error.code).toBe("WEBHOOK_UNCONFIGURED");
 
     setEnv("BOARDWALK_WEBHOOK_TOKEN__TOKEN_HOOK", "s3cret-token");
-    const noHeader = await fetchJson(`${base}/hooks/token-hook/0`, errorResponseSchema, {
+    const noHeader = await fetchJson(`${base}/hooks/token-hook`, errorResponseSchema, {
       method: "POST",
     });
     expect(noHeader.status).toBe(401);
-    const wrong = await fetchJson(`${base}/hooks/token-hook/0`, errorResponseSchema, {
+    const wrong = await fetchJson(`${base}/hooks/token-hook`, errorResponseSchema, {
       method: "POST",
       headers: { authorization: "Bearer wrong" },
     });
     expect(wrong.status).toBe(401);
     expect(wrong.body.error.code).toBe("UNAUTHORIZED");
 
-    const accepted = await fetchJson(`${base}/hooks/token-hook/0`, webhookAcceptedSchema, {
+    const accepted = await fetchJson(`${base}/hooks/token-hook`, webhookAcceptedSchema, {
       method: "POST",
       headers: { authorization: "Bearer s3cret-token", "content-type": "application/json" },
       body: JSON.stringify({ hello: "hook" }),
     });
-    expect(accepted.status).toBe(201);
-    const done = await pollRunUntil(base, accepted.body.run.id, (s) => TERMINAL_STATUSES.has(s));
+    expect(accepted.status).toBe(202);
+    expect(accepted.body.runs).toHaveLength(1);
+    const started = accepted.body.runs[0];
+    if (started === undefined) throw new Error("expected one run");
+    const done = await pollRunUntil(base, started.id, (s) => TERMINAL_STATUSES.has(s));
     expect(done.status).toBe("completed");
     expect(done.triggerKind).toBe("webhook");
     expect(done.output).toEqual({ hello: "hook" });
 
     // An empty body is a valid trigger with null input.
-    const empty = await fetchJson(`${base}/hooks/token-hook/0`, webhookAcceptedSchema, {
+    const empty = await fetchJson(`${base}/hooks/token-hook`, webhookAcceptedSchema, {
       method: "POST",
       headers: { authorization: "Bearer s3cret-token" },
     });
-    expect(empty.status).toBe(201);
-    const emptyDone = await pollRunUntil(base, empty.body.run.id, (s) => TERMINAL_STATUSES.has(s));
+    expect(empty.status).toBe(202);
+    const emptyRun = empty.body.runs[0];
+    if (emptyRun === undefined) throw new Error("expected one run");
+    const emptyDone = await pollRunUntil(base, emptyRun.id, (s) => TERMINAL_STATUSES.has(s));
     expect(emptyDone.input).toBeNull();
   }, 30_000);
+
+  it("one webhook fans out to every attached workflow, and 202s when none are", async () => {
+    const { engine, base } = await makeServer();
+    const attached = (slug: string) => ({
+      descriptor: JSON.stringify({ slug, triggers: [{ kind: "webhook", name: "shared" }] }),
+      program: `export default async function run(input) { return ${JSON.stringify(slug)}; }`,
+    });
+    setEnv("BOARDWALK_WEBHOOK_TOKEN__SHARED", "t");
+    const headers = { authorization: "Bearer t" };
+
+    // Nothing attached yet: authorized, so 202 with no runs — the sender has nothing to retry.
+    const none = await fetchJson(`${base}/hooks/shared`, webhookAcceptedSchema, {
+      method: "POST",
+      headers,
+    });
+    expect(none.status).toBe(202);
+    expect(none.body.runs).toEqual([]);
+
+    engine.deployWorkflow(attached("fan-a"));
+    engine.deployWorkflow(attached("fan-b"));
+    const both = await fetchJson(`${base}/hooks/shared`, webhookAcceptedSchema, {
+      method: "POST",
+      headers,
+    });
+    expect(both.status).toBe(202);
+    expect(both.body.runs.map((r) => r.workflow).sort()).toEqual(["fan-a", "fan-b"]);
+  }, 30_000);
+
+  it("refuses a webhook configured with both a token and a signing secret", async () => {
+    const { engine, base } = await makeServer();
+    engine.deployWorkflow(TOKEN_HOOK_WORKFLOW);
+    setEnv("BOARDWALK_WEBHOOK_TOKEN__TOKEN_HOOK", "t");
+    setEnv("BOARDWALK_WEBHOOK_SECRET__TOKEN_HOOK", "s");
+
+    const { status, body } = await fetchJson(`${base}/hooks/token-hook`, errorResponseSchema, {
+      method: "POST",
+      headers: { authorization: "Bearer t" },
+    });
+    expect(status).toBe(503);
+    expect(body.error.code).toBe("WEBHOOK_AMBIGUOUS");
+  }, 20_000);
 
   it("webhook signature auth: HMAC over the raw body, hyphenated names map to env vars", async () => {
     const { engine, base } = await makeServer();
     engine.deployWorkflow(SIGNED_HOOK_WORKFLOW);
     const payload = JSON.stringify({ n: 1 });
 
-    const unconfigured = await fetchJson(`${base}/hooks/signed-hook/0`, errorResponseSchema, {
+    const unconfigured = await fetchJson(`${base}/hooks/signed-hook`, errorResponseSchema, {
       method: "POST",
       body: payload,
     });
@@ -613,32 +651,34 @@ describe("engine HTTP server", () => {
     const sign = (body: string): string =>
       `sha256=${createHmac("sha256", "hush").update(body).digest("hex")}`;
 
-    const missing = await fetchJson(`${base}/hooks/signed-hook/0`, errorResponseSchema, {
+    const missing = await fetchJson(`${base}/hooks/signed-hook`, errorResponseSchema, {
       method: "POST",
       body: payload,
     });
     expect(missing.status).toBe(401);
-    const malformed = await fetchJson(`${base}/hooks/signed-hook/0`, errorResponseSchema, {
+    const malformed = await fetchJson(`${base}/hooks/signed-hook`, errorResponseSchema, {
       method: "POST",
       headers: { "x-boardwalk-signature": "sha256=zz" },
       body: payload,
     });
     expect(malformed.status).toBe(401);
     // A valid signature for DIFFERENT bytes must not authenticate this body.
-    const stale = await fetchJson(`${base}/hooks/signed-hook/0`, errorResponseSchema, {
+    const stale = await fetchJson(`${base}/hooks/signed-hook`, errorResponseSchema, {
       method: "POST",
       headers: { "x-boardwalk-signature": sign("tampered") },
       body: payload,
     });
     expect(stale.status).toBe(401);
 
-    const accepted = await fetchJson(`${base}/hooks/signed-hook/0`, webhookAcceptedSchema, {
+    const accepted = await fetchJson(`${base}/hooks/signed-hook`, webhookAcceptedSchema, {
       method: "POST",
       headers: { "x-boardwalk-signature": sign(payload) },
       body: payload,
     });
-    expect(accepted.status).toBe(201);
-    const done = await pollRunUntil(base, accepted.body.run.id, (s) => TERMINAL_STATUSES.has(s));
+    expect(accepted.status).toBe(202);
+    const signedRun = accepted.body.runs[0];
+    if (signedRun === undefined) throw new Error("expected one run");
+    const done = await pollRunUntil(base, signedRun.id, (s) => TERMINAL_STATUSES.has(s));
     expect(done.status).toBe("completed");
     expect(done.output).toEqual({ n: 1 });
   }, 20_000);
@@ -648,7 +688,7 @@ describe("engine HTTP server", () => {
     const cases: [string, string, string][] = [
       ["/api/workflows", "DELETE", "GET"],
       ["/api/workflows/echo/runs", "GET", "POST"],
-      ["/hooks/a/0", "GET", "POST"],
+      ["/hooks/a", "GET", "POST"],
     ];
     for (const [path, method, allow] of cases) {
       const res = await fetch(`${base}${path}`, { method });

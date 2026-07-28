@@ -102,8 +102,8 @@ function matchRoute(segments: readonly string[]): Record<string, Handler> | null
       if (key !== undefined) return { POST: (ctx) => handleRespondToInput(ctx, third, key) };
     }
   }
-  if (first === "hooks" && segments.length === 3 && second !== undefined && third !== undefined) {
-    return { POST: (ctx) => handleWebhook(ctx, second, third) };
+  if (first === "hooks" && segments.length === 2 && second !== undefined) {
+    return { POST: (ctx) => handleWebhook(ctx, second) };
   }
   return null;
 }

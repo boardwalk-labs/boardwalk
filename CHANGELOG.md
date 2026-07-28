@@ -3,6 +3,23 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.3.3
+
+### Changed
+
+- **BREAKING — webhooks are named endpoints, and one can drive several workflows.**
+  `POST /hooks/:workflow/:triggerIndex` becomes **`POST /hooks/:name`**, matching the SDK 0.3.7
+  trigger shape `{ "kind": "webhook", "name" }`. Every deployed workflow attached to that name runs
+  on the delivery, and the response is `202 { runs: [{ id, status, workflow }] }` instead of
+  `201 { run }`. Zero attached workflows is a legitimate 202 with no runs — nothing for a sender to
+  retry.
+- **The scheme now comes from server config, not the descriptor.** With `auth` gone from the
+  manifest, whichever credential the operator set picks the scheme:
+  `BOARDWALK_WEBHOOK_TOKEN__<NAME>` (bearer) or `BOARDWALK_WEBHOOK_SECRET__<NAME>` (HMAC), where
+  `<NAME>` is the webhook name upper-cased with `-` → `_`. **Neither set is 503, and so is BOTH** —
+  an ambiguous configuration must not silently accept the weaker scheme. Authorization now runs
+  before any lookup, so an unknown webhook name is indistinguishable from an unconfigured one.
+
 ## 0.3.2
 
 The engine drove language servers for one language and asked them one question. Both limits are
