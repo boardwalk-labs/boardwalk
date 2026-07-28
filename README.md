@@ -46,7 +46,7 @@ docker run -v ./data:/data -p 8080:8080 ghcr.io/boardwalk-labs/boardwalk
 ```
 
 Then open `http://localhost:8080` for the run log, or hit the JSON API
-(`/api/workflows`, `/api/runs`). Webhook triggers land on `/hooks/<workflow>/<trigger-index>`.
+(`/api/workflows`, `/api/runs`). Webhook triggers land on `/hooks/<name>`, where `<name>` is the webhook the descriptor attaches to.
 
 ### Deploying a workflow
 
@@ -76,8 +76,8 @@ The default workflows directory is `<data-dir>/workflows` (`/data/workflows` in 
 it with `BOARDWALK_WORKFLOWS_DIR`. The entry is single-file built JavaScript with
 `@boardwalk-labs/workflow` left external; the descriptor names another entry file via `entry` if
 you don't use `index.mjs`. From there the descriptor's triggers take over: cron fires on schedule,
-`POST /api/workflows/<slug>/runs` triggers a manual run, and webhooks land on
-`/hooks/<workflow>/<trigger-index>`.
+`POST /api/workflows/<slug>/runs` triggers a manual run, and webhooks land on `/hooks/<name>` —
+every workflow attached to that name runs on the delivery.
 
 ### Configuration
 
