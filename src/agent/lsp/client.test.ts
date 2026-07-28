@@ -13,7 +13,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { LspClient } from "./client.js";
 import type { LanguageServer } from "./registry.js";
-import { LspSession } from "./session.js";
+import { LspSession, type LspRequestOutcome } from "./session.js";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/mock_server.mjs", import.meta.url));
 
@@ -29,7 +29,11 @@ function ws(): string {
 }
 
 /** A session whose server is the mock fixture (driven by env knobs). */
-function mockSession(workspaceDir: string, env: Record<string, string> = {}): LspSession {
+function mockSession(
+  workspaceDir: string,
+  env: Record<string, string> = {},
+  opts: { settings?: Record<string, unknown>; navigationTimeoutMs?: number } = {},
+): LspSession {
   for (const [k, v] of Object.entries(env)) process.env[k] = v;
   cleanups.push(() => {
     for (const k of Object.keys(env)) delete process.env[k];
@@ -40,12 +44,16 @@ function mockSession(workspaceDir: string, env: Record<string, string> = {}): Ls
     args: [FIXTURE],
     extensions: [".ts"],
     languageId: () => "typescript",
+    ...(opts.settings !== undefined ? { settings: () => opts.settings ?? {} } : {}),
   };
   const session = new LspSession({
     server,
     workspaceDir,
     command: process.execPath,
     args: [FIXTURE],
+    ...(opts.navigationTimeoutMs !== undefined
+      ? { navigationTimeoutMs: opts.navigationTimeoutMs }
+      : {}),
   });
   cleanups.push(() => void session.close());
   return session;
@@ -161,6 +169,105 @@ describe("LspSession diagnostics collection", () => {
     await session.diagnostics(file, 2_000);
     expect(session.urisWithDiagnostics()).toContain(pathToFileURL(file).href);
   });
+});
+
+/**
+ * The fixture answers hover with `JSON.stringify(<what the client served for workspace/configuration>)`,
+ * so this narrows that reply back to the parsed configuration array the client sent.
+ */
+function echoedConfig(outcome: LspRequestOutcome): unknown {
+  if (!outcome.answered) throw new Error("expected the fixture to answer");
+  const result: unknown = outcome.result;
+  if (typeof result !== "object" || result === null) throw new Error("expected a hover object");
+  const contents: unknown = (result as Record<string, unknown>)["contents"];
+  if (typeof contents !== "object" || contents === null) throw new Error("expected hover contents");
+  const value: unknown = (contents as Record<string, unknown>)["value"];
+  if (typeof value !== "string") throw new Error("expected hover text");
+  return JSON.parse(value);
+}
+
+describe("LspSession workspace settings", () => {
+  it("serves the server's requested configuration section over the real wire", async () => {
+    // This is the pyright path end-to-end: the server asks which interpreter to resolve imports
+    // against, and the answer is what stands between clean diagnostics and reportMissingImports on
+    // every `import pandas`. The fixture echoes back whatever it received.
+    const dir = ws();
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "const x = 1;\n");
+    const session = mockSession(
+      dir,
+      { MOCK_LSP_ASK_CONFIG: "python" },
+      { settings: { python: { pythonPath: "/opt/python/bin/python3.13" } } },
+    );
+
+    const outcome = await session.requestForFile(file, "textDocument/hover", (uri) => ({
+      textDocument: { uri },
+      position: { line: 0, character: 0 },
+    }));
+    expect(outcome.answered).toBe(true);
+    expect(echoedConfig(outcome)).toEqual([{ pythonPath: "/opt/python/bin/python3.13" }]);
+  }, 15_000);
+
+  it("answers null for a section it has no settings for, rather than refusing the request", async () => {
+    const dir = ws();
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "const x = 1;\n");
+    const session = mockSession(
+      dir,
+      { MOCK_LSP_ASK_CONFIG: "rust" },
+      { settings: { python: { pythonPath: "/x" } } },
+    );
+
+    const outcome = await session.requestForFile(file, "textDocument/hover", (uri) => ({
+      textDocument: { uri },
+      position: { line: 0, character: 0 },
+    }));
+    expect(echoedConfig(outcome)).toEqual([null]);
+  }, 15_000);
+});
+
+describe("LspSession navigation requests", () => {
+  it("syncs the document and returns the server's answer", async () => {
+    const dir = ws();
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "const x = 1;\n");
+    const session = mockSession(dir);
+
+    const outcome = await session.requestForFile(file, "textDocument/definition", (uri) => ({
+      textDocument: { uri },
+      position: { line: 0, character: 6 },
+    }));
+    expect(outcome).toMatchObject({ answered: true });
+  }, 15_000);
+
+  it("reports a timed-out request as NOT ANSWERED, distinct from an empty answer", async () => {
+    // The whole point of the distinction: a server still indexing must not read as "no results".
+    const dir = ws();
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "const x = 1;\n");
+    const session = mockSession(dir, { MOCK_LSP_HANG_REQUEST: "1" }, { navigationTimeoutMs: 300 });
+
+    const outcome = await session.requestForFile(file, "textDocument/definition", (uri) => ({
+      textDocument: { uri },
+      position: { line: 0, character: 6 },
+    }));
+    expect(outcome).toEqual({ answered: false });
+  }, 15_000);
+
+  it("reports a request on a dead server as not answered", async () => {
+    const dir = ws();
+    const file = join(dir, "a.ts");
+    writeFileSync(file, "const x = 1;\n");
+    const session = mockSession(dir);
+    await session.diagnostics(file, 2_000); // start the server
+    await session.close();
+
+    const outcome = await session.requestForFile(file, "textDocument/definition", (uri) => ({
+      textDocument: { uri },
+      position: { line: 0, character: 6 },
+    }));
+    expect(outcome).toEqual({ answered: false });
+  }, 15_000);
 });
 
 describe("LspClient shutdown leaves no zombie", () => {

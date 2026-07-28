@@ -105,6 +105,33 @@ describe("LspService", () => {
     expect(await service.diagnostics("/ws/a.ts")).toEqual({ available: false, diagnostics: [] });
   });
 
+  it("navigation on an unhandled/uninstalled file is NOT ANSWERED, never an empty answer", async () => {
+    // An empty answer would tell the loop the symbol has no references; "not answered" is the truth.
+    const { service } = serviceWith([], { available: false });
+    const result = await service.locations("/ws/a.ts", "references", { line: 1, character: 1 });
+    expect(result).toEqual({ answered: false });
+  });
+
+  it("a position that resolves to no call-hierarchy item is a real (empty) answer", async () => {
+    // "That isn't a callable" is the server answering, not failing — the loop should not retry it.
+    const service = new LspService({
+      workspaceDir: "/ws",
+      isAvailable: () => true,
+      createSession: (): LspSession => {
+        const stub = {
+          requestForFile: () => Promise.resolve({ answered: true, result: [] }),
+          request: () => Promise.resolve({ answered: true, result: [] }),
+          diagnostics: () => Promise.resolve({ available: true, diagnostics: [] }),
+          urisWithDiagnostics: () => [],
+          close: () => Promise.resolve(),
+        };
+        return stub as unknown as LspSession;
+      },
+    });
+    const result = await service.calls("/ws/a.ts", { line: 1, character: 1 }, "incoming");
+    expect(result).toEqual({ answered: true, value: [] });
+  });
+
   it("a session close failure never propagates out of the service close (best-effort teardown)", async () => {
     const service = new LspService({
       workspaceDir: "/ws",

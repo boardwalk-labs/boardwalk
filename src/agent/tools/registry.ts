@@ -6,8 +6,9 @@
 // can already read, edit, search, and run commands in the run's workspace. `builtins` SCOPES that
 // set:
 //   - "all"        → every built-in this engine provides (sandbox tools, the engine-native
-//                    `diagnostics`, and whichever host-backed tools have a backend).
-//   - "read-only"  → the non-mutating set: read, ls, grep, glob, diagnostics, clock, todo, webfetch, web_search.
+//                    `diagnostics` + `navigate`, and whichever host-backed tools have a backend).
+//   - "read-only"  → the non-mutating set: read, ls, grep, glob, diagnostics, navigate, clock, todo,
+//                    webfetch, web_search.
 //   - "none"       → no built-ins; the leaf has only its inline ToolDefs.
 //   - string[]     → exactly those built-in names; an UNKNOWN name fails loudly (UNSUPPORTED),
 //                    because an explicit selection naming a tool the engine doesn't have is a bug
@@ -15,9 +16,9 @@
 //
 // The default-on "all"/"read-only"/"none" paths intentionally do NOT error on a backend-gated tool
 // whose backend is absent — they just don't include it (the engine advertises what it can run). The
-// engine-native `diagnostics` is present whenever the run has an LspService (always, in practice);
-// it then degrades per-file when no language server is installed. Only an EXPLICIT name list fails
-// on an unknown name.
+// engine-native `diagnostics`/`navigate` are present whenever the run has an LspService (always, in
+// practice); they then degrade per-file when no language server is installed. Only an EXPLICIT name
+// list fails on an unknown name.
 
 import { z } from "zod";
 import type { AgentOptions } from "@boardwalk-labs/workflow";
@@ -28,6 +29,7 @@ import { applyPatchTool } from "./apply_patch.js";
 import { bashTool } from "./bash.js";
 import { clockTool } from "./clock.js";
 import { diagnosticsTool } from "./diagnostics.js";
+import { navigateTool } from "./navigate.js";
 import { todoTool } from "./todo.js";
 import { editTool, globTool, grepTool, lsTool, readTool, writeTool } from "./fs_tools.js";
 import { hostBackedTools, HOST_BACKED_TOOL_NAMES, type ToolHost } from "./host_tools.js";
@@ -39,6 +41,7 @@ export const READ_ONLY_BUILTIN_NAMES: readonly string[] = [
   "grep",
   "glob",
   "diagnostics",
+  "navigate",
   "clock",
   "todo",
   "webfetch",
@@ -72,6 +75,7 @@ export const ALL_BUILTIN_NAMES: readonly string[] = [
   "bash",
   "apply_patch",
   "diagnostics",
+  "navigate",
   "clock",
   "todo",
   ...HOST_BACKED_TOOL_NAMES,
@@ -108,10 +112,11 @@ function registry(ctx: BuiltinContext): Map<string, ExecutableTool> {
   ]) {
     tools.set(tool.name, tool);
   }
-  // The engine-native `diagnostics` tool is present whenever the run wired an LspService (it then
-  // degrades per-file when no language server is installed — best-effort, never an error).
+  // The engine-native language-server tools are present whenever the run wired an LspService (they
+  // then degrade per-file when no language server is installed — best-effort, never an error).
   if (lsp !== undefined) {
     tools.set("diagnostics", diagnosticsTool(ctx.workspaceDir, lsp));
+    tools.set("navigate", navigateTool(ctx.workspaceDir, lsp));
   }
   for (const [name, tool] of hostBackedTools(ctx.host)) {
     tools.set(name, tool);

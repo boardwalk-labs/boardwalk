@@ -29,6 +29,18 @@ export type DiagnosticSeverity = "error" | "warning" | "information" | "hint";
 /** Why a client is unusable, so the service can degrade with a clear (never alarming) note. */
 export type LspClientStatus = "ready" | "spawn-failed" | "exited";
 
+/**
+ * A request that exceeded its deadline, as opposed to one that failed on a dead transport. The two
+ * are worth telling apart: a timeout usually means the server is still indexing and the SAME query
+ * will succeed shortly, so the caller can say "retry" instead of "no results".
+ */
+export class LspTimeoutError extends Error {
+  constructor(method: string, timeoutMs: number) {
+    super(`LSP request "${method}" timed out after ${String(timeoutMs)}ms`);
+    this.name = "LspTimeoutError";
+  }
+}
+
 export interface LspClientOptions {
   command: string;
   args?: readonly string[];
@@ -36,6 +48,12 @@ export interface LspClientOptions {
   workspaceDir: string;
   /** Per-request timeout; a server that never answers must not hold the run. */
   requestTimeoutMs: number;
+  /**
+   * Workspace settings keyed by LSP configuration section, used to answer the server's
+   * `workspace/configuration` requests. Absent sections answer `null`, which every server treats as
+   * "no configuration, use your defaults".
+   */
+  settings?: Record<string, unknown>;
 }
 
 interface Pending {
@@ -53,6 +71,8 @@ export class LspClient {
   private readonly child: ChildProcess;
   private readonly decoder = new FrameDecoder();
   private readonly requestTimeoutMs: number;
+  /** Workspace settings by configuration section, served on `workspace/configuration`. */
+  private readonly settings: Record<string, unknown>;
   private readonly pending = new Map<number, Pending>();
   /** Latest published diagnostics per document URI (publishDiagnostics REPLACES the prior set). */
   private readonly diagnostics = new Map<string, Diagnostic[]>();
@@ -64,6 +84,7 @@ export class LspClient {
 
   constructor(opts: LspClientOptions) {
     this.requestTimeoutMs = opts.requestTimeoutMs;
+    this.settings = opts.settings ?? {};
     // stderr is inherited so a server's own diagnostics land in the run log like any other program
     // output (matching the MCP stdio transport); we never parse it.
     this.child = spawn(opts.command, [...(opts.args ?? [])], {
@@ -81,17 +102,22 @@ export class LspClient {
     return this.statusValue;
   }
 
-  /** Send a request and resolve with its (untrusted) result; rejects on timeout/dead transport. */
-  request(method: string, params?: unknown): Promise<unknown> {
+  /**
+   * Send a request and resolve with its (untrusted) result; rejects with LspTimeoutError on a
+   * deadline miss and a plain Error on a dead transport. `timeoutMs` overrides the client default
+   * for calls that can legitimately take longer than a handshake (navigation on a cold index).
+   */
+  request(method: string, params?: unknown, timeoutMs?: number): Promise<unknown> {
     if (this.statusValue !== "ready") {
       return Promise.reject(new Error(`language server is ${this.statusValue}`));
     }
+    const deadline = timeoutMs ?? this.requestTimeoutMs;
     const id = this.nextId++;
     const promise = new Promise<unknown>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error(`LSP request "${method}" timed out`));
-      }, this.requestTimeoutMs);
+        reject(new LspTimeoutError(method, deadline));
+      }, deadline);
       this.pending.set(id, { resolve, reject, timer });
     });
     this.write({ jsonrpc: "2.0", id, method, ...(params !== undefined ? { params } : {}) });
@@ -180,15 +206,26 @@ export class LspClient {
     const id = frame["id"];
     const method = frame["method"];
 
-    // A server→client request (the few servers that ask for config/registration): answer "method
-    // not found" so the server isn't left hanging, exactly as the MCP client does. We implement none.
+    // A server→client request. We answer the three every real server sends and refuse the rest, so
+    // the server is never left hanging. `workspace/configuration` is the load-bearing one: it is how
+    // pyright asks which Python interpreter to resolve imports against, and answering "method not
+    // found" there makes it guess — the difference between clean diagnostics and reportMissingImports
+    // on every `import pandas`.
     if (typeof method === "string") {
       if (typeof id === "number" || typeof id === "string") {
-        this.write({
-          jsonrpc: "2.0",
-          id,
-          error: { code: -32601, message: "client supports no server-initiated requests" },
-        });
+        if (method === "workspace/configuration") {
+          this.write({ jsonrpc: "2.0", id, result: this.configurationFor(frame["params"]) });
+        } else if (NO_OP_SERVER_REQUESTS.has(method)) {
+          // Capability registration + progress tokens: acknowledging costs nothing and keeps servers
+          // that gate work behind them moving. We honor no dynamic registrations either way.
+          this.write({ jsonrpc: "2.0", id, result: null });
+        } else {
+          this.write({
+            jsonrpc: "2.0",
+            id,
+            error: { code: -32601, message: "client supports no server-initiated requests" },
+          });
+        }
       }
       if (method === "textDocument/publishDiagnostics") this.onPublishDiagnostics(frame["params"]);
       return;
@@ -204,6 +241,26 @@ export class LspClient {
     } else {
       settle.resolve(frame["result"]);
     }
+  }
+
+  /**
+   * Answer a `workspace/configuration` request: one value per requested item, in order (the spec
+   * requires positional alignment). A section is a dotted path into our settings — `python.analysis`
+   * drills two levels — and an unknown section answers `null`, meaning "use your defaults".
+   */
+  private configurationFor(params: unknown): unknown[] {
+    const items = readItems(params);
+    return items.map((item) => {
+      const section = typeof item["section"] === "string" ? item["section"] : undefined;
+      // No section means "the whole client configuration", which is exactly our settings object.
+      if (section === undefined) return this.settings;
+      let value: unknown = this.settings;
+      for (const key of section.split(".")) {
+        if (typeof value !== "object" || value === null) return null;
+        value = (value as Record<string, unknown>)[key];
+      }
+      return value ?? null;
+    });
   }
 
   private onPublishDiagnostics(params: unknown): void {
@@ -247,6 +304,23 @@ export class LspClient {
 
 /** How long after `exit` we wait for a clean process exit before SIGKILL. */
 const SHUTDOWN_EXIT_GRACE_MS = 2_000;
+
+/** Server→client requests we acknowledge with `null` rather than refuse (see handleInbound). */
+const NO_OP_SERVER_REQUESTS = new Set([
+  "client/registerCapability",
+  "client/unregisterCapability",
+  "window/workDoneProgress/create",
+]);
+
+/** The `items` array of a `workspace/configuration` request, narrowed from untrusted server input. */
+function readItems(params: unknown): Record<string, unknown>[] {
+  if (typeof params !== "object" || params === null) return [];
+  const items = (params as Record<string, unknown>)["items"];
+  if (!Array.isArray(items)) return [];
+  return items.map((item) =>
+    typeof item === "object" && item !== null ? (item as Record<string, unknown>) : {},
+  );
+}
 
 const LSP_SEVERITY: Record<number, DiagnosticSeverity> = {
   1: "error",

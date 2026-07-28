@@ -13,7 +13,7 @@
 import { existsSync, statSync } from "node:fs";
 import { EngineError } from "../../errors.js";
 import type { LspService } from "../lsp/index.js";
-import { renderDiagnostics } from "../lsp/index.js";
+import { fileUriToPath, renderDiagnostics } from "../lsp/index.js";
 import type { ExecutableTool } from "../tools.js";
 import { containedPath, workspaceRelative } from "./sandbox.js";
 
@@ -59,16 +59,6 @@ export function diagnosticsTool(workspaceDir: string, lsp: LspService): Executab
       return renderDiagnostics(path, result.diagnostics);
     },
   };
-}
-
-/** Decode a file:// URI back to a filesystem path (the inverse of pathToFileURL for display). */
-function fileUriToPath(uri: string): string {
-  if (!uri.startsWith("file://")) return uri;
-  try {
-    return decodeURIComponent(new URL(uri).pathname);
-  } catch {
-    return uri;
-  }
 }
 
 function requireString(input: Record<string, unknown>, key: string): string {

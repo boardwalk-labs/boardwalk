@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
-// How diagnostics are rendered into model-bound tool text — shared by the diagnostics-after-edit
-// append (fs_tools) and the `diagnostics` built-in tool so both speak the same compact format:
-// `<severity> <path>:<line> <message> [<source>]`, capped so one query can't flood model context.
+// How language-server results are rendered into model-bound tool text — shared by the
+// diagnostics-after-edit append (fs_tools), the `diagnostics` built-in, and the `navigate` built-in
+// so they all speak one compact format. Diagnostics render as
+// `<severity> <path>:<line> <message> [<source>]`; navigation results as `<path>:<line>:<col>  <text>`.
+// Both are capped: a symbol with four hundred references must not flood model context.
 
 import type { Diagnostic } from "./client.js";
 
 /** Cap on diagnostics rendered per file — a file with hundreds of errors can't flood the context. */
 export const MAX_RENDERED_DIAGNOSTICS = 50;
+
+/** Cap on navigation results rendered per query, for the same reason. */
+export const MAX_RENDERED_LOCATIONS = 50;
 
 /** Order errors first, then by line, so the most actionable diagnostics survive the cap. */
 const SEVERITY_RANK: Record<Diagnostic["severity"], number> = {
@@ -37,6 +42,38 @@ export function renderDiagnostics(path: string, diagnostics: readonly Diagnostic
     diagnostics.length > MAX_RENDERED_DIAGNOSTICS
       ? `\n…[${String(diagnostics.length - MAX_RENDERED_DIAGNOSTICS)} more diagnostics truncated]`
       : "";
+  return `${header}\n${lines.join("\n")}${note}`;
+}
+
+/** One navigation result: where it is, plus the text that explains what it is. */
+export interface RenderedLocation {
+  /** Workspace-relative path — never the absolute workspace root. */
+  path: string;
+  line: number;
+  character: number;
+  /**
+   * The trailing column: a symbol's `kind name`, or the source line at a reference. Blank when the
+   * file couldn't be read, which renders as a bare location rather than a dangling separator.
+   */
+  text?: string;
+}
+
+/**
+ * Render navigation results as `<path>:<line>:<col>  <text>` under a summary header. The location
+ * leads every line because that is what the model acts on next — it feeds straight back into `read`.
+ */
+export function renderLocations(summary: string, locations: readonly RenderedLocation[]): string {
+  if (locations.length === 0) return `No results for ${summary}.`;
+  const shown = locations.slice(0, MAX_RENDERED_LOCATIONS);
+  const lines = shown.map((entry) => {
+    const at = `${entry.path}:${String(entry.line)}:${String(entry.character)}`;
+    return entry.text !== undefined && entry.text.length > 0 ? `${at}  ${entry.text}` : at;
+  });
+  const note =
+    locations.length > MAX_RENDERED_LOCATIONS
+      ? `\n…[${String(locations.length - MAX_RENDERED_LOCATIONS)} more results truncated]`
+      : "";
+  const header = `${plural(locations.length, "result")} for ${summary}:`;
   return `${header}\n${lines.join("\n")}${note}`;
 }
 

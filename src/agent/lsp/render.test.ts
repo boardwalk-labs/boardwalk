@@ -2,7 +2,13 @@
 
 import { describe, expect, it } from "vitest";
 import type { Diagnostic } from "./client.js";
-import { MAX_RENDERED_DIAGNOSTICS, renderDiagnostics } from "./render.js";
+import {
+  MAX_RENDERED_DIAGNOSTICS,
+  MAX_RENDERED_LOCATIONS,
+  renderDiagnostics,
+  renderLocations,
+  type RenderedLocation,
+} from "./render.js";
 
 describe("renderDiagnostics", () => {
   it("renders a clean file as a single 'no diagnostics' line", () => {
@@ -47,5 +53,36 @@ describe("renderDiagnostics", () => {
     const out = renderDiagnostics("a.ts", [{ line: 1, severity: "warning", message: "m" }]);
     expect(out).toContain("warning a.ts:1 m");
     expect(out).not.toContain("[");
+  });
+});
+
+describe("renderLocations", () => {
+  it("leads each line with path:line:col, followed by the explaining text", () => {
+    const out = renderLocations("references to `parse`", [
+      { path: "src/a.ts", line: 12, character: 7, text: "const out = parse(raw)" },
+    ]);
+    expect(out).toBe("1 result for references to `parse`:\nsrc/a.ts:12:7  const out = parse(raw)");
+  });
+
+  it("renders a bare location when there is no text (an unreadable source file)", () => {
+    const out = renderLocations("definition of `x`", [{ path: "src/a.ts", line: 1, character: 1 }]);
+    expect(out).toContain("src/a.ts:1:1");
+    expect(out).not.toContain("  "); // no dangling separator with nothing after it
+  });
+
+  it("reports an empty answer as an explicit no-results line", () => {
+    expect(renderLocations("references to `x`", [])).toBe("No results for references to `x`.");
+  });
+
+  it("caps the rendered set while the header keeps the FULL count", () => {
+    const many: RenderedLocation[] = Array.from({ length: MAX_RENDERED_LOCATIONS + 3 }, (_, i) => ({
+      path: "src/a.ts",
+      line: i + 1,
+      character: 1,
+    }));
+    const out = renderLocations("references to `x`", many);
+    expect(out).toContain(`${String(MAX_RENDERED_LOCATIONS + 3)} results for`);
+    expect(out).toContain("…[3 more results truncated]");
+    expect(out.split("\n")).toHaveLength(MAX_RENDERED_LOCATIONS + 2); // header + capped rows + note
   });
 });

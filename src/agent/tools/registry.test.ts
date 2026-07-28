@@ -42,7 +42,7 @@ function namesNoLsp(builtins: Parameters<typeof selectBuiltins>[0]): string[] {
 }
 
 describe("selectBuiltins", () => {
-  it('defaults to "all" — sandbox built-ins + engine-native diagnostics (no host ⇒ no host-backed tools)', () => {
+  it('defaults to "all" — sandbox built-ins + the engine-native LSP tools (no host ⇒ no host-backed tools)', () => {
     expect(names(undefined, undefined)).toEqual(
       [
         "apply_patch",
@@ -53,6 +53,7 @@ describe("selectBuiltins", () => {
         "glob",
         "grep",
         "ls",
+        "navigate",
         "read",
         "todo",
         "write",
@@ -90,9 +91,9 @@ describe("selectBuiltins", () => {
     // With a full host + LSP service, all read-only names resolve.
     expect(names("read-only", fullHost)).toEqual([...READ_ONLY_BUILTIN_NAMES].sort());
     // Without a host (but with the LSP service), the host-backed read-only tools drop out; the
-    // sandbox ones plus the engine-native diagnostics remain.
+    // sandbox ones plus the engine-native diagnostics + navigate remain.
     expect(names("read-only", undefined)).toEqual(
-      ["clock", "diagnostics", "glob", "grep", "ls", "read", "todo"].sort(),
+      ["clock", "diagnostics", "glob", "grep", "ls", "navigate", "read", "todo"].sort(),
     );
     // It never includes a mutating tool (http can POST/DELETE, so it's excluded too).
     for (const mutating of ["write", "edit", "apply_patch", "bash", "artifacts", "http"]) {
