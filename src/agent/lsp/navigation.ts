@@ -3,7 +3,7 @@
 // Parsing of the language server's NAVIGATION results into the shapes the `navigate` tool renders.
 //
 // A language server is a separate process we do not control, so its replies are external input and
-// are parsed with Zod rather than cast (CODE_QUALITY §2.1). Arrays are parsed ELEMENT-WISE on
+// are parsed with Zod rather than cast. Arrays are parsed ELEMENT-WISE on
 // purpose: one oddly-shaped entry among three hundred references should cost that entry, not the
 // whole answer. Anything unparseable degrades to "no result", never an error.
 //
