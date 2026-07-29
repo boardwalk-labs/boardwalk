@@ -92,6 +92,108 @@ describe("HttpTransport — sessions", () => {
   });
 });
 
+// A stateful server may retire a session whenever it likes — reaping one whose stream went idle is
+// routine, and an agent leaf that pauses to think between two tool calls trips it every time. The
+// spec's answer is a fresh InitializeRequest, so an expiry has to be invisible to the caller
+// rather than surfacing as a tool failure the model can only retry into.
+describe("HttpTransport — session expiry", () => {
+  it("re-handshakes and replays the call when the server retires the session", async () => {
+    const server = await fakeServer({ sessionId: "sess" });
+    const { connection } = connect(server);
+    await connection.initialize();
+    await connection.callTool("greet", { who: "before" });
+
+    server.expireSessions();
+    await expect(connection.callTool("greet", { who: "after" })).resolves.toEqual({
+      content: "hello after",
+      isError: false,
+    });
+
+    // A second session was opened, and the replayed call carried the NEW id, not the dead one.
+    expect(server.issuedSessions).toEqual(["sess", "sess-2"]);
+    const calls = server.requests.filter((r) => r.rpcMethod === "tools/call");
+    expect(calls.at(-1)?.headers["mcp-session-id"]).toBe("sess-2");
+  });
+
+  it("re-handshakes for tools/list too, so a leaf can start after an expiry", async () => {
+    const server = await fakeServer({ sessionId: "sess" });
+    const { connection } = connect(server);
+    await connection.initialize();
+    server.expireSessions();
+
+    await expect(connection.listTools()).resolves.toEqual([
+      { name: "greet", description: "fake tool greet", inputSchema: { type: "object" } },
+    ]);
+    expect(server.issuedSessions).toEqual(["sess", "sess-2"]);
+  });
+
+  it("DELETEs the session it actually holds after recovering", async () => {
+    const server = await fakeServer({ sessionId: "sess" });
+    const { connection } = connect(server);
+    await connection.initialize();
+    server.expireSessions();
+    await connection.callTool("greet", { who: "x" });
+    await connection.close();
+
+    const deleteRequest = server.requests.find((r) => r.httpMethod === "DELETE");
+    expect(deleteRequest?.headers["mcp-session-id"]).toBe("sess-2");
+  });
+
+  it("gives up after one retry rather than looping on a server that keeps expiring", async () => {
+    // A server that hands out a session and then rejects every request made with it. Driven by a
+    // stub rather than a timer so the pathological case is exact, not a race.
+    let initializes = 0;
+    const transport = new HttpTransport({
+      serverName: "srv",
+      url: "http://127.0.0.1:1/mcp",
+      fetchImpl: (_url, init) => {
+        // The transport always sends a JSON string body; narrow rather than stringify a BodyInit.
+        const body = typeof init?.body === "string" ? init.body : "{}";
+        const message = JSON.parse(body) as { id?: number; method?: string };
+        if (message.id === undefined) return Promise.resolve(new Response(null, { status: 202 }));
+        if (message.method === "initialize") {
+          initializes += 1;
+          const result = {
+            jsonrpc: "2.0",
+            id: message.id,
+            result: { protocolVersion: "2025-06-18", capabilities: {}, serverInfo: { name: "s" } },
+          };
+          return Promise.resolve(
+            new Response(JSON.stringify(result), {
+              status: 200,
+              headers: { "content-type": "application/json", "mcp-session-id": "always-stale" },
+            }),
+          );
+        }
+        return Promise.resolve(new Response("unknown session", { status: 404 }));
+      },
+    });
+    const connection = new McpConnection(transport, { serverName: "srv", timeoutMs: 10_000 });
+    await connection.initialize();
+
+    await expect(connection.callTool("greet", { who: "x" })).rejects.toThrow(/expired the session/);
+    // The original handshake plus exactly one recovery — never a loop.
+    expect(initializes).toBe(2);
+  });
+
+  it("leaves a 404 with no session in play as an ordinary error", async () => {
+    // Nothing has been established yet, so a 404 means the URL is wrong. Re-handshaking would only
+    // hide that behind a second identical failure, so this must stay a plain provider error.
+    let calls = 0;
+    const transport = new HttpTransport({
+      serverName: "srv",
+      url: "http://127.0.0.1:1/mcp",
+      fetchImpl: () => {
+        calls += 1;
+        return Promise.resolve(new Response("no such endpoint", { status: 404 }));
+      },
+    });
+    const connection = new McpConnection(transport, { serverName: "srv", timeoutMs: 10_000 });
+    await expect(connection.initialize()).rejects.toBeInstanceOf(EngineError);
+    expect(calls).toBe(1); // not retried
+  });
+});
+
 describe("HttpTransport — 401 handling", () => {
   it("on 401 asks the hook (no failed token the first time) and retries with the bearer", async () => {
     const validTokens = new Set(["good-token"]);

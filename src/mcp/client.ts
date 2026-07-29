@@ -9,7 +9,7 @@
 import { z } from "zod";
 import type { ContentPart } from "../agent/conversation.js";
 import { EngineError } from "../errors.js";
-import { JsonRpcClient, type McpTransport } from "./jsonrpc.js";
+import { JsonRpcClient, McpSessionExpiredError, type McpTransport } from "./jsonrpc.js";
 
 /**
  * Protocol revisions this client speaks, newest first. We OFFER the newest; a server may
@@ -116,8 +116,36 @@ export class McpConnection {
     await this.rpc.notify("notifications/initialized");
   }
 
+  /**
+   * Run a request, and if the server retired the session underneath it, re-handshake and run it
+   * once more. Recovery lives here because the fix the spec prescribes for an expired session is a
+   * fresh InitializeRequest, and `initialize` is this layer's job — the transport can only report
+   * the condition (see {@link McpSessionExpiredError}).
+   *
+   * Exactly ONE retry. A server that expires the session it just issued is broken in a way retrying
+   * cannot fix, and a loop there would burn a leaf's whole turn budget on handshakes. Callers get
+   * the same result they would have had, so an expiry between two tool calls is invisible to the
+   * model instead of arriving as a tool failure it can only retry into.
+   */
+  private async withSessionRecovery<T>(attempt: () => Promise<T>): Promise<T> {
+    try {
+      return await attempt();
+    } catch (err) {
+      if (!(err instanceof McpSessionExpiredError)) throw err;
+      // The transport already cleared the dead id, so this handshake opens a new session.
+      await this.initialize();
+      return await attempt();
+    }
+  }
+
   /** Every tool the server advertises, following nextCursor pagination to the end. */
   async listTools(): Promise<McpToolInfo[]> {
+    // The whole walk retries, not each page: a cursor belongs to the session that issued it, so
+    // resuming a half-finished pagination against a new session would be meaningless.
+    return await this.withSessionRecovery(() => this.listToolsOnce());
+  }
+
+  private async listToolsOnce(): Promise<McpToolInfo[]> {
     const tools: McpToolInfo[] = [];
     let cursor: string | undefined;
     for (let page = 0; page < MAX_TOOL_PAGES; page++) {
@@ -151,6 +179,10 @@ export class McpConnection {
    *  (a vision tool like a browser `screenshot` is otherwise dropped to `[image]`). Any other
    *  non-text block still degrades to a `[type]` placeholder. */
   async callTool(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
+    return await this.withSessionRecovery(() => this.callToolOnce(name, args));
+  }
+
+  private async callToolOnce(name: string, args: Record<string, unknown>): Promise<McpCallResult> {
     const raw = await this.rpc.request("tools/call", { name, arguments: args });
     const parsed = callToolResultSchema.safeParse(raw);
     if (!parsed.success) {

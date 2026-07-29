@@ -3,6 +3,24 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## 0.3.4
+
+### Fixed
+
+- **An MCP server that retires a session no longer breaks the leaf using it.** A stateful
+  streamable-HTTP server may drop a session at any time (reaping one whose stream went idle is
+  routine), and the spec's signal is `404` to any request still carrying it. The transport treated
+  that as a terminal `PROVIDER_ERROR`, so the tool call failed, the model retried into the same
+  wall, and the leaf died on the no-progress guard. Per spec rev 2025-06-18 §Session Management the
+  client must open a new session instead: the transport now forgets the dead id and reports
+  `McpSessionExpiredError`, and `McpConnection` re-runs the handshake and replays the request once.
+  Recovery is invisible to the model, and bounded at one retry so a server that keeps expiring
+  fails loudly rather than looping.
+
+  This bit hardest on the browser tier, where an agent pausing to think between two `browser_*`
+  calls idles long enough to be reaped, but it is not browser-specific: it applies to every
+  streamable-HTTP MCP server.
+
 ## 0.3.3
 
 ### Changed

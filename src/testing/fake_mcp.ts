@@ -22,7 +22,11 @@ export interface FakeMcpOptions {
   tools?: FakeMcpTool[];
   /** Reply in SSE framing instead of a single JSON body. */
   sse?: boolean;
-  /** Issue this session id at initialize and require it on every later request (404 if not). */
+  /**
+   * Issue this session id at initialize and require it on every later request (404 if not). A
+   * re-initialize mints a fresh id (`<sessionId>-2`, `-3`, …), so a test can drive the
+   * expire-then-recover path a real stateful server puts a client through.
+   */
   sessionId?: string;
   /** tools/list page size — set below the tool count to force nextCursor pagination. */
   pageSize?: number;
@@ -44,6 +48,13 @@ export interface FakeMcpServer {
   requests: RecordedMcpRequest[];
   /** Session-teardown DELETEs received. */
   deletes: number;
+  /** Session ids handed out at initialize, in order. */
+  issuedSessions: readonly string[];
+  /**
+   * Drop every live session, so the next request carrying one gets 404 — what a stateful
+   * streamable-HTTP server does when it reaps a session whose stream went idle.
+   */
+  expireSessions(): void;
   close(): Promise<void>;
 }
 
@@ -66,6 +77,10 @@ export function startFakeMcpServer(opts: FakeMcpOptions = {}): Promise<FakeMcpSe
   const protocolVersion = opts.protocolVersion ?? "2025-06-18";
   const requests: RecordedMcpRequest[] = [];
   let deletes = 0;
+  // Sessions the server currently honours, and every id it has ever issued. Two collections
+  // because expiry must reject a live id without forgetting that it was handed out.
+  const liveSessions = new Set<string>();
+  const issuedSessions: string[] = [];
 
   const server = http.createServer((req, res) => {
     let body = "";
@@ -115,8 +130,9 @@ export function startFakeMcpServer(opts: FakeMcpOptions = {}): Promise<FakeMcpSe
       if (
         opts.sessionId !== undefined &&
         msg.method !== "initialize" &&
-        req.headers["mcp-session-id"] !== opts.sessionId
+        !liveSessions.has(String(req.headers["mcp-session-id"] ?? ""))
       ) {
+        // The spec's expiry signal: 404 to a request carrying a session the server no longer holds.
         res.writeHead(404).end("unknown session");
         return;
       }
@@ -129,7 +145,14 @@ export function startFakeMcpServer(opts: FakeMcpOptions = {}): Promise<FakeMcpSe
       const reply = handle(msg.method, msg.params, msg.id);
       const headers: Record<string, string> = {};
       if (opts.sessionId !== undefined && msg.method === "initialize") {
-        headers["mcp-session-id"] = opts.sessionId;
+        // The first session is exactly the configured id; each re-initialize mints the next.
+        const id =
+          issuedSessions.length === 0
+            ? opts.sessionId
+            : `${opts.sessionId}-${String(issuedSessions.length + 1)}`;
+        issuedSessions.push(id);
+        liveSessions.add(id);
+        headers["mcp-session-id"] = id;
       }
       if (opts.sse === true) {
         res.writeHead(200, { ...headers, "content-type": "text/event-stream" });
@@ -201,6 +224,8 @@ export function startFakeMcpServer(opts: FakeMcpOptions = {}): Promise<FakeMcpSe
         get deletes(): number {
           return deletes;
         },
+        issuedSessions,
+        expireSessions: () => liveSessions.clear(),
         close: () => new Promise((r) => server.close(() => r())),
       });
     });

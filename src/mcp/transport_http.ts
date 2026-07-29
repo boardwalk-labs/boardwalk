@@ -10,7 +10,7 @@
 
 import { EngineError } from "../errors.js";
 import { sseDataLines } from "../agent/sse.js";
-import type { JsonRpcOutbound, McpTransport } from "./jsonrpc.js";
+import { McpSessionExpiredError, type JsonRpcOutbound, type McpTransport } from "./jsonrpc.js";
 
 export interface HttpTransportOptions {
   /** The MCP server's name from the agent() call — names the endpoint in every error. */
@@ -136,6 +136,15 @@ export class HttpTransport implements McpTransport {
     if (session !== null && session.length > 0) this.sessionId = session;
 
     if (response.status === 202 || response.status === 204) return; // accepted notification
+    // A 404 answering a request that CARRIED a session id is the spec's session-expiry signal
+    // (rev 2025-06-18 §Session Management): the server retired it, and the client must open a new
+    // one rather than treat the call as failed. Forget it here so the retry's initialize goes out
+    // session-less; the connection layer owns the re-handshake. A 404 with no session id in play
+    // is an ordinary wrong-URL error and falls through below.
+    if (response.status === 404 && this.sessionId !== null) {
+      this.sessionId = null;
+      throw new McpSessionExpiredError(this.serverName);
+    }
     if (!response.ok) {
       const detail = (await response.text()).slice(0, 300);
       throw new EngineError(

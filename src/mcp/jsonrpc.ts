@@ -29,6 +29,25 @@ export interface McpTransport {
   close(): Promise<void>;
 }
 
+/**
+ * The server dropped the session this transport was using, and the transport has already
+ * forgotten it — so the very next message will open a fresh one.
+ *
+ * A stateful streamable-HTTP server may retire a session at any time (reaping one whose stream
+ * went idle is the common case), and the spec's answer is 404 to any request still carrying it.
+ * That is RECOVERABLE, not fatal: the spec requires the client to start a new session with a
+ * fresh InitializeRequest. Only the connection layer can do that (the handshake is MCP, not
+ * framing), so the transport reports the condition and {@link import("./client.js").McpConnection}
+ * performs the recovery. Declared here, beside {@link McpTransport}, so the client depends on the
+ * transport CONTRACT rather than on one implementation.
+ */
+export class McpSessionExpiredError extends Error {
+  constructor(readonly serverName: string) {
+    super(`MCP server "${serverName}" expired the session.`);
+    this.name = "McpSessionExpiredError";
+  }
+}
+
 // One loose schema for every inbound frame; classification happens after validation. A frame
 // is a server request/notification (has `method`) or a response (has `id` + result/error).
 const inboundFrameSchema = z.looseObject({
