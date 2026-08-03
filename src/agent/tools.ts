@@ -78,6 +78,10 @@ export type {
   FetchResult,
   HttpRequestInput,
   ArtifactWriteResult,
+  DesktopScreenshot,
+  DesktopClickInput,
+  DesktopScrollInput,
+  DesktopDragInput,
 } from "./tools/host_tools.js";
 
 export interface ToolSetContext {

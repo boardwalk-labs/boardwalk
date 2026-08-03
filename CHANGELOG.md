@@ -3,6 +3,21 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
+## Unreleased
+
+### Added
+
+- **Desktop-tier built-ins: `screenshot`/`click`/`type`/`key`/`scroll`/`drag`.** Session-gated,
+  host-backed via six new optional `ToolHost` hooks (`desktopScreenshot`/`desktopClick`/
+  `desktopType`/`desktopKey`/`desktopScroll`/`desktopDrag`) — a host assembles them per leaf,
+  only when the call bound a desktop session. Raw screen coordinates only; `screenshot` returns
+  the image to the model (multimodal lane) plus the stored artifact ref in `event.data`, and is
+  the one desktop tool in the `"read-only"` set.
+- **Keep-last-3 image retention in the leaf.** Older image-bearing tool results collapse to a
+  text placeholder (`pruneStaleImages`) so a long screenshot loop doesn't drown its context —
+  the field-default WebVoyager policy. Applies to any image tool result (desktop screenshots,
+  MCP browser screenshots, `read` images); user attachments and documents are untouched.
+
 ## 0.3.4
 
 ### Fixed

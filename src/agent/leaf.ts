@@ -29,12 +29,13 @@ import {
   planCompaction,
 } from "./compaction.js";
 import { EngineError, type EngineErrorCode } from "../errors.js";
-import type {
-  ChatMessage,
-  ChatTurn,
-  ToolCallRequest,
-  ToolResultMessage,
-  ToolSpec,
+import {
+  pruneStaleImages,
+  type ChatMessage,
+  type ChatTurn,
+  type ToolCallRequest,
+  type ToolResultMessage,
+  type ToolSpec,
 } from "./conversation.js";
 import type { ProviderIo } from "./providers.js";
 import type { Redactor } from "./redact.js";
@@ -136,6 +137,10 @@ export const DEFAULT_MAX_ITERATIONS = 500;
  */
 const NO_PROGRESS_SOFT = 4;
 const NO_PROGRESS_HARD = 8;
+
+/** Image-bearing tool results kept in context (keep-last-N + a placeholder for older ones —
+ *  WebVoyager's field default is 3). See pruneStaleImages. */
+const KEEP_LAST_IMAGES = 3;
 const NO_PROGRESS_NUDGE_TEXT =
   "[No progress: your recent tool calls have surfaced nothing you hadn't already seen — you're " +
   "likely re-reading or re-searching the same things. Act on what you already know, try a materially " +
@@ -667,6 +672,7 @@ async function runLeafWithTools(
       totals,
     );
     messages.push({ role: "tool_results", results });
+    pruneStaleImages(messages, KEEP_LAST_IMAGES);
   } else {
     const schemaInstruction =
       opts?.schema === undefined
@@ -857,6 +863,7 @@ async function runToolLoop(
       totals,
     );
     messages.push({ role: "tool_results", results });
+    pruneStaleImages(messages, KEEP_LAST_IMAGES);
 
     // Consecutive-error guard: a turn where EVERY tool call failed made no progress. Track the run
     // of such turns; end the run at the hard threshold (spinning on failures, distinct or not), nudge

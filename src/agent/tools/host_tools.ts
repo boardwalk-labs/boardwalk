@@ -52,6 +52,34 @@ export interface ArtifactWriteResult {
   url: string;
 }
 
+/** A desktop screenshot: base64 PNG for the model, plus the stored artifact when the host dual-sinks. */
+export interface DesktopScreenshot {
+  data: string;
+  width: number;
+  height: number;
+  artifact?: ArtifactWriteResult;
+}
+
+/** Desktop pointer/keyboard inputs. Coordinates are screen pixels, origin top-left. */
+export interface DesktopClickInput {
+  x: number;
+  y: number;
+  button?: "left" | "right" | "middle";
+  clicks?: 1 | 2;
+}
+
+export interface DesktopScrollInput {
+  dx: number;
+  dy: number;
+  x?: number;
+  y?: number;
+}
+
+export interface DesktopDragInput {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+}
+
 /**
  * The infrastructure seam the host-backed built-ins call. Each hook is OPTIONAL: a backend that
  * omits one means that tool is unavailable on the engine (so it is never registered, and naming
@@ -72,6 +100,14 @@ export interface ToolHost {
     metadata?: Record<string, unknown>,
   ) => Promise<ArtifactWriteResult>;
   readArtifact?: (name: string) => Promise<string>;
+  // Desktop-tier hooks (see desktop_tools.ts). A host assembles them PER LEAF, only when the call
+  // bound a desktop session — so the tools are session-gated by construction, like any absent backend.
+  desktopScreenshot?: () => Promise<DesktopScreenshot>;
+  desktopClick?: (input: DesktopClickInput) => Promise<void>;
+  desktopType?: (input: { text: string; submit?: boolean }) => Promise<void>;
+  desktopKey?: (keys: string) => Promise<void>;
+  desktopScroll?: (input: DesktopScrollInput) => Promise<void>;
+  desktopDrag?: (input: DesktopDragInput) => Promise<void>;
 }
 
 /** Build the host-backed tools whose backend the host actually provides (others stay unregistered). */

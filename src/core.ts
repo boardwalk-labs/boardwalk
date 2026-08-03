@@ -53,6 +53,10 @@ export type {
   FetchResult,
   HttpRequestInput,
   ArtifactWriteResult,
+  DesktopScreenshot,
+  DesktopClickInput,
+  DesktopScrollInput,
+  DesktopDragInput,
 } from "./agent/tools.js";
 
 // ---- The engine-native LSP service backing the `diagnostics` built-in + diagnostics-after-edit.

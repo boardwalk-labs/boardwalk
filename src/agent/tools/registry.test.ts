@@ -13,13 +13,23 @@ import {
 } from "./registry.js";
 
 const WS = "/tmp/ws-not-touched"; // selection never touches the filesystem
-const fullHost: ToolHost = {
+const hostBackedHooks: ToolHost = {
   fetchUrl: () =>
     Promise.resolve({ status: 200, contentType: undefined, body: "", truncated: false }),
   httpRequest: () =>
     Promise.resolve({ status: 200, contentType: undefined, body: "", truncated: false }),
   webSearch: () => Promise.resolve([]),
   writeArtifact: () => Promise.resolve({ id: "1", name: "n", url: "u" }),
+};
+// The full host also binds a desktop session (its hooks present ⇒ the desktop tools register).
+const fullHost: ToolHost = {
+  ...hostBackedHooks,
+  desktopScreenshot: () => Promise.resolve({ data: "", width: 1, height: 1 }),
+  desktopClick: () => Promise.resolve(),
+  desktopType: () => Promise.resolve(),
+  desktopKey: () => Promise.resolve(),
+  desktopScroll: () => Promise.resolve(),
+  desktopDrag: () => Promise.resolve(),
 };
 
 // Selection never spawns anything; a bare LspService is enough to make `diagnostics` available.
@@ -61,8 +71,25 @@ describe("selectBuiltins", () => {
     );
   });
 
-  it('"all" with a full host + LSP service includes the host-backed tools too', () => {
+  it('"all" with a full host + LSP service includes the host-backed AND desktop tools', () => {
     expect(names("all", fullHost).sort()).toEqual([...ALL_BUILTIN_NAMES].sort());
+  });
+
+  it("without the desktop hooks (no bound desktop session), the desktop tools are absent", () => {
+    const selected = names("all", hostBackedHooks);
+    for (const name of ["screenshot", "click", "type", "key", "scroll", "drag"]) {
+      expect(selected).not.toContain(name);
+    }
+  });
+
+  it("an explicit desktop name without its hook fails loudly with the session hint", () => {
+    try {
+      selectBuiltins(["click"], { workspaceDir: WS, host: hostBackedHooks, lspService });
+      throw new Error("expected throw");
+    } catch (err) {
+      expect(err).toBeInstanceOf(EngineError);
+      expect(err instanceof EngineError ? (err.hint ?? "") : "").toContain("desktop session");
+    }
   });
 
   it("the engine-native diagnostics tool is omitted when the run has no LspService", () => {
@@ -95,10 +122,24 @@ describe("selectBuiltins", () => {
     expect(names("read-only", undefined)).toEqual(
       ["clock", "diagnostics", "glob", "grep", "ls", "navigate", "read", "todo"].sort(),
     );
-    // It never includes a mutating tool (http can POST/DELETE, so it's excluded too).
-    for (const mutating of ["write", "edit", "apply_patch", "bash", "artifacts", "http"]) {
+    // It never includes a mutating tool (http can POST/DELETE, so it's excluded too; a desktop
+    // session's input tools mutate the screen — only `screenshot` is read-only).
+    for (const mutating of [
+      "write",
+      "edit",
+      "apply_patch",
+      "bash",
+      "artifacts",
+      "http",
+      "click",
+      "type",
+      "key",
+      "scroll",
+      "drag",
+    ]) {
       expect(names("read-only", fullHost)).not.toContain(mutating);
     }
+    expect(names("read-only", fullHost)).toContain("screenshot");
   });
 
   it("an explicit subset selects exactly those", () => {

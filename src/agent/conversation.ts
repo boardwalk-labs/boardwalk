@@ -57,6 +57,55 @@ export interface ToolResultMessage {
   isError: boolean;
 }
 
+const IMAGE_PRUNED_TEXT =
+  "[image removed from context to save space; take a new screenshot if needed]";
+
+/**
+ * Replace image parts in all but the newest `keep` image-bearing tool results with a text
+ * placeholder — screenshots dominate a desktop leaf's context, and keep-last-N is the field
+ * default. The one deliberate exception to the loop's append-only cache discipline: the token
+ * savings dwarf the invalidated cache suffix.
+ */
+export function pruneStaleImages(messages: ChatMessage[], keep: number): void {
+  const bearing: { msg: number; result: number }[] = [];
+  messages.forEach((message, msgIdx) => {
+    if (message.role !== "tool_results") return;
+    message.results.forEach((result, resIdx) => {
+      if (typeof result.content === "string") return;
+      if (result.content.some(isImagePart)) bearing.push({ msg: msgIdx, result: resIdx });
+    });
+  });
+  const stale = bearing.slice(0, Math.max(0, bearing.length - keep));
+  if (stale.length === 0) return;
+  const staleByMsg = new Map<number, Set<number>>();
+  for (const { msg, result } of stale) {
+    const set = staleByMsg.get(msg) ?? new Set<number>();
+    set.add(result);
+    staleByMsg.set(msg, set);
+  }
+  for (const [msgIdx, resultIdxs] of staleByMsg) {
+    const message = messages[msgIdx];
+    if (message === undefined || message.role !== "tool_results") continue;
+    messages[msgIdx] = {
+      role: "tool_results",
+      results: message.results.map((result, resIdx) => {
+        if (!resultIdxs.has(resIdx) || typeof result.content === "string") return result;
+        return {
+          ...result,
+          content: result.content.map(
+            (part): ContentPart =>
+              isImagePart(part) ? { type: "text", text: IMAGE_PRUNED_TEXT } : part,
+          ),
+        };
+      }),
+    };
+  }
+}
+
+function isImagePart(part: ContentPart): boolean {
+  return part.type === "file" && part.file.mimeType.startsWith("image/");
+}
+
 /** One model turn: final text and/or tool-call requests, plus usage. */
 export interface ChatTurn {
   text: string;

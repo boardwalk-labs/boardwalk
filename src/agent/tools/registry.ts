@@ -31,6 +31,7 @@ import { clockTool } from "./clock.js";
 import { diagnosticsTool } from "./diagnostics.js";
 import { navigateTool } from "./navigate.js";
 import { todoTool } from "./todo.js";
+import { desktopTools, DESKTOP_TOOL_NAMES } from "./desktop_tools.js";
 import { editTool, globTool, grepTool, lsTool, readTool, writeTool } from "./fs_tools.js";
 import { hostBackedTools, HOST_BACKED_TOOL_NAMES, type ToolHost } from "./host_tools.js";
 
@@ -46,6 +47,7 @@ export const READ_ONLY_BUILTIN_NAMES: readonly string[] = [
   "todo",
   "webfetch",
   "web_search",
+  "screenshot",
 ];
 
 /**
@@ -79,6 +81,7 @@ export const ALL_BUILTIN_NAMES: readonly string[] = [
   "clock",
   "todo",
   ...HOST_BACKED_TOOL_NAMES,
+  ...DESKTOP_TOOL_NAMES,
 ];
 
 export interface BuiltinContext {
@@ -119,6 +122,10 @@ function registry(ctx: BuiltinContext): Map<string, ExecutableTool> {
     tools.set("navigate", navigateTool(ctx.workspaceDir, lsp));
   }
   for (const [name, tool] of hostBackedTools(ctx.host)) {
+    tools.set(name, tool);
+  }
+  // Session-gated: the host supplies desktop hooks only for a leaf with a bound desktop session.
+  for (const [name, tool] of desktopTools(ctx.host)) {
     tools.set(name, tool);
   }
   return tools;
@@ -244,6 +251,9 @@ export function runCodeSelected(builtins: AgentOptions["builtins"]): boolean {
 function knownHint(name: string): string {
   if (HOST_BACKED_TOOL_NAMES.includes(name)) {
     return `"${name}" is a host-backed built-in; this engine has no backend configured for it.`;
+  }
+  if (DESKTOP_TOOL_NAMES.includes(name)) {
+    return `"${name}" is a desktop-tier built-in; it needs agent({ session }) with a desktop session on a runner with the desktop tier.`;
   }
   return `Known built-ins: ${ALL_BUILTIN_NAMES.join(", ")}. Or define "${name}" inline as a ToolDef.`;
 }
