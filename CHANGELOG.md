@@ -3,7 +3,7 @@
 Notable changes to `@boardwalk-labs/engine` (and the `ghcr.io/boardwalk-labs/boardwalk` image).
 Pre-1.0, changes ship as patch releases.
 
-## Unreleased
+## 0.3.5
 
 ### Added
 
@@ -17,6 +17,12 @@ Pre-1.0, changes ship as patch releases.
   text placeholder (`pruneStaleImages`) so a long screenshot loop doesn't drown its context —
   the field-default WebVoyager policy. Applies to any image tool result (desktop screenshots,
   MCP browser screenshots, `read` images); user attachments and documents are untouched.
+
+### Changed
+
+- **`@boardwalk-labs/workflow` ^0.3.10.** The embedded host server fail-closes the new
+  `computer.openDesktop` / `computer.desktop.*` methods with a clear UNSUPPORTED (mirroring the
+  browser tier), and the embedded `sleep` accepts 0.3.9's duration strings (`"15m"`).
 
 ## 0.3.4
 

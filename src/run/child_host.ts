@@ -566,8 +566,30 @@ async function fetchWithCap(
   };
 }
 
-function sleepMs(arg: SleepArg): number {
+// Mirrors the SDK's duration grammar (sdk `parseDurationMs`, not exported): "90s" / "15m" / "48h".
+const SLEEP_DURATION_RE = /^\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)\s*$/i;
+const SLEEP_UNIT_MS: Readonly<Record<string, number>> = {
+  ms: 1,
+  s: 1000,
+  m: 60_000,
+  h: 3_600_000,
+  d: 86_400_000,
+};
+
+/** Exported for unit tests. */
+export function sleepMs(arg: SleepArg): number {
   if (typeof arg === "number") return arg;
+  if (typeof arg === "string") {
+    const m = SLEEP_DURATION_RE.exec(arg);
+    const mult = m?.[2] !== undefined ? SLEEP_UNIT_MS[m[2].toLowerCase()] : undefined;
+    if (m?.[1] === undefined || mult === undefined) {
+      throw new EngineError(
+        "VALIDATION",
+        `sleep("${arg}") is not a duration — use e.g. "90s", "15m", "48h".`,
+      );
+    }
+    return Math.round(Number(m[1]) * mult);
+  }
   if ("durationMs" in arg) return arg.durationMs;
   const until = arg.until instanceof Date ? arg.until.getTime() : Date.parse(arg.until);
   if (Number.isNaN(until)) {

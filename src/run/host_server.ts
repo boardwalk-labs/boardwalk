@@ -462,6 +462,11 @@ export class WorkflowHostServer {
         // Unreachable in practice (openBrowser above never hands out a session id), but a
         // hand-crafted call still gets the same clear refusal.
         throw browserUnsupported();
+      case "computer.openDesktop":
+      case "computer.desktop.screenshot":
+      case "computer.desktop.close":
+        // Same shape as the browser tier: no desktop backend on this engine, fail closed.
+        throw desktopUnsupported();
       case "shell": {
         const p = params as HostMethodParams<"shell">;
         return await caps.shell(p.cmd, pruneUndefined<ShellOptions>(p.opts));
@@ -554,6 +559,14 @@ function browserUnsupported(): EngineError {
     "UNSUPPORTED",
     "computer.openBrowser is not available on this engine (no browser backend).",
     "Run this workflow on an engine with computer use (the hosted platform), or drop the browser session.",
+  );
+}
+
+function desktopUnsupported(): EngineError {
+  return new EngineError(
+    "UNSUPPORTED",
+    "computer.openDesktop is not available on this engine (no desktop backend).",
+    "Run this workflow on a runner with the desktop tier (the hosted platform), or drop the desktop session.",
   );
 }
 
